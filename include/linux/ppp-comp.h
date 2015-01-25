@@ -1,44 +1,12 @@
 /*
  * ppp-comp.h - Definitions for doing PPP packet compression.
  *
- * Copyright (c) 1994 The Australian National University.
- * All rights reserved.
+ * Copyright 1994-1998 Paul Mackerras.
  *
- * Permission to use, copy, modify, and distribute this software and its
- * documentation is hereby granted, provided that the above copyright
- * notice appears in all copies.  This software is provided without any
- * warranty, express or implied. The Australian National University
- * makes no representations about the suitability of this software for
- * any purpose.
- *
- * IN NO EVENT SHALL THE AUSTRALIAN NATIONAL UNIVERSITY BE LIABLE TO ANY
- * PARTY FOR DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES
- * ARISING OUT OF THE USE OF THIS SOFTWARE AND ITS DOCUMENTATION, EVEN IF
- * THE AUSTRALIAN NATIONAL UNIVERSITY HAVE BEEN ADVISED OF THE POSSIBILITY
- * OF SUCH DAMAGE.
- *
- * THE AUSTRALIAN NATIONAL UNIVERSITY SPECIFICALLY DISCLAIMS ANY WARRANTIES,
- * INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY
- * AND FITNESS FOR A PARTICULAR PURPOSE.  THE SOFTWARE PROVIDED HEREUNDER IS
- * ON AN "AS IS" BASIS, AND THE AUSTRALIAN NATIONAL UNIVERSITY HAS NO
- * OBLIGATION TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS,
- * OR MODIFICATIONS.
- *
- * $Id: ppp-comp.h,v 1.6 1997/11/27 06:04:44 paulus Exp $
+ *  This program is free software; you can redistribute it and/or
+ *  modify it under the terms of the GNU General Public License
+ *  version 2 as published by the Free Software Foundation.
  */
-
-/*
- *  ==FILEVERSION 980319==
- *
- *  NOTE TO MAINTAINERS:
- *     If you modify this file at all, please set the above date.
- *     ppp-comp.h is shipped with a PPP distribution as well as with the kernel;
- *     if everyone increases the FILEVERSION number above, then scripts
- *     can do the right thing when deciding whether to install a new ppp-comp.h
- *     file.  Don't change the format of that line otherwise, so the
- *     installation script can recognize it.
- */
-
 #ifndef _NET_PPP_COMP_H
 #define _NET_PPP_COMP_H
 
@@ -111,6 +79,8 @@ struct compressor {
 
 	/* Used in locking compressor modules */
 	struct module *owner;
+	/* Extra skb space needed by the compressor algorithm */
+	unsigned int comp_extra;
 };
 
 /*
@@ -189,6 +159,13 @@ struct compressor {
 #define DEFLATE_METHOD(x)	((x) & 0x0F)
 #define DEFLATE_MAKE_OPT(w)	((((w) - 8) << 4) + DEFLATE_METHOD_VAL)
 #define DEFLATE_CHK_SEQUENCE	0
+
+/*
+ * Definitions for MPPE.
+ */
+
+#define CI_MPPE                18      /* config option for MPPE */
+#define CILEN_MPPE              6      /* length of config option */
 
 /*
  * Definitions for other, as yet unsupported, compression methods.

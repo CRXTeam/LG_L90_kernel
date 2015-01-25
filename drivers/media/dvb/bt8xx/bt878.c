@@ -1,34 +1,33 @@
 /*
  * bt878.c: part of the driver for the Pinnacle PCTV Sat DVB PCI card
  *
- * Copyright (C) 2002 Peter Hettkamp <peter.hettkamp@t-online.de>
+ * Copyright (C) 2002 Peter Hettkamp <peter.hettkamp@htp-tel.de>
  *
  * large parts based on the bttv driver
- * Copyright (C) 1996,97,98 Ralph  Metzler (rjkm@thp.uni-koeln.de)
- *                        & Marcus Metzler (mocm@thp.uni-koeln.de)
+ * Copyright (C) 1996,97,98 Ralph  Metzler (rjkm@metzlerbros.de)
+ *                        & Marcus Metzler (mocm@metzlerbros.de)
  * (c) 1999,2000 Gerd Knorr <kraxel@goldbach.in-berlin.de>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
  * as published by the Free Software Foundation; either version 2
  * of the License, or (at your option) any later version.
- * 
+ *
 
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
 
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  * Or, point your browser to http://www.gnu.org/copyleft/gpl.html
- * 
+ *
  */
 
 #include <linux/module.h>
-#include <linux/moduleparam.h>
 #include <linux/kernel.h>
 #include <linux/pci.h>
 #include <asm/io.h>
@@ -58,13 +57,11 @@ module_param_named(verbose, bt878_verbose, int, 0444);
 MODULE_PARM_DESC(verbose,
 		 "verbose startup messages, default is 1 (yes)");
 module_param_named(debug, bt878_debug, int, 0644);
-MODULE_PARM_DESC(debug, "Turn on/off debugging (default:off).");
+MODULE_PARM_DESC(debug, "Turn on/off debugging, default is 0 (off).");
 
 int bt878_num;
 struct bt878 bt878[BT878_MAX];
 
-EXPORT_SYMBOL(bt878_debug);
-EXPORT_SYMBOL(bt878_verbose);
 EXPORT_SYMBOL(bt878_num);
 EXPORT_SYMBOL(bt878);
 
@@ -78,7 +75,11 @@ EXPORT_SYMBOL(bt878);
 #if defined(dprintk)
 #undef dprintk
 #endif
-#define dprintk if(bt878_debug) printk
+#define dprintk(fmt, arg...) \
+	do { \
+		if (bt878_debug) \
+			printk(KERN_DEBUG fmt, ##arg); \
+	} while (0)
 
 static void bt878_mem_free(struct bt878 *bt)
 {
@@ -128,21 +129,21 @@ static int bt878_mem_alloc(struct bt878 *bt)
 }
 
 /* RISC instructions */
-#define RISC_WRITE        	(0x01 << 28)
-#define RISC_JUMP         	(0x07 << 28)
-#define RISC_SYNC         	(0x08 << 28)
+#define RISC_WRITE		(0x01 << 28)
+#define RISC_JUMP		(0x07 << 28)
+#define RISC_SYNC		(0x08 << 28)
 
 /* RISC bits */
-#define RISC_WR_SOL       	(1 << 27)
-#define RISC_WR_EOL       	(1 << 26)
-#define RISC_IRQ          	(1 << 24)
+#define RISC_WR_SOL		(1 << 27)
+#define RISC_WR_EOL		(1 << 26)
+#define RISC_IRQ		(1 << 24)
 #define RISC_STATUS(status)	((((~status) & 0x0F) << 20) | ((status & 0x0F) << 16))
-#define RISC_SYNC_RESYNC  	(1 << 15)
-#define RISC_SYNC_FM1     	0x06
-#define RISC_SYNC_VRO     	0x0C
+#define RISC_SYNC_RESYNC	(1 << 15)
+#define RISC_SYNC_FM1		0x06
+#define RISC_SYNC_VRO		0x0C
 
 #define RISC_FLUSH()		bt->risc_pos = 0
-#define RISC_INSTR(instr) 	bt->risc_cpu[bt->risc_pos++] = cpu_to_le32(instr)
+#define RISC_INSTR(instr)	bt->risc_cpu[bt->risc_pos++] = cpu_to_le32(instr)
 
 static int bt878_make_risc(struct bt878 *bt)
 {
@@ -157,7 +158,7 @@ static int bt878_make_risc(struct bt878 *bt)
 	}
 
 	if (bt->line_count > 255) {
-		printk("bt878: buffer size error!\n");
+		printk(KERN_ERR "bt878: buffer size error!\n");
 		return -EINVAL;
 	}
 	return 0;
@@ -173,7 +174,7 @@ static void bt878_risc_program(struct bt878 *bt, u32 op_sync_orin)
 	RISC_INSTR(RISC_SYNC | RISC_SYNC_FM1 | op_sync_orin);
 	RISC_INSTR(0);
 
-	dprintk("bt878: risc len lines %u, bytes per line %u\n", 
+	dprintk("bt878: risc len lines %u, bytes per line %u\n",
 			bt->line_count, bt->line_bytes);
 	for (line = 0; line < bt->line_count; line++) {
 		// At the beginning of every block we issue an IRQ with previous (finished) block number set
@@ -219,7 +220,7 @@ void bt878_start(struct bt878 *bt, u32 controlreg, u32 op_sync_orin,
 	controlreg &= ~0x1f;
 	controlreg |= 0x1b;
 
-	btwrite(cpu_to_le32(bt->risc_dma), BT878_ARISC_START);
+	btwrite(bt->risc_dma, BT878_ARISC_START);
 
 	/* original int mask had :
 	 *    6    2    8    4    0
@@ -228,14 +229,14 @@ void bt878_start(struct bt878 *bt, u32 controlreg, u32 op_sync_orin,
 	 * Hacked for DST to:
 	 * SCERR | OCERR | FDSR | FTRGT | FBUS | RISCI
 	 */
-	int_mask = BT878_ASCERR | BT878_AOCERR | BT878_APABORT | 
-		BT878_ARIPERR | BT878_APPERR | BT878_AFDSR | BT878_AFTRGT | 
+	int_mask = BT878_ASCERR | BT878_AOCERR | BT878_APABORT |
+		BT878_ARIPERR | BT878_APPERR | BT878_AFDSR | BT878_AFTRGT |
 		BT878_AFBUS | BT878_ARISCI;
 
 
 	/* ignore pesky bits */
 	int_mask &= ~irq_err_ignore;
-	
+
 	btwrite(int_mask, BT878_AINT_MASK);
 	btwrite(controlreg, BT878_AGPIO_DMA_CTL);
 }
@@ -268,7 +269,7 @@ EXPORT_SYMBOL(bt878_stop);
 /* Interrupt service routine */
 /*****************************/
 
-static irqreturn_t bt878_irq(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t bt878_irq(int irq, void *dev_id)
 {
 	u32 stat, astat, mask;
 	int count;
@@ -283,12 +284,13 @@ static irqreturn_t bt878_irq(int irq, void *dev_id, struct pt_regs *regs)
 		if (!(astat = (stat & mask)))
 			return IRQ_NONE;	/* this interrupt is not for me */
 /*		dprintk("bt878(%d) debug: irq count %d, stat 0x%8.8x, mask 0x%8.8x\n",bt->nr,count,stat,mask); */
-		btwrite(astat, BT878_AINT_STAT);	/* try to clear interupt condition */
+		btwrite(astat, BT878_AINT_STAT);	/* try to clear interrupt condition */
 
 
 		if (astat & (BT878_ASCERR | BT878_AOCERR)) {
 			if (bt878_verbose) {
-				printk("bt878(%d): irq%s%s risc_pc=%08x\n",
+				printk(KERN_INFO
+				       "bt878(%d): irq%s%s risc_pc=%08x\n",
 				       bt->nr,
 				       (astat & BT878_ASCERR) ? " SCERR" :
 				       "",
@@ -298,8 +300,8 @@ static irqreturn_t bt878_irq(int irq, void *dev_id, struct pt_regs *regs)
 		}
 		if (astat & (BT878_APABORT | BT878_ARIPERR | BT878_APPERR)) {
 			if (bt878_verbose) {
-				printk
-				    ("bt878(%d): irq%s%s%s risc_pc=%08x\n",
+				printk(KERN_INFO
+				     "bt878(%d): irq%s%s%s risc_pc=%08x\n",
 				     bt->nr,
 				     (astat & BT878_APABORT) ? " PABORT" :
 				     "",
@@ -311,8 +313,8 @@ static irqreturn_t bt878_irq(int irq, void *dev_id, struct pt_regs *regs)
 		}
 		if (astat & (BT878_AFDSR | BT878_AFTRGT | BT878_AFBUS)) {
 			if (bt878_verbose) {
-				printk
-				    ("bt878(%d): irq%s%s%s risc_pc=%08x\n",
+				printk(KERN_INFO
+				     "bt878(%d): irq%s%s%s risc_pc=%08x\n",
 				     bt->nr,
 				     (astat & BT878_AFDSR) ? " FDSR" : "",
 				     (astat & BT878_AFTRGT) ? " FTRGT" :
@@ -344,7 +346,7 @@ bt878_device_control(struct bt878 *bt, unsigned int cmd, union dst_gpio_packet *
 	int retval;
 
 	retval = 0;
-	if (down_interruptible (&bt->gpio_lock))
+	if (mutex_lock_interruptible(&bt->gpio_lock))
 		return -ERESTARTSYS;
 	/* special gpio signal */
 	switch (cmd) {
@@ -375,11 +377,43 @@ bt878_device_control(struct bt878 *bt, unsigned int cmd, union dst_gpio_packet *
 		retval = -EINVAL;
 		break;
 	}
-	up(&bt->gpio_lock);
+	mutex_unlock(&bt->gpio_lock);
 	return retval;
 }
 
 EXPORT_SYMBOL(bt878_device_control);
+
+#define BROOKTREE_878_DEVICE(vend, dev, name) \
+	{ \
+		.vendor = PCI_VENDOR_ID_BROOKTREE, \
+		.device = PCI_DEVICE_ID_BROOKTREE_878, \
+		.subvendor = (vend), .subdevice = (dev), \
+		.driver_data = (unsigned long) name \
+	}
+
+static struct pci_device_id bt878_pci_tbl[] __devinitdata = {
+	BROOKTREE_878_DEVICE(0x0071, 0x0101, "Nebula Electronics DigiTV"),
+	BROOKTREE_878_DEVICE(0x1461, 0x0761, "AverMedia AverTV DVB-T 761"),
+	BROOKTREE_878_DEVICE(0x11bd, 0x001c, "Pinnacle PCTV Sat"),
+	BROOKTREE_878_DEVICE(0x11bd, 0x0026, "Pinnacle PCTV SAT CI"),
+	BROOKTREE_878_DEVICE(0x1822, 0x0001, "Twinhan VisionPlus DVB"),
+	BROOKTREE_878_DEVICE(0x270f, 0xfc00,
+				"ChainTech digitop DST-1000 DVB-S"),
+	BROOKTREE_878_DEVICE(0x1461, 0x0771, "AVermedia AverTV DVB-T 771"),
+	BROOKTREE_878_DEVICE(0x18ac, 0xdb10, "DViCO FusionHDTV DVB-T Lite"),
+	BROOKTREE_878_DEVICE(0x18ac, 0xdb11, "Ultraview DVB-T Lite"),
+	BROOKTREE_878_DEVICE(0x18ac, 0xd500, "DViCO FusionHDTV 5 Lite"),
+	BROOKTREE_878_DEVICE(0x7063, 0x2000, "pcHDTV HD-2000 TV"),
+	BROOKTREE_878_DEVICE(0x1822, 0x0026, "DNTV Live! Mini"),
+	{ }
+};
+
+MODULE_DEVICE_TABLE(pci, bt878_pci_tbl);
+
+static const char * __devinit card_name(const struct pci_device_id *id)
+{
+	return id->driver_data ? (const char *)id->driver_data : "Unknown";
+}
 
 /***********************/
 /* PCI device handling */
@@ -388,17 +422,29 @@ EXPORT_SYMBOL(bt878_device_control);
 static int __devinit bt878_probe(struct pci_dev *dev,
 				 const struct pci_device_id *pci_id)
 {
-	int result;
+	int result = 0;
 	unsigned char lat;
 	struct bt878 *bt;
 #if defined(__powerpc__)
 	unsigned int cmd;
 #endif
+	unsigned int cardid;
 
 	printk(KERN_INFO "bt878: Bt878 AUDIO function found (%d).\n",
 	       bt878_num);
+	if (bt878_num >= BT878_MAX) {
+		printk(KERN_ERR "bt878: Too many devices inserted\n");
+		result = -ENOMEM;
+		goto fail0;
+	}
 	if (pci_enable_device(dev))
 		return -EIO;
+
+	cardid = dev->subsystem_device << 16;
+	cardid |= dev->subsystem_vendor;
+
+	printk(KERN_INFO "%s: card id=[0x%x],[ %s ] has DVB functions.\n",
+				__func__, cardid, card_name(pci_id));
 
 	bt = &bt878[bt878_num];
 	bt->dev = dev;
@@ -414,8 +460,10 @@ static int __devinit bt878_probe(struct pci_dev *dev,
 		goto fail0;
 	}
 
-	pci_read_config_byte(dev, PCI_CLASS_REVISION, &bt->revision);
+	bt->revision = dev->revision;
 	pci_read_config_byte(dev, PCI_LATENCY_TIMER, &lat);
+
+
 	printk(KERN_INFO "bt878(%d): Bt%x (rev %d) at %02x:%02x.%x, ",
 	       bt878_num, bt->id, bt->revision, dev->bus->number,
 	       PCI_SLOT(dev->devfn), PCI_FUNC(dev->devfn));
@@ -441,7 +489,7 @@ static int __devinit bt878_probe(struct pci_dev *dev,
 	btwrite(0, BT848_INT_MASK);
 
 	result = request_irq(bt->irq, bt878_irq,
-			     SA_SHIRQ | SA_INTERRUPT, "bt878",
+			     IRQF_SHARED | IRQF_DISABLED, "bt878",
 			     (void *) bt);
 	if (result == -EINVAL) {
 		printk(KERN_ERR "bt878(%d): Bad irq number or handler\n",
@@ -460,14 +508,8 @@ static int __devinit bt878_probe(struct pci_dev *dev,
 	pci_set_master(dev);
 	pci_set_drvdata(dev, bt);
 
-/*        if(init_bt878(btv) < 0) {
-                bt878_remove(dev);
-                return -EIO;
-        }
-*/
-
 	if ((result = bt878_mem_alloc(bt))) {
-		printk("bt878: failed to allocate memory!\n");
+		printk(KERN_ERR "bt878: failed to allocate memory!\n");
 		goto fail2;
 	}
 
@@ -493,7 +535,7 @@ static void __devexit bt878_remove(struct pci_dev *pci_dev)
 	struct bt878 *bt = pci_get_drvdata(pci_dev);
 
 	if (bt878_verbose)
-		printk("bt878(%d): unloading\n", bt->nr);
+		printk(KERN_INFO "bt878(%d): unloading\n", bt->nr);
 
 	/* turn off all capturing, DMA and IRQs */
 	btand(~0x13, BT878_AGPIO_DMA_CTL);
@@ -527,58 +569,37 @@ static void __devexit bt878_remove(struct pci_dev *pci_dev)
 	return;
 }
 
-static struct pci_device_id bt878_pci_tbl[] __devinitdata = {
-	{PCI_VENDOR_ID_BROOKTREE, PCI_DEVICE_ID_BROOKTREE_878,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0,}
-};
-
-MODULE_DEVICE_TABLE(pci, bt878_pci_tbl);
-
 static struct pci_driver bt878_pci_driver = {
-      .name 	= "bt878",
+      .name	= "bt878",
       .id_table = bt878_pci_tbl,
-      .probe 	= bt878_probe,
-      .remove 	= bt878_remove,
+      .probe	= bt878_probe,
+      .remove	= __devexit_p(bt878_remove),
 };
-
-static int bt878_pci_driver_registered = 0;
 
 /*******************************/
 /* Module management functions */
 /*******************************/
 
-static int bt878_init_module(void)
+static int __init bt878_init_module(void)
 {
 	bt878_num = 0;
-	bt878_pci_driver_registered = 0;
 
 	printk(KERN_INFO "bt878: AUDIO driver version %d.%d.%d loaded\n",
 	       (BT878_VERSION_CODE >> 16) & 0xff,
 	       (BT878_VERSION_CODE >> 8) & 0xff,
 	       BT878_VERSION_CODE & 0xff);
-/*
-        bt878_check_chipset();
-*/
-	/* later we register inside of bt878_find_audio_dma()
-	 * because we may want to ignore certain cards */
-	bt878_pci_driver_registered = 1;
+
 	return pci_register_driver(&bt878_pci_driver);
 }
 
-static void bt878_cleanup_module(void)
+static void __exit bt878_cleanup_module(void)
 {
-	if (bt878_pci_driver_registered) {
-		bt878_pci_driver_registered = 0;
-		pci_unregister_driver(&bt878_pci_driver);
-	}
-	return;
+	pci_unregister_driver(&bt878_pci_driver);
 }
 
 module_init(bt878_init_module);
 module_exit(bt878_cleanup_module);
 
-//MODULE_AUTHOR("XXX");
 MODULE_LICENSE("GPL");
 
 /*

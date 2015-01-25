@@ -14,25 +14,23 @@
  *  Free Software Foundation;  either version 2 of the  License, or (at your
  *  option) any later version.
  */
-#include <linux/config.h>
+#include <linux/gpio.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/interrupt.h>
-#include <linux/device.h>
+#include <linux/platform_device.h>
 #include <linux/bitops.h>
 #include <linux/pci.h>
 #include <linux/ioport.h>
-#include <linux/slab.h>
 #include <linux/delay.h>
+#include <linux/io.h>
 
-#include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/pgtable.h>
 #include <asm/page.h>
-#include <asm/system.h>
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/mach-types.h>
 
 #include <asm/mach/pci.h>
@@ -41,6 +39,8 @@
 #include <asm/mach/time.h>
 #include <asm/mach/flash.h>
 #include <asm/mach/arch.h>
+
+#include <mach/gpio-ixp2000.h>
 
 /*************************************************************************
  * IXDP2x00 IRQ Initialization
@@ -62,7 +62,7 @@ static struct slowport_cfg slowport_cpld_cfg = {
 };
 #endif
 
-static void ixdp2x00_irq_mask(unsigned int irq)
+static void ixdp2x00_irq_mask(struct irq_data *d)
 {
 	unsigned long dummy;
 	static struct slowport_cfg old_cfg;
@@ -77,8 +77,8 @@ static void ixdp2x00_irq_mask(unsigned int irq)
 #endif
 
 	dummy = *board_irq_mask;
-	dummy |=  IXP2000_BOARD_IRQ_MASK(irq);
-	ixp2000_reg_write(board_irq_mask, dummy);
+	dummy |=  IXP2000_BOARD_IRQ_MASK(d->irq);
+	ixp2000_reg_wrb(board_irq_mask, dummy);
 
 #ifdef CONFIG_ARCH_IXDP2400
 	if (machine_is_ixdp2400())
@@ -86,7 +86,7 @@ static void ixdp2x00_irq_mask(unsigned int irq)
 #endif
 }
 
-static void ixdp2x00_irq_unmask(unsigned int irq)
+static void ixdp2x00_irq_unmask(struct irq_data *d)
 {
 	unsigned long dummy;
 	static struct slowport_cfg old_cfg;
@@ -97,20 +97,20 @@ static void ixdp2x00_irq_unmask(unsigned int irq)
 #endif
 
 	dummy = *board_irq_mask;
-	dummy &=  ~IXP2000_BOARD_IRQ_MASK(irq);
-	ixp2000_reg_write(board_irq_mask, dummy);
+	dummy &=  ~IXP2000_BOARD_IRQ_MASK(d->irq);
+	ixp2000_reg_wrb(board_irq_mask, dummy);
 
 	if (machine_is_ixdp2400()) 
 		ixp2000_release_slowport(&old_cfg);
 }
 
-static void ixdp2x00_irq_handler(unsigned int irq, struct irqdesc *desc, struct pt_regs *regs)
+static void ixdp2x00_irq_handler(unsigned int irq, struct irq_desc *desc)
 {
         volatile u32 ex_interrupt = 0;
 	static struct slowport_cfg old_cfg;
 	int i;
 
-	desc->chip->mask(irq);
+	desc->irq_data.chip->irq_mask(&desc->irq_data);
 
 #ifdef CONFIG_ARCH_IXDP2400
 	if (machine_is_ixdp2400())
@@ -127,23 +127,21 @@ static void ixdp2x00_irq_handler(unsigned int irq, struct irqdesc *desc, struct 
 
 	for(i = 0; i < board_irq_count; i++) {
 		if(ex_interrupt & (1 << i))  {
-			struct irqdesc *cpld_desc;
 			int cpld_irq = IXP2000_BOARD_IRQ(0) + i;
-			cpld_desc = irq_desc + cpld_irq;
-			cpld_desc->handle(cpld_irq, cpld_desc, regs);
+			generic_handle_irq(cpld_irq);
 		}
 	}
 
-	desc->chip->unmask(irq);
+	desc->irq_data.chip->irq_unmask(&desc->irq_data);
 }
 
-static struct irqchip ixdp2x00_cpld_irq_chip = {
-	.ack	= ixdp2x00_irq_mask,
-	.mask	= ixdp2x00_irq_mask,
-	.unmask	= ixdp2x00_irq_unmask
+static struct irq_chip ixdp2x00_cpld_irq_chip = {
+	.irq_ack	= ixdp2x00_irq_mask,
+	.irq_mask	= ixdp2x00_irq_mask,
+	.irq_unmask	= ixdp2x00_irq_unmask
 };
 
-void ixdp2x00_init_irq(volatile unsigned long *stat_reg, volatile unsigned long *mask_reg, unsigned long nr_irqs)
+void __init ixdp2x00_init_irq(volatile unsigned long *stat_reg, volatile unsigned long *mask_reg, unsigned long nr_of_irqs)
 {
 	unsigned int irq;
 
@@ -154,18 +152,18 @@ void ixdp2x00_init_irq(volatile unsigned long *stat_reg, volatile unsigned long 
 
 	board_irq_stat = stat_reg;
 	board_irq_mask = mask_reg;
-	board_irq_count = nr_irqs;
+	board_irq_count = nr_of_irqs;
 
 	*board_irq_mask = 0xffffffff;
 
 	for(irq = IXP2000_BOARD_IRQ(0); irq < IXP2000_BOARD_IRQ(board_irq_count); irq++) {
-		set_irq_chip(irq, &ixdp2x00_cpld_irq_chip);
-		set_irq_handler(irq, do_level_IRQ);
+		irq_set_chip_and_handler(irq, &ixdp2x00_cpld_irq_chip,
+					 handle_level_irq);
 		set_irq_flags(irq, IRQF_VALID);
 	}
 
 	/* Hook into PCI interrupt */
-	set_irq_chained_handler(IRQ_IXP2000_PCIB, &ixdp2x00_irq_handler);
+	irq_set_chained_handler(IRQ_IXP2000_PCIB, ixdp2x00_irq_handler);
 }
 
 /*************************************************************************
@@ -173,7 +171,7 @@ void ixdp2x00_init_irq(volatile unsigned long *stat_reg, volatile unsigned long 
  *************************************************************************/
 static struct map_desc ixdp2x00_io_desc __initdata = {
 	.virtual	= IXDP2X00_VIRT_CPLD_BASE, 
-	.physical	= IXDP2X00_PHYS_CPLD_BASE,
+	.pfn		= __phys_to_pfn(IXDP2X00_PHYS_CPLD_BASE),
 	.length		= IXDP2X00_CPLD_SIZE,
 	.type		= MT_DEVICE
 };
@@ -193,7 +191,7 @@ void __init ixdp2x00_map_io(void)
  * instances  of the kernel. So far so good. Peers on the PCI bus running 
  * Linux is a common design in telecom systems. The problem is that instead 
  * of all the devices being controlled by a single host, different
- * devices are controlles by different NPUs on the same bus, leading to
+ * devices are controlled by different NPUs on the same bus, leading to
  * multiple hosts on the bus. The exact bus layout looks like:
  *
  *                   Bus 0
@@ -209,7 +207,7 @@ void __init ixdp2x00_map_io(void)
  *                  |      |         |         |      |
  *             ... Dev    PMC       Media     Eth0   Eth1 ...
  *
- * The master controlls all but Eth1, which is controlled by the
+ * The master controls all but Eth1, which is controlled by the
  * slave. What this means is that the both the master and the slave
  * have to scan the bus, but only one of them can enumerate the bus.
  * In addition, after the bus is scanned, each kernel must remove
@@ -239,11 +237,14 @@ void ixdp2x00_slave_pci_postinit(void)
 	/*
 	 * Remove PMC device is there is one
 	 */
-	if((dev = pci_find_slot(1, IXDP2X00_PMC_DEVFN)))
-		pci_remove_bus_device(dev);
+	if((dev = pci_get_bus_and_slot(1, IXDP2X00_PMC_DEVFN))) {
+		pci_stop_and_remove_bus_device(dev);
+		pci_dev_put(dev);
+	}
 
-	dev = pci_find_slot(0, IXDP2X00_21555_DEVFN);
-	pci_remove_bus_device(dev);
+	dev = pci_get_bus_and_slot(0, IXDP2X00_21555_DEVFN);
+	pci_stop_and_remove_bus_device(dev);
+	pci_dev_put(dev);
 }
 
 /**************************************************************************
@@ -300,5 +301,6 @@ void __init ixdp2x00_init_machine(void)
 	gpio_line_config(IXDP2X00_GPIO_I2C_ENABLE, GPIO_OUT);
 
 	platform_add_devices(ixdp2x00_devices, ARRAY_SIZE(ixdp2x00_devices));
+	ixp2000_uart_init();
 }
 

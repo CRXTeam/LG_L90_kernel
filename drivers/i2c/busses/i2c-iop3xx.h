@@ -80,7 +80,7 @@
 #define IOP3XX_GPOD_I2C0	0x00c0	/* clear these bits to enable ch0 */
 #define IOP3XX_GPOD_I2C1	0x0030	/* clear these bits to enable ch1 */
 
-#define MYSAR			0x02	/* SWAG a suitable slave address */
+#define MYSAR			0	/* default slave address */
 
 #define I2C_ERR			321
 #define I2C_ERR_BERR		(I2C_ERR+0)
@@ -97,7 +97,7 @@
 #define	IOP3XX_I2C_IO_SIZE	0x18
 
 struct i2c_algo_iop3xx_data {
-	u32 ioaddr;
+	void __iomem *ioaddr;
 	wait_queue_head_t waitq;
 	spinlock_t lock;
 	u32 SR_enabled, SR_received;

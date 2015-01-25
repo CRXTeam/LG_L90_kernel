@@ -34,8 +34,6 @@
 	 * is changed.
 	 */
 
-        __INIT
-
 	.set	mips64
 	.set	noreorder
 	.set	noat
@@ -51,6 +49,8 @@
 	 * (0x170-0x17f) are used to preserve k0, k1, and ra.
 	 */
 
+	__CPUINIT
+
 LEAF(except_vec2_sb1)
 	/*
 	 * If this error is recoverable, we need to exit the handler
@@ -64,6 +64,10 @@ LEAF(except_vec2_sb1)
 	sd	k0,0x170($0)
 	sd	k1,0x178($0)
 
+#ifdef CONFIG_SB1_CEX_ALWAYS_FATAL
+	j	handle_vec2_sb1
+	 nop
+#else
 	/*
 	 * M_ERRCTL_RECOVERABLE is bit 31, which makes it easy to tell
 	 * if we can fast-path out of here for a h/w-recovered error.
@@ -75,7 +79,7 @@ LEAF(except_vec2_sb1)
 recovered_dcache:
 	/*
 	 * Unlock CacheErr-D (which in turn unlocks CacheErr-DPA).
-	 * Ought to log the occurence of this recovered dcache error.
+	 * Ought to log the occurrence of this recovered dcache error.
 	 */
 	b	recovered
 	 mtc0	$0,C0_CERR_D
@@ -134,6 +138,7 @@ unrecoverable:
 	/* Unrecoverable Icache or Dcache error; log it and/or fail */
 	j	handle_vec2_sb1
 	 nop
+#endif
 
 END(except_vec2_sb1)
 

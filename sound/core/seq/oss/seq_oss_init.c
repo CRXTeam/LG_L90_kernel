@@ -28,7 +28,9 @@
 #include "seq_oss_timer.h"
 #include "seq_oss_event.h"
 #include <linux/init.h>
+#include <linux/export.h>
 #include <linux/moduleparam.h>
+#include <linux/slab.h>
 
 /*
  * common variables
@@ -41,17 +43,17 @@ static int system_client = -1; /* ALSA sequencer client number */
 static int system_port = -1;
 
 static int num_clients;
-static seq_oss_devinfo_t *client_table[SNDRV_SEQ_OSS_MAX_CLIENTS];
+static struct seq_oss_devinfo *client_table[SNDRV_SEQ_OSS_MAX_CLIENTS];
 
 
 /*
  * prototypes
  */
-static int receive_announce(snd_seq_event_t *ev, int direct, void *private, int atomic, int hop);
+static int receive_announce(struct snd_seq_event *ev, int direct, void *private, int atomic, int hop);
 static int translate_mode(struct file *file);
-static int create_port(seq_oss_devinfo_t *dp);
-static int delete_port(seq_oss_devinfo_t *dp);
-static int alloc_seq_queue(seq_oss_devinfo_t *dp);
+static int create_port(struct seq_oss_devinfo *dp);
+static int delete_port(struct seq_oss_devinfo *dp);
+static int alloc_seq_queue(struct seq_oss_devinfo *dp);
 static int delete_seq_queue(int queue);
 static void free_devinfo(void *private);
 
@@ -65,39 +67,23 @@ int __init
 snd_seq_oss_create_client(void)
 {
 	int rc;
-	snd_seq_client_callback_t callback;
-	snd_seq_client_info_t *info;
-	snd_seq_port_info_t *port;
-	snd_seq_port_callback_t port_callback;
+	struct snd_seq_port_info *port;
+	struct snd_seq_port_callback port_callback;
 
-	info = kmalloc(sizeof(*info), GFP_KERNEL);
 	port = kmalloc(sizeof(*port), GFP_KERNEL);
-	if (!info || !port) {
+	if (!port) {
 		rc = -ENOMEM;
 		goto __error;
 	}
 
 	/* create ALSA client */
-	memset(&callback, 0, sizeof(callback));
-
-	callback.private_data = NULL;
-	callback.allow_input = 1;
-	callback.allow_output = 1;
-
-	rc = snd_seq_create_kernel_client(NULL, SNDRV_SEQ_CLIENT_OSS, &callback);
+	rc = snd_seq_create_kernel_client(NULL, SNDRV_SEQ_CLIENT_OSS,
+					  "OSS sequencer");
 	if (rc < 0)
 		goto __error;
 
 	system_client = rc;
 	debug_printk(("new client = %d\n", rc));
-
-	/* set client information */
-	memset(info, 0, sizeof(*info));
-	info->client = system_client;
-	info->type = KERNEL_CLIENT;
-	strcpy(info->name, "OSS sequencer");
-
-	rc = call_ctl(SNDRV_SEQ_IOCTL_SET_CLIENT_INFO, info);
 
 	/* look up midi devices */
 	snd_seq_oss_midi_lookup_ports(system_client);
@@ -118,7 +104,7 @@ snd_seq_oss_create_client(void)
 	
 	call_ctl(SNDRV_SEQ_IOCTL_CREATE_PORT, port);
 	if ((system_port = port->addr.port) >= 0) {
-		snd_seq_port_subscribe_t subs;
+		struct snd_seq_port_subscribe subs;
 
 		memset(&subs, 0, sizeof(subs));
 		subs.sender.client = SNDRV_SEQ_CLIENT_SYSTEM;
@@ -131,7 +117,6 @@ snd_seq_oss_create_client(void)
 
  __error:
 	kfree(port);
-	kfree(info);
 	return rc;
 }
 
@@ -140,9 +125,9 @@ snd_seq_oss_create_client(void)
  * receive annoucement from system port, and check the midi device
  */
 static int
-receive_announce(snd_seq_event_t *ev, int direct, void *private, int atomic, int hop)
+receive_announce(struct snd_seq_event *ev, int direct, void *private, int atomic, int hop)
 {
-	snd_seq_port_info_t pinfo;
+	struct snd_seq_port_info pinfo;
 
 	if (atomic)
 		return 0; /* it must not happen */
@@ -191,30 +176,30 @@ int
 snd_seq_oss_open(struct file *file, int level)
 {
 	int i, rc;
-	seq_oss_devinfo_t *dp;
+	struct seq_oss_devinfo *dp;
 
-	if ((dp = kcalloc(1, sizeof(*dp), GFP_KERNEL)) == NULL) {
+	dp = kzalloc(sizeof(*dp), GFP_KERNEL);
+	if (!dp) {
 		snd_printk(KERN_ERR "can't malloc device info\n");
 		return -ENOMEM;
 	}
 	debug_printk(("oss_open: dp = %p\n", dp));
 
+	dp->cseq = system_client;
+	dp->port = -1;
+	dp->queue = -1;
+
 	for (i = 0; i < SNDRV_SEQ_OSS_MAX_CLIENTS; i++) {
 		if (client_table[i] == NULL)
 			break;
 	}
-	if (i >= SNDRV_SEQ_OSS_MAX_CLIENTS) {
-		snd_printk(KERN_ERR "too many applications\n");
-		kfree(dp);
-		return -ENOMEM;
-	}
 
 	dp->index = i;
-	dp->cseq = system_client;
-	dp->port = -1;
-	dp->queue = -1;
-	dp->readq = NULL;
-	dp->writeq = NULL;
+	if (i >= SNDRV_SEQ_OSS_MAX_CLIENTS) {
+		snd_printk(KERN_ERR "too many applications\n");
+		rc = -ENOMEM;
+		goto _error;
+	}
 
 	/* look up synth and midi devices */
 	snd_seq_oss_synth_setup(dp);
@@ -228,14 +213,16 @@ snd_seq_oss_open(struct file *file, int level)
 
 	/* create port */
 	debug_printk(("create new port\n"));
-	if ((rc = create_port(dp)) < 0) {
+	rc = create_port(dp);
+	if (rc < 0) {
 		snd_printk(KERN_ERR "can't create port\n");
 		goto _error;
 	}
 
 	/* allocate queue */
 	debug_printk(("allocate queue\n"));
-	if ((rc = alloc_seq_queue(dp)) < 0)
+	rc = alloc_seq_queue(dp);
+	if (rc < 0)
 		goto _error;
 
 	/* set address */
@@ -252,7 +239,8 @@ snd_seq_oss_open(struct file *file, int level)
 	/* initialize read queue */
 	debug_printk(("initialize read queue\n"));
 	if (is_read_mode(dp->file_mode)) {
-		if ((dp->readq = snd_seq_oss_readq_new(dp, maxqlen)) == NULL) {
+		dp->readq = snd_seq_oss_readq_new(dp, maxqlen);
+		if (!dp->readq) {
 			rc = -ENOMEM;
 			goto _error;
 		}
@@ -262,7 +250,7 @@ snd_seq_oss_open(struct file *file, int level)
 	debug_printk(("initialize write queue\n"));
 	if (is_write_mode(dp->file_mode)) {
 		dp->writeq = snd_seq_oss_writeq_new(dp, maxqlen);
-		if (dp->writeq == NULL) {
+		if (!dp->writeq) {
 			rc = -ENOMEM;
 			goto _error;
 		}
@@ -270,7 +258,8 @@ snd_seq_oss_open(struct file *file, int level)
 
 	/* initialize timer */
 	debug_printk(("initialize timer\n"));
-	if ((dp->timer = snd_seq_oss_timer_new(dp)) == NULL) {
+	dp->timer = snd_seq_oss_timer_new(dp);
+	if (!dp->timer) {
 		snd_printk(KERN_ERR "can't alloc timer\n");
 		rc = -ENOMEM;
 		goto _error;
@@ -295,9 +284,8 @@ snd_seq_oss_open(struct file *file, int level)
  _error:
 	snd_seq_oss_synth_cleanup(dp);
 	snd_seq_oss_midi_cleanup(dp);
-	i = dp->queue;
+	delete_seq_queue(dp->queue);
 	delete_port(dp);
-	delete_seq_queue(i);
 
 	return rc;
 }
@@ -323,11 +311,11 @@ translate_mode(struct file *file)
  * create sequencer port
  */
 static int
-create_port(seq_oss_devinfo_t *dp)
+create_port(struct seq_oss_devinfo *dp)
 {
 	int rc;
-	snd_seq_port_info_t port;
-	snd_seq_port_callback_t callback;
+	struct snd_seq_port_info port;
+	struct snd_seq_port_callback callback;
 
 	memset(&port, 0, sizeof(port));
 	port.addr.client = dp->cseq;
@@ -358,10 +346,12 @@ create_port(seq_oss_devinfo_t *dp)
  * delete ALSA port
  */
 static int
-delete_port(seq_oss_devinfo_t *dp)
+delete_port(struct seq_oss_devinfo *dp)
 {
-	if (dp->port < 0)
+	if (dp->port < 0) {
+		kfree(dp);
 		return 0;
+	}
 
 	debug_printk(("delete_port %i\n", dp->port));
 	return snd_seq_event_port_detach(dp->cseq, dp->port);
@@ -371,9 +361,9 @@ delete_port(seq_oss_devinfo_t *dp)
  * allocate a queue
  */
 static int
-alloc_seq_queue(seq_oss_devinfo_t *dp)
+alloc_seq_queue(struct seq_oss_devinfo *dp)
 {
-	snd_seq_queue_info_t qinfo;
+	struct snd_seq_queue_info qinfo;
 	int rc;
 
 	memset(&qinfo, 0, sizeof(qinfo));
@@ -392,7 +382,7 @@ alloc_seq_queue(seq_oss_devinfo_t *dp)
 static int
 delete_seq_queue(int queue)
 {
-	snd_seq_queue_info_t qinfo;
+	struct snd_seq_queue_info qinfo;
 	int rc;
 
 	if (queue < 0)
@@ -412,7 +402,7 @@ delete_seq_queue(int queue)
 static void
 free_devinfo(void *private)
 {
-	seq_oss_devinfo_t *dp = (seq_oss_devinfo_t *)private;
+	struct seq_oss_devinfo *dp = (struct seq_oss_devinfo *)private;
 
 	if (dp->timer)
 		snd_seq_oss_timer_delete(dp->timer);
@@ -431,7 +421,7 @@ free_devinfo(void *private)
  * close sequencer device
  */
 void
-snd_seq_oss_release(seq_oss_devinfo_t *dp)
+snd_seq_oss_release(struct seq_oss_devinfo *dp)
 {
 	int queue;
 
@@ -460,7 +450,7 @@ snd_seq_oss_release(seq_oss_devinfo_t *dp)
  * Wait until the queue is empty (if we don't have nonblock)
  */
 void
-snd_seq_oss_drain_write(seq_oss_devinfo_t *dp)
+snd_seq_oss_drain_write(struct seq_oss_devinfo *dp)
 {
 	if (! dp->timer->running)
 		return;
@@ -477,7 +467,7 @@ snd_seq_oss_drain_write(seq_oss_devinfo_t *dp)
  * reset sequencer devices
  */
 void
-snd_seq_oss_reset(seq_oss_devinfo_t *dp)
+snd_seq_oss_reset(struct seq_oss_devinfo *dp)
 {
 	int i;
 
@@ -502,6 +492,7 @@ snd_seq_oss_reset(seq_oss_devinfo_t *dp)
 }
 
 
+#ifdef CONFIG_PROC_FS
 /*
  * misc. functions for proc interface
  */
@@ -525,10 +516,10 @@ filemode_str(int val)
  * proc interface
  */
 void
-snd_seq_oss_system_info_read(snd_info_buffer_t *buf)
+snd_seq_oss_system_info_read(struct snd_info_buffer *buf)
 {
 	int i;
-	seq_oss_devinfo_t *dp;
+	struct seq_oss_devinfo *dp;
 
 	snd_iprintf(buf, "ALSA client number %d\n", system_client);
 	snd_iprintf(buf, "ALSA receiver port %d\n", system_port);
@@ -552,4 +543,4 @@ snd_seq_oss_system_info_read(snd_info_buffer_t *buf)
 			snd_seq_oss_readq_info_read(dp->readq, buf);
 	}
 }
-
+#endif /* CONFIG_PROC_FS */

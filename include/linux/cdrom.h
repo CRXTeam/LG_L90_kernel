@@ -2,7 +2,7 @@
  * -- <linux/cdrom.h>
  * General header file for linux CD-ROM drivers 
  * Copyright (C) 1992         David Giller, rafetmad@oxy.edu
- *               1994, 1995   Eberhard Moenkeberg, emoenke@gwdg.de
+ *               1994, 1995   Eberhard Mönkeberg, emoenke@gwdg.de
  *               1996         David van Leeuwen, david@tm.tno.nl
  *               1997, 1998   Erik Andersen, andersee@debian.org
  *               1998-2002    Jens Axboe, axboe@suse.de
@@ -11,6 +11,7 @@
 #ifndef	_LINUX_CDROM_H
 #define	_LINUX_CDROM_H
 
+#include <linux/types.h>
 #include <asm/byteorder.h>
 
 /*******************************************************
@@ -76,7 +77,7 @@
                                            (struct cdrom_multisession) */
 #define CDROM_GET_MCN		0x5311 /* Obtain the "Universal Product Code" 
                                            if available (struct cdrom_mcn) */
-#define CDROM_GET_UPC		CDROM_GET_MCN  /* This one is depricated, 
+#define CDROM_GET_UPC		CDROM_GET_MCN  /* This one is deprecated, 
                                           but here anyway for compatibility */
 #define CDROMRESET		0x5312 /* hard-reset the drive */
 #define CDROMVOLREAD		0x5313 /* Get the drive's volume setting 
@@ -378,7 +379,6 @@ struct cdrom_generic_command
 #define CDC_MEDIA_CHANGED 	0x80    /* media changed */
 #define CDC_PLAY_AUDIO		0x100   /* audio functions */
 #define CDC_RESET               0x200   /* hard reset device */
-#define CDC_IOCTLS              0x400   /* driver has non-standard ioctls */
 #define CDC_DRIVE_STATUS        0x800   /* driver implements drive status */
 #define CDC_GENERIC_PACKET	0x1000	/* driver implements generic packets */
 #define CDC_CD_R		0x2000	/* drive is a CD-R */
@@ -415,8 +415,8 @@ struct cdrom_generic_command
 #define CDO_CHECK_TYPE		0x10    /* check type on open for data */
 
 /* Special codes used when specifying changer slots. */
-#define CDSL_NONE       	((int) (~0U>>1)-1)
-#define CDSL_CURRENT    	((int) (~0U>>1))
+#define CDSL_NONE       	(INT_MAX-1)
+#define CDSL_CURRENT    	INT_MAX
 
 /* For partition based multisession access. IDE can handle 64 partitions
  * per drive - SCSI CD-ROM's use minors to differentiate between the
@@ -452,6 +452,7 @@ struct cdrom_generic_command
 #define GPCMD_PREVENT_ALLOW_MEDIUM_REMOVAL  0x1e
 #define GPCMD_READ_10			    0x28
 #define GPCMD_READ_12			    0xa8
+#define GPCMD_READ_BUFFER		    0x3c
 #define GPCMD_READ_BUFFER_CAPACITY	    0x5c
 #define GPCMD_READ_CDVD_CAPACITY	    0x25
 #define GPCMD_READ_CD			    0xbe
@@ -481,7 +482,9 @@ struct cdrom_generic_command
 #define GPCMD_TEST_UNIT_READY		    0x00
 #define GPCMD_VERIFY_10			    0x2f
 #define GPCMD_WRITE_10			    0x2a
+#define GPCMD_WRITE_12			    0xaa
 #define GPCMD_WRITE_AND_VERIFY_10	    0x2e
+#define GPCMD_WRITE_BUFFER		    0x3b
 /* This is listed as optional in ATAPI 2.6, but is (curiously) 
  * missing from Mt. Fuji, Table 57.  It _is_ mentioned in Mt. Fuji
  * Table 377 as an MMC command for SCSi devices though...  Most ATAPI
@@ -507,7 +510,7 @@ struct cdrom_generic_command
 #define GPMODE_TO_PROTECT_PAGE		0x1d
 #define GPMODE_CAPABILITIES_PAGE	0x2a
 #define GPMODE_ALL_PAGES		0x3f
-/* Not in Mt. Fuji, but in ATAPI 2.6 -- depricated now in favor
+/* Not in Mt. Fuji, but in ATAPI 2.6 -- deprecated now in favor
  * of MODE_SENSE_POWER_PAGE */
 #define GPMODE_CDROM_PAGE		0x0d
 
@@ -750,7 +753,7 @@ struct request_sense {
 #define MRW_MODE_PC			0x03
 
 struct mrw_feature_desc {
-	__u16 feature_code;
+	__be16 feature_code;
 #if defined(__BIG_ENDIAN_BITFIELD)
 	__u8 reserved1		: 2;
 	__u8 feature_version	: 4;
@@ -777,7 +780,7 @@ struct mrw_feature_desc {
 
 /* cf. mmc4r02g.pdf 5.3.10 Random Writable Feature (0020h) pg 197 of 635 */
 struct rwrt_feature_desc {
-	__u16 feature_code;
+	__be16 feature_code;
 #if defined(__BIG_ENDIAN_BITFIELD)
 	__u8 reserved1		: 2;
 	__u8 feature_version	: 4;
@@ -804,7 +807,7 @@ struct rwrt_feature_desc {
 };
 
 typedef struct {
-	__u16 disc_information_length;
+	__be16 disc_information_length;
 #if defined(__BIG_ENDIAN_BITFIELD)
 	__u8 reserved1			: 3;
         __u8 erasable			: 1;
@@ -850,7 +853,7 @@ typedef struct {
 } disc_information;
 
 typedef struct {
-	__u16 track_information_length;
+	__be16 track_information_length;
 	__u8 track_lsb;
 	__u8 session_lsb;
 	__u8 reserved1;
@@ -881,12 +884,12 @@ typedef struct {
 	__u8 lra_v			: 1;
 	__u8 reserved3			: 6;
 #endif
-	__u32 track_start;
-	__u32 next_writable;
-	__u32 free_blocks;
-	__u32 fixed_packet_size;
-	__u32 track_size;
-	__u32 last_rec_address;
+	__be32 track_start;
+	__be32 next_writable;
+	__be32 free_blocks;
+	__be32 fixed_packet_size;
+	__be32 track_size;
+	__be32 last_rec_address;
 } track_information;
 
 struct feature_header {
@@ -897,17 +900,17 @@ struct feature_header {
 };
 
 struct mode_page_header {
-	__u16 mode_data_length;
+	__be16 mode_data_length;
 	__u8 medium_type;
 	__u8 reserved1;
 	__u8 reserved2;
 	__u8 reserved3;
-	__u16 desc_length;
+	__be16 desc_length;
 };
 
 #ifdef __KERNEL__
 #include <linux/fs.h>		/* not really needed, later.. */
-#include <linux/device.h>
+#include <linux/list.h>
 
 struct packet_command
 {
@@ -932,7 +935,7 @@ struct packet_command
 /* Uniform cdrom data structures for cdrom.c */
 struct cdrom_device_info {
 	struct cdrom_device_ops  *ops;  /* link to device_ops */
-	struct cdrom_device_info *next; /* next device_info for this major */
+	struct list_head list;		/* linked list of all device_info */
 	struct gendisk *disk;		/* matching block layer disk */
 	void *handle;		        /* driver-dependent data */
 /* specifications */
@@ -940,13 +943,16 @@ struct cdrom_device_info {
 	int speed;			/* maximum speed for reading data */
 	int capacity;			/* number of discs in jukebox */
 /* device-related storage */
-	int options		: 30;	/* options flags */
+	unsigned int options	: 30;	/* options flags */
 	unsigned mc_flags	: 2;	/* media change buffer flags */
+	unsigned int vfs_events;	/* cached events for vfs path */
+	unsigned int ioctl_events;	/* cached events for ioctl path */
     	int use_count;                  /* number of times device opened */
     	char name[20];                  /* name of the device type */
 /* per-device flags */
         __u8 sanyo_slot		: 2;	/* Sanyo 3 CD changer support */
-        __u8 reserved		: 6;	/* not used yet */
+        __u8 keeplocked		: 1;	/* CDROM_LOCKDOOR status */
+        __u8 reserved		: 5;	/* not used yet */
 	int cdda_method;		/* see flags */
 	__u8 last_sense;
 	__u8 media_written;		/* dirty flag, DVD+RW bookkeeping */
@@ -961,6 +967,8 @@ struct cdrom_device_ops {
 	int (*open) (struct cdrom_device_info *, int);
 	void (*release) (struct cdrom_device_info *);
 	int (*drive_status) (struct cdrom_device_info *, int);
+	unsigned int (*check_events) (struct cdrom_device_info *cdi,
+				      unsigned int clearing, int slot);
 	int (*media_changed) (struct cdrom_device_info *, int);
 	int (*tray_move) (struct cdrom_device_info *, int);
 	int (*lock_door) (struct cdrom_device_info *, int);
@@ -974,9 +982,7 @@ struct cdrom_device_ops {
 	int (*reset) (struct cdrom_device_info *);
 	/* play stuff */
 	int (*audio_ioctl) (struct cdrom_device_info *,unsigned int, void *);
-	/* dev-specific */
- 	int (*dev_ioctl) (struct cdrom_device_info *,
-			  unsigned int, unsigned long);
+
 /* driver specifications */
 	const int capability;   /* capability flags */
 	int n_minors;           /* number of active minor devices */
@@ -986,15 +992,17 @@ struct cdrom_device_ops {
 };
 
 /* the general block_device operations structure: */
-extern int cdrom_open(struct cdrom_device_info *cdi, struct inode *ip,
-			struct file *fp);
-extern int cdrom_release(struct cdrom_device_info *cdi, struct file *fp);
-extern int cdrom_ioctl(struct file *file, struct cdrom_device_info *cdi,
-		struct inode *ip, unsigned int cmd, unsigned long arg);
+extern int cdrom_open(struct cdrom_device_info *cdi, struct block_device *bdev,
+			fmode_t mode);
+extern void cdrom_release(struct cdrom_device_info *cdi, fmode_t mode);
+extern int cdrom_ioctl(struct cdrom_device_info *cdi, struct block_device *bdev,
+		       fmode_t mode, unsigned int cmd, unsigned long arg);
+extern unsigned int cdrom_check_events(struct cdrom_device_info *cdi,
+				       unsigned int clearing);
 extern int cdrom_media_changed(struct cdrom_device_info *);
 
 extern int register_cdrom(struct cdrom_device_info *cdi);
-extern int unregister_cdrom(struct cdrom_device_info *cdi);
+extern void unregister_cdrom(struct cdrom_device_info *cdi);
 
 typedef struct {
     int data;
@@ -1109,7 +1117,7 @@ typedef struct {
 #endif
 	__u8 session_format;
 	__u8 reserved6;
-	__u32 packet_size;
+	__be32 packet_size;
 	__u16 audio_pause;
 	__u8 mcn[16];
 	__u8 isrc[16];
@@ -1154,7 +1162,7 @@ typedef struct {
 } rpc_state_t;
 
 struct event_header {
-	__u16 data_len;
+	__be16 data_len;
 #if defined(__BIG_ENDIAN_BITFIELD)
 	__u8 nea		: 1;
 	__u8 reserved1		: 4;
@@ -1187,6 +1195,20 @@ struct media_event_desc {
 
 extern int cdrom_get_media_event(struct cdrom_device_info *cdi, struct media_event_desc *med);
 
+static inline void lba_to_msf(int lba, u8 *m, u8 *s, u8 *f)
+{
+	lba += CD_MSF_OFFSET;
+	lba &= 0xffffff;  /* negative lbas use only 24 bits */
+	*m = lba / (CD_SECS * CD_FRAMES);
+	lba %= (CD_SECS * CD_FRAMES);
+	*s = lba / CD_FRAMES;
+	*f = lba % CD_FRAMES;
+}
+
+static inline int msf_to_lba(u8 m, u8 s, u8 f)
+{
+	return (((m * CD_SECS) + s) * CD_FRAMES + f) - CD_MSF_OFFSET;
+}
 #endif  /* End of kernel only stuff */ 
 
 #endif  /* _LINUX_CDROM_H */

@@ -4,7 +4,7 @@
 #define __NV_PROTO_H__
 
 /* in nv_setup.c */
-void NVCommonSetup(struct fb_info *info);
+int NVCommonSetup(struct fb_info *info);
 void NVWriteCrtc(struct nvidia_par *par, u8 index, u8 value);
 u8 NVReadCrtc(struct nvidia_par *par, u8 index);
 void NVWriteGr(struct nvidia_par *par, u8 index, u8 value);
@@ -31,18 +31,26 @@ int NVShowHideCursor(struct nvidia_par *par, int);
 void NVLockUnlock(struct nvidia_par *par, int);
 
 /* in nvidia-i2c.c */
-#if defined(CONFIG_FB_NVIDIA_I2C) || defined (CONFIG_PPC_OF)
+#ifdef CONFIG_FB_NVIDIA_I2C
 void nvidia_create_i2c_busses(struct nvidia_par *par);
 void nvidia_delete_i2c_busses(struct nvidia_par *par);
-int nvidia_probe_i2c_connector(struct nvidia_par *par, int conn,
+int nvidia_probe_i2c_connector(struct fb_info *info, int conn,
 			       u8 ** out_edid);
 #else
 #define nvidia_create_i2c_busses(...)
 #define nvidia_delete_i2c_busses(...)
-#define nvidia_probe_i2c_connector(p, c, edid) \
-do {                                           \
-	*(edid) = NULL;                        \
-} while(0)
+#define nvidia_probe_i2c_connector(p, c, edid) (-1)
+#endif
+
+#ifdef CONFIG_PPC_OF
+int nvidia_probe_of_connector(struct fb_info *info, int conn,
+			      u8 ** out_edid);
+#else
+static inline int nvidia_probe_of_connector(struct fb_info *info, int conn,
+				      u8 ** out_edid)
+{
+	return -1;
+}
 #endif
 
 /* in nv_accel.c */
@@ -54,5 +62,14 @@ extern void nvidiafb_fillrect(struct fb_info *info,
 extern void nvidiafb_imageblit(struct fb_info *info,
 			       const struct fb_image *image);
 extern int nvidiafb_sync(struct fb_info *info);
-extern u8 byte_rev[256];
+
+/* in nv_backlight.h */
+#ifdef CONFIG_FB_NVIDIA_BACKLIGHT
+extern void nvidia_bl_init(struct nvidia_par *par);
+extern void nvidia_bl_exit(struct nvidia_par *par);
+#else
+static inline void nvidia_bl_init(struct nvidia_par *par) {}
+static inline void nvidia_bl_exit(struct nvidia_par *par) {}
+#endif
+
 #endif				/* __NV_PROTO_H__ */

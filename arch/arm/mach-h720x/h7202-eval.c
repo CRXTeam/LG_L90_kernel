@@ -13,20 +13,19 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/string.h>
-#include <linux/device.h>
+#include <linux/platform_device.h>
 
 #include <asm/setup.h>
 #include <asm/types.h>
 #include <asm/mach-types.h>
 #include <asm/page.h>
-#include <asm/pgtable.h>
 #include <asm/mach/arch.h>
-#include <asm/hardware.h>
+#include <mach/irqs.h>
+#include <mach/hardware.h>
 #include "common.h"
 
 static struct resource cirrus_resources[] = {
@@ -71,11 +70,12 @@ static void __init init_eval_h7202(void)
 }
 
 MACHINE_START(H7202, "Hynix HMS30C7202")
-	MAINTAINER("Robert Schwebel, Pengutronix")
-	BOOT_MEM(0x40000000, 0x80000000, 0xf0000000)
-	BOOT_PARAMS(0x40000100)
-	MAPIO(h720x_map_io)
-	INITIRQ(h7202_init_irq)
-	.timer = &h7202_timer,
-	INIT_MACHINE(init_eval_h7202)
+	/* Maintainer: Robert Schwebel, Pengutronix */
+	.atag_offset	= 0x100,
+	.map_io		= h720x_map_io,
+	.init_irq	= h7202_init_irq,
+	.timer		= &h7202_timer,
+	.init_machine	= init_eval_h7202,
+	.dma_zone_size	= SZ_256M,
+	.restart	= h720x_restart,
 MACHINE_END

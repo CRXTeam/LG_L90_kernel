@@ -16,7 +16,6 @@
 #include <linux/socket.h>
 #include <linux/in.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/timer.h>
 #include <linux/string.h>
 #include <linux/sockios.h>
@@ -26,9 +25,7 @@
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <net/ip.h>			/* For ip_rcv */
-#include <net/tcp.h>
-#include <asm/system.h>
+#include <net/tcp_states.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
@@ -184,7 +181,7 @@ static int rose_state3_machine(struct sock *sk, struct sk_buff *skb, int framety
 				break;
 			}
 			if (atomic_read(&sk->sk_rmem_alloc) >
-			    (sk->sk_rcvbuf / 2))
+			    (sk->sk_rcvbuf >> 1))
 				rose->condition |= ROSE_COND_OWN_RX_BUSY;
 		}
 		/*

@@ -14,7 +14,7 @@
  * mostly use of USB_DEVICE() or USB_DEVICE_VER() entries..
  *
  * YOU _SHOULD_ CHANGE THIS LIST TO MATCH YOUR PRODUCT AND ITS TESTING!
- */ 
+ */
 
 static struct usb_device_id whitelist_table [] = {
 
@@ -31,7 +31,7 @@ static struct usb_device_id whitelist_table [] = {
 { USB_DEVICE_INFO(7, 1, 3) },
 #endif
 
-#ifdef	CONFIG_USB_CDCETHER
+#ifdef	CONFIG_USB_NET_CDCETHER
 /* Linux-USB CDC Ethernet gadget */
 { USB_DEVICE(0x0525, 0xa4a1), },
 /* Linux-USB CDC Ethernet + RNDIS gadget */
@@ -55,9 +55,14 @@ static int is_targeted(struct usb_device *dev)
 		return 1;
 
 	/* HNP test device is _never_ targeted (see OTG spec 6.6.6) */
-	if ((le16_to_cpu(dev->descriptor.idVendor) == 0x1a0a && 
+	if ((le16_to_cpu(dev->descriptor.idVendor) == 0x1a0a &&
 	     le16_to_cpu(dev->descriptor.idProduct) == 0xbadd))
 		return 0;
+
+	/* OTG PET device is always targeted (see OTG 2.0 ECN 6.4.2) */
+	if ((le16_to_cpu(dev->descriptor.idVendor) == 0x1a0a &&
+	     le16_to_cpu(dev->descriptor.idProduct) == 0x0200))
+		return 1;
 
 	/* NOTE: can't use usb_match_id() since interface caches
 	 * aren't set up yet. this is cut/paste from that code.
@@ -86,13 +91,36 @@ static int is_targeted(struct usb_device *dev)
 			continue;
 
 		if ((id->match_flags & USB_DEVICE_ID_MATCH_DEV_SUBCLASS) &&
-		    (id->bDeviceSubClass!= dev->descriptor.bDeviceSubClass))
+		    (id->bDeviceSubClass != dev->descriptor.bDeviceSubClass))
 			continue;
 
 		if ((id->match_flags & USB_DEVICE_ID_MATCH_DEV_PROTOCOL) &&
 		    (id->bDeviceProtocol != dev->descriptor.bDeviceProtocol))
 			continue;
+#if defined(CONFIG_USB_PEHCI_HCD) || defined(CONFIG_USB_PEHCI_HCD_MODULE)
+		/*Hub is targeted device,so code execution should reach here */
+		if (USB_CLASS_HUB == dev->descriptor.bDeviceClass) {
+			/* count the tiers and if it is more than 6, return 0 */
+			unsigned char tier = 0;
+			struct usb_device *root_hub;
 
+			root_hub = dev->bus->root_hub;
+			while ((dev->parent != NULL) && /* root hub not count */
+				(dev->parent != root_hub) &&
+				(tier != 6))  {/* interal hub not count */
+				tier++;
+				dev = dev->parent;
+			}
+
+			if (tier == 6) {
+				dev_err(&dev->dev, "5 tier of hubs reached,"
+					" newly added hub will not be"
+					" supported!\n");
+				hub_tier = 1;
+				return 0;
+			}
+		}
+#endif
 		return 1;
 	}
 

@@ -122,7 +122,7 @@ typedef struct {
 typedef struct {
 	unsigned char Dma:3;	/* RW: DMA channel selection */
 	unsigned char NumTransfers:2;	/* RW: Maximum # of transfers once being granted the ISA bus */
-	unsigned char ReRequest:2;	/* RW: Minumum delay between releasing the ISA bus and requesting it again */
+	unsigned char ReRequest:2;	/* RW: Minimum delay between releasing the ISA bus and requesting it again */
 	unsigned char MEMCS16:1;	/* RW: ISA signal MEMCS16: 0=disabled, 1=enabled */
 } DSP_BUSMASTER_CFG_1;
 
@@ -338,10 +338,6 @@ unsigned short dsp3780I_ReadMsaCfg(unsigned short usDspBaseIO,
                                    unsigned long ulMsaAddr);
 void dsp3780I_WriteMsaCfg(unsigned short usDspBaseIO,
                           unsigned long ulMsaAddr, unsigned short usValue);
-void dsp3780I_WriteGenCfg(unsigned short usDspBaseIO, unsigned uIndex,
-                          unsigned char ucValue);
-unsigned char dsp3780I_ReadGenCfg(unsigned short usDspBaseIO,
-                                  unsigned uIndex);
 int dsp3780I_GetIPCSource(unsigned short usDspBaseIO,
                           unsigned short *pusIPCSource);
 

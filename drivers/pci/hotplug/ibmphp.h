@@ -30,7 +30,7 @@
  *
  */
 
-#include "pci_hotplug.h"
+#include <linux/pci_hotplug.h>
 
 extern int ibmphp_debug;
 
@@ -196,7 +196,7 @@ struct ebda_hpc_bus {
 
 
 /********************************************************************
-*   THREE TYPE OF HOT PLUG CONTROLER                                *
+*   THREE TYPE OF HOT PLUG CONTROLLER                                *
 ********************************************************************/
 
 struct isa_ctlr_access {
@@ -406,8 +406,6 @@ extern void ibmphp_hpc_stop_poll_thread (void);
 //----------------------------------------------------------------------------
 // HPC return codes
 //----------------------------------------------------------------------------
-#define FALSE				0x00
-#define TRUE				0x01
 #define HPC_ERROR			0xFF
 
 //-----------------------------------------------------------------------------
@@ -709,17 +707,16 @@ struct slot {
 	u8 device;
 	u8 number;
 	u8 real_physical_slot_num;
-	char name[100];
 	u32 capabilities;
 	u8 supported_speed;
 	u8 supported_bus_mode;
+	u8 flag;		/* this is for disable slot and polling */
+	u8 ctlr_index;
 	struct hotplug_slot *hotplug_slot;
 	struct controller *ctrl;
 	struct pci_func *func;
 	u8 irq[4];
-	u8 flag;		/* this is for disable slot and polling */
 	int bit_mode;		/* 0 = 32, 1 = 64 */
-	u8 ctlr_index;
 	struct bus_info *bus_on;
 	struct list_head ibm_slot_list;
 	u8 status;

@@ -15,9 +15,11 @@
 
 #ifdef __KERNEL__
 
+#include <linux/types.h>
 #include <linux/interrupt.h>
 #include <linux/list.h>
 #include <linux/spinlock.h>
+#include <linux/mutex.h>
 #include <linux/device.h>
 #include <linux/mod_devicetable.h>
 
@@ -27,7 +29,7 @@ struct serio {
 	char name[32];
 	char phys[32];
 
-	unsigned int manual_bind;
+	bool manual_bind;
 
 	struct serio_device_id id;
 
@@ -39,28 +41,28 @@ struct serio {
 	int (*start)(struct serio *);
 	void (*stop)(struct serio *);
 
-	struct serio *parent, *child;
+	struct serio *parent;
+	struct list_head child_node;	/* Entry in parent->children list */
+	struct list_head children;
+	unsigned int depth;		/* level of nesting in serio hierarchy */
 
 	struct serio_driver *drv;	/* accessed from interrupt, must be protected by serio->lock and serio->sem */
-	struct semaphore drv_sem;	/* protects serio->drv so attributes can pin driver */
+	struct mutex drv_mutex;		/* protects serio->drv so attributes can pin driver */
 
 	struct device dev;
-	unsigned int registered;	/* port has been fully registered with driver core */
 
 	struct list_head node;
 };
 #define to_serio_port(d)	container_of(d, struct serio, dev)
 
 struct serio_driver {
-	void *private;
-	char *description;
+	const char *description;
 
-	struct serio_device_id *id_table;
-	unsigned int manual_bind;
+	const struct serio_device_id *id_table;
+	bool manual_bind;
 
 	void (*write_wakeup)(struct serio *);
-	irqreturn_t (*interrupt)(struct serio *, unsigned char,
-			unsigned int, struct pt_regs *);
+	irqreturn_t (*interrupt)(struct serio *, unsigned char, unsigned int);
 	int  (*connect)(struct serio *, struct serio_driver *drv);
 	int  (*reconnect)(struct serio *);
 	void (*disconnect)(struct serio *);
@@ -74,26 +76,23 @@ int serio_open(struct serio *serio, struct serio_driver *drv);
 void serio_close(struct serio *serio);
 void serio_rescan(struct serio *serio);
 void serio_reconnect(struct serio *serio);
-irqreturn_t serio_interrupt(struct serio *serio, unsigned char data, unsigned int flags, struct pt_regs *regs);
+irqreturn_t serio_interrupt(struct serio *serio, unsigned char data, unsigned int flags);
 
 void __serio_register_port(struct serio *serio, struct module *owner);
-static inline void serio_register_port(struct serio *serio)
-{
-	__serio_register_port(serio, THIS_MODULE);
-}
+
+/* use a define to avoid include chaining to get THIS_MODULE */
+#define serio_register_port(serio) \
+	__serio_register_port(serio, THIS_MODULE)
 
 void serio_unregister_port(struct serio *serio);
-void __serio_unregister_port_delayed(struct serio *serio, struct module *owner);
-static inline void serio_unregister_port_delayed(struct serio *serio)
-{
-	__serio_unregister_port_delayed(serio, THIS_MODULE);
-}
+void serio_unregister_child_port(struct serio *serio);
 
-void __serio_register_driver(struct serio_driver *drv, struct module *owner);
-static inline void serio_register_driver(struct serio_driver *drv)
-{
-	__serio_register_driver(drv, THIS_MODULE);
-}
+int __must_check __serio_register_driver(struct serio_driver *drv,
+				struct module *owner, const char *mod_name);
+
+/* use a define to avoid include chaining to get THIS_MODULE & friends */
+#define serio_register_driver(drv) \
+	__serio_register_driver(drv, THIS_MODULE, KBUILD_MODNAME)
 
 void serio_unregister_driver(struct serio_driver *drv);
 
@@ -111,14 +110,8 @@ static inline void serio_drv_write_wakeup(struct serio *serio)
 		serio->drv->write_wakeup(serio);
 }
 
-static inline void serio_cleanup(struct serio *serio)
-{
-	if (serio->drv && serio->drv->cleanup)
-		serio->drv->cleanup(serio);
-}
-
 /*
- * Use the following fucntions to manipulate serio's per-port
+ * Use the following functions to manipulate serio's per-port
  * driver-specific data.
  */
 static inline void *serio_get_drvdata(struct serio *serio)
@@ -132,7 +125,7 @@ static inline void serio_set_drvdata(struct serio *serio, void *data)
 }
 
 /*
- * Use the following fucntions to protect critical sections in
+ * Use the following functions to protect critical sections in
  * driver code from port's interrupt handler
  */
 static inline void serio_pause_rx(struct serio *serio)
@@ -144,20 +137,6 @@ static inline void serio_continue_rx(struct serio *serio)
 {
 	spin_unlock_irq(&serio->lock);
 }
-
-/*
- * Use the following fucntions to pin serio's driver in process context
- */
-static inline int serio_pin_driver(struct serio *serio)
-{
-	return down_interruptible(&serio->drv_sem);
-}
-
-static inline void serio_unpin_driver(struct serio *serio)
-{
-	up(&serio->drv_sem);
-}
-
 
 #endif
 
@@ -179,7 +158,7 @@ static inline void serio_unpin_driver(struct serio *serio)
 #define SERIO_8042_XL	0x06
 
 /*
- * Serio types
+ * Serio protocols
  */
 #define SERIO_UNKNOWN	0x00
 #define SERIO_MSC	0x01
@@ -210,5 +189,18 @@ static inline void serio_unpin_driver(struct serio *serio)
 #define SERIO_LKKBD	0x28
 #define SERIO_ELO	0x29
 #define SERIO_MICROTOUCH	0x30
+#define SERIO_PENMOUNT	0x31
+#define SERIO_TOUCHRIGHT	0x32
+#define SERIO_TOUCHWIN	0x33
+#define SERIO_TAOSEVM	0x34
+#define SERIO_FUJITSU	0x35
+#define SERIO_ZHENHUA	0x36
+#define SERIO_INEXIO	0x37
+#define SERIO_TOUCHIT213	0x38
+#define SERIO_W8001	0x39
+#define SERIO_DYNAPRO	0x3a
+#define SERIO_HAMPSHIRE	0x3b
+#define SERIO_PS2MULT	0x3c
+#define SERIO_TSC40	0x3d
 
 #endif

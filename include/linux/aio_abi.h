@@ -1,4 +1,4 @@
-/* linux/aio_abi.h
+/* include/linux/aio_abi.h
  *
  * Copyright 2000,2001,2002 Red Hat.
  *
@@ -27,9 +27,10 @@
 #ifndef __LINUX__AIO_ABI_H
 #define __LINUX__AIO_ABI_H
 
+#include <linux/types.h>
 #include <asm/byteorder.h>
 
-typedef unsigned long	aio_context_t;
+typedef __kernel_ulong_t aio_context_t;
 
 enum {
 	IOCB_CMD_PREAD = 0,
@@ -41,7 +42,17 @@ enum {
 	 * IOCB_CMD_POLL = 5,
 	 */
 	IOCB_CMD_NOOP = 6,
+	IOCB_CMD_PREADV = 7,
+	IOCB_CMD_PWRITEV = 8,
 };
+
+/*
+ * Valid flags for the "aio_flags" member of the "struct iocb".
+ *
+ * IOCB_FLAG_RESFD - Set if the "aio_resfd" member of the "struct iocb"
+ *                   is valid.
+ */
+#define IOCB_FLAG_RESFD		(1 << 0)
 
 /* read() from /dev/aio returns these structures. */
 struct io_event {
@@ -82,7 +93,15 @@ struct iocb {
 
 	/* extra parameters */
 	__u64	aio_reserved2;	/* TODO: use this for a (struct sigevent *) */
-	__u64	aio_reserved3;
+
+	/* flags for the "struct iocb" */
+	__u32	aio_flags;
+
+	/*
+	 * if the IOCB_FLAG_RESFD flag of "aio_flags" is set, this is an
+	 * eventfd to signal AIO readiness to
+	 */
+	__u32	aio_resfd;
 }; /* 64 bytes */
 
 #undef IFBIG

@@ -13,7 +13,6 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
@@ -24,16 +23,16 @@
 #include <asm/types.h>
 #include <asm/mach-types.h>
 #include <asm/page.h>
-#include <asm/pgtable.h>
 #include <asm/mach/arch.h>
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include "common.h"
 
 MACHINE_START(H7201, "Hynix GMS30C7201")
-	MAINTAINER("Robert Schwebel, Pengutronix")
-	BOOT_MEM(0x40000000, 0x80000000, 0xf0000000)
-	BOOT_PARAMS(0xc0001000)
-	MAPIO(h720x_map_io)
-	INITIRQ(h720x_init_irq)
-	.timer = &h7201_timer,
+	/* Maintainer: Robert Schwebel, Pengutronix */
+	.atag_offset	= 0x1000,
+	.map_io		= h720x_map_io,
+	.init_irq	= h720x_init_irq,
+	.timer		= &h7201_timer,
+	.dma_zone_size	= SZ_256M,
+	.restart	= h720x_restart,
 MACHINE_END

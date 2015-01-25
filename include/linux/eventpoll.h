@@ -1,6 +1,6 @@
 /*
- *  include/linux/eventpoll.h ( Efficent event polling implementation )
- *  Copyright (C) 2001,...,2003	 Davide Libenzi
+ *  include/linux/eventpoll.h ( Efficient event polling implementation )
+ *  Copyright (C) 2001,...,2006	 Davide Libenzi
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -14,8 +14,12 @@
 #ifndef _LINUX_EVENTPOLL_H
 #define _LINUX_EVENTPOLL_H
 
+/* For O_CLOEXEC */
+#include <linux/fcntl.h>
 #include <linux/types.h>
 
+/* Flags for epoll_create1.  */
+#define EPOLL_CLOEXEC O_CLOEXEC
 
 /* Valid opcodes to issue to sys_epoll_ctl() */
 #define EPOLL_CTL_ADD 1
@@ -31,6 +35,8 @@
 /* 
  * On x86-64 make the 64bit structure have the same alignment as the
  * 32bit structure. This makes 32bit emulation easier.
+ *
+ * UML/x86_64 needs the same packing as x86_64
  */
 #ifdef __x86_64__
 #define EPOLL_PACKED __attribute__((packed))
@@ -52,7 +58,12 @@ struct file;
 #ifdef CONFIG_EPOLL
 
 /* Used to initialize the epoll bits inside the "struct file" */
-void eventpoll_init_file(struct file *file);
+static inline void eventpoll_init_file(struct file *file)
+{
+	INIT_LIST_HEAD(&file->f_ep_links);
+	INIT_LIST_HEAD(&file->f_tfile_llink);
+}
+
 
 /* Used to release the epoll bits inside the "struct file" */
 void eventpoll_release_file(struct file *file);
@@ -84,7 +95,6 @@ static inline void eventpoll_release(struct file *file)
 	 */
 	eventpoll_release_file(file);
 }
-
 
 #else
 

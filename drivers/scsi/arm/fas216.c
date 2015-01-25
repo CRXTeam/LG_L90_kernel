@@ -39,7 +39,6 @@
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
-#include <linux/sched.h>
 #include <linux/proc_fs.h>
 #include <linux/delay.h>
 #include <linux/bitops.h>
@@ -52,6 +51,7 @@
 #include <asm/ecard.h>
 
 #include "../scsi.h"
+#include <scsi/scsi_dbg.h>
 #include <scsi/scsi_host.h>
 #include "fas216.h"
 #include "scsi.h"
@@ -172,7 +172,7 @@ static void fas216_dumpstate(FAS216_Info *info)
 		fas216_readb(info, REG_CTCH));
 }
 
-static void print_SCp(Scsi_Pointer *SCp, const char *prefix, const char *suffix)
+static void print_SCp(struct scsi_pointer *SCp, const char *prefix, const char *suffix)
 {
 	printk("%sptr %p this_residual 0x%x buffer %p buffers_residual 0x%x%s",
 		prefix, SCp->ptr, SCp->this_residual, SCp->buffer,
@@ -240,7 +240,7 @@ static void __fas216_checkmagic(FAS216_Info *info, const char *func)
 		panic("scsi memory space corrupted in %s", func);
 	}
 }
-#define fas216_checkmagic(info) __fas216_checkmagic((info), __FUNCTION__)
+#define fas216_checkmagic(info) __fas216_checkmagic((info), __func__)
 #else
 #define fas216_checkmagic(info)
 #endif
@@ -296,8 +296,8 @@ fas216_do_log(FAS216_Info *info, char target, char *fmt, va_list ap)
 	printk("scsi%d.%c: %s", info->host->host_no, target, buf);
 }
 
-static void
-fas216_log_command(FAS216_Info *info, int level, Scsi_Cmnd *SCpnt, char *fmt, ...)
+static void fas216_log_command(FAS216_Info *info, int level,
+			       struct scsi_cmnd *SCpnt, char *fmt, ...)
 {
 	va_list args;
 
@@ -309,7 +309,7 @@ fas216_log_command(FAS216_Info *info, int level, Scsi_Cmnd *SCpnt, char *fmt, ..
 	va_end(args);
 
 	printk(" CDB: ");
-	print_command(SCpnt->cmnd);
+	__scsi_print_command(SCpnt->cmnd);
 }
 
 static void
@@ -627,13 +627,13 @@ static void fas216_handlesync(FAS216_Info *info, char *msg)
  */
 static void fas216_updateptrs(FAS216_Info *info, int bytes_transferred)
 {
-	Scsi_Pointer *SCp = &info->scsi.SCp;
+	struct scsi_pointer *SCp = &info->scsi.SCp;
 
 	fas216_checkmagic(info);
 
 	BUG_ON(bytes_transferred < 0);
 
-	info->SCpnt->request_bufflen -= bytes_transferred;
+	SCp->phase -= bytes_transferred;
 
 	while (bytes_transferred != 0) {
 		if (SCp->this_residual > bytes_transferred)
@@ -667,7 +667,7 @@ static void fas216_updateptrs(FAS216_Info *info, int bytes_transferred)
  */
 static void fas216_pio(FAS216_Info *info, fasdmadir_t direction)
 {
-	Scsi_Pointer *SCp = &info->scsi.SCp;
+	struct scsi_pointer *SCp = &info->scsi.SCp;
 
 	fas216_checkmagic(info);
 
@@ -715,7 +715,7 @@ static void fas216_cleanuptransfer(FAS216_Info *info)
 		return;
 
 	if (dmatype == fasdma_real_all)
-		total = info->SCpnt->request_bufflen;
+		total = info->scsi.SCp.phase;
 	else
 		total = info->scsi.SCp.this_residual;
 
@@ -753,7 +753,7 @@ static void fas216_transfer(FAS216_Info *info)
 	fas216_log(info, LOG_BUFFER,
 		   "starttransfer: buffer %p length 0x%06x reqlen 0x%06x",
 		   info->scsi.SCp.ptr, info->scsi.SCp.this_residual,
-		   info->SCpnt->request_bufflen);
+		   info->scsi.SCp.phase);
 
 	if (!info->scsi.SCp.ptr) {
 		fas216_log(info, LOG_ERROR, "null buffer passed to "
@@ -784,7 +784,7 @@ static void fas216_transfer(FAS216_Info *info)
 	info->dma.transfer_type = dmatype;
 
 	if (dmatype == fasdma_real_all)
-		fas216_set_stc(info, info->SCpnt->request_bufflen);
+		fas216_set_stc(info, info->scsi.SCp.phase);
 	else
 		fas216_set_stc(info, info->scsi.SCp.this_residual);
 
@@ -1661,7 +1661,7 @@ irqreturn_t fas216_intr(FAS216_Info *info)
 	return handled;
 }
 
-static void __fas216_start_command(FAS216_Info *info, Scsi_Cmnd *SCpnt)
+static void __fas216_start_command(FAS216_Info *info, struct scsi_cmnd *SCpnt)
 {
 	int tot_msglen;
 
@@ -1753,7 +1753,7 @@ static int parity_test(FAS216_Info *info, int target)
 	return info->device[target].parity_check;
 }
 
-static void fas216_start_command(FAS216_Info *info, Scsi_Cmnd *SCpnt)
+static void fas216_start_command(FAS216_Info *info, struct scsi_cmnd *SCpnt)
 {
 	int disconnect_ok;
 
@@ -1807,7 +1807,7 @@ static void fas216_start_command(FAS216_Info *info, Scsi_Cmnd *SCpnt)
 	__fas216_start_command(info, SCpnt);
 }
 
-static void fas216_allocate_tag(FAS216_Info *info, Scsi_Cmnd *SCpnt)
+static void fas216_allocate_tag(FAS216_Info *info, struct scsi_cmnd *SCpnt)
 {
 #ifdef SCSI2_TAG
 	/*
@@ -1841,7 +1841,8 @@ static void fas216_allocate_tag(FAS216_Info *info, Scsi_Cmnd *SCpnt)
 	}
 }
 
-static void fas216_do_bus_device_reset(FAS216_Info *info, Scsi_Cmnd *SCpnt)
+static void fas216_do_bus_device_reset(FAS216_Info *info,
+				       struct scsi_cmnd *SCpnt)
 {
 	struct message *msg;
 
@@ -1889,7 +1890,7 @@ static void fas216_do_bus_device_reset(FAS216_Info *info, Scsi_Cmnd *SCpnt)
  */
 static void fas216_kick(FAS216_Info *info)
 {
-	Scsi_Cmnd *SCpnt = NULL;
+	struct scsi_cmnd *SCpnt = NULL;
 #define TYPE_OTHER	0
 #define TYPE_RESET	1
 #define TYPE_QUEUE	2
@@ -1977,8 +1978,8 @@ static void fas216_kick(FAS216_Info *info)
 /*
  * Clean up from issuing a BUS DEVICE RESET message to a device.
  */
-static void
-fas216_devicereset_done(FAS216_Info *info, Scsi_Cmnd *SCpnt, unsigned int result)
+static void fas216_devicereset_done(FAS216_Info *info, struct scsi_cmnd *SCpnt,
+				    unsigned int result)
 {
 	fas216_log(info, LOG_ERROR, "fas216 device reset complete");
 
@@ -1995,8 +1996,8 @@ fas216_devicereset_done(FAS216_Info *info, Scsi_Cmnd *SCpnt, unsigned int result
  *
  * Finish processing automatic request sense command
  */
-static void
-fas216_rq_sns_done(FAS216_Info *info, Scsi_Cmnd *SCpnt, unsigned int result)
+static void fas216_rq_sns_done(FAS216_Info *info, struct scsi_cmnd *SCpnt,
+			       unsigned int result)
 {
 	fas216_log_target(info, LOG_CONNECT, SCpnt->device->id,
 		   "request sense complete, result=0x%04x%02x%02x",
@@ -2017,6 +2018,7 @@ fas216_rq_sns_done(FAS216_Info *info, Scsi_Cmnd *SCpnt, unsigned int result)
 	 * the upper layers to process.  This would have been set
 	 * correctly by fas216_std_done.
 	 */
+	scsi_eh_restore_cmnd(SCpnt, &info->ses);
 	SCpnt->scsi_done(SCpnt);
 }
 
@@ -2029,7 +2031,7 @@ fas216_rq_sns_done(FAS216_Info *info, Scsi_Cmnd *SCpnt, unsigned int result)
  * Finish processing of standard command
  */
 static void
-fas216_std_done(FAS216_Info *info, Scsi_Cmnd *SCpnt, unsigned int result)
+fas216_std_done(FAS216_Info *info, struct scsi_cmnd *SCpnt, unsigned int result)
 {
 	info->stats.fins += 1;
 
@@ -2081,7 +2083,7 @@ fas216_std_done(FAS216_Info *info, Scsi_Cmnd *SCpnt, unsigned int result)
 				info->host->host_no, '0' + SCpnt->device->id,
 				SCpnt->result, info->scsi.SCp.ptr,
 				info->scsi.SCp.this_residual);
-			print_command(SCpnt->cmnd);
+			__scsi_print_command(SCpnt->cmnd);
 			SCpnt->result &= ~(255 << 16);
 			SCpnt->result |= DID_BAD_TARGET << 16;
 			goto request_sense;
@@ -2102,22 +2104,12 @@ request_sense:
 	if (SCpnt->cmnd[0] == REQUEST_SENSE)
 		goto done;
 
+	scsi_eh_prep_cmnd(SCpnt, &info->ses, NULL, 0, ~0);
 	fas216_log_target(info, LOG_CONNECT, SCpnt->device->id,
 			  "requesting sense");
-	memset(SCpnt->cmnd, 0, sizeof (SCpnt->cmnd));
-	SCpnt->cmnd[0] = REQUEST_SENSE;
-	SCpnt->cmnd[1] = SCpnt->device->lun << 5;
-	SCpnt->cmnd[4] = sizeof(SCpnt->sense_buffer);
-	SCpnt->cmd_len = COMMAND_SIZE(SCpnt->cmnd[0]);
-	SCpnt->SCp.buffer = NULL;
-	SCpnt->SCp.buffers_residual = 0;
-	SCpnt->SCp.ptr = (char *)SCpnt->sense_buffer;
-	SCpnt->SCp.this_residual = sizeof(SCpnt->sense_buffer);
+	init_SCp(SCpnt);
 	SCpnt->SCp.Message = 0;
 	SCpnt->SCp.Status = 0;
-	SCpnt->request_bufflen = sizeof(SCpnt->sense_buffer);
-	SCpnt->sc_data_direction = SCSI_DATA_READ;
-	SCpnt->use_sg = 0;
 	SCpnt->tag = 0;
 	SCpnt->host_scribble = (void *)fas216_rq_sns_done;
 
@@ -2127,7 +2119,7 @@ request_sense:
 	 * executed, unless a target connects to us.
 	 */
 	if (info->reqSCpnt)
-		printk(KERN_WARNING "scsi%d.%c: loosing request command\n",
+		printk(KERN_WARNING "scsi%d.%c: losing request command\n",
 			info->host->host_no, '0' + SCpnt->device->id);
 	info->reqSCpnt = SCpnt;
 }
@@ -2141,8 +2133,8 @@ request_sense:
  */
 static void fas216_done(FAS216_Info *info, unsigned int result)
 {
-	void (*fn)(FAS216_Info *, Scsi_Cmnd *, unsigned int);
-	Scsi_Cmnd *SCpnt;
+	void (*fn)(FAS216_Info *, struct scsi_cmnd *, unsigned int);
+	struct scsi_cmnd *SCpnt;
 	unsigned long flags;
 
 	fas216_checkmagic(info);
@@ -2170,7 +2162,7 @@ static void fas216_done(FAS216_Info *info, unsigned int result)
 		       info->host->host_no, '0' + SCpnt->device->id,
 		       info->scsi.SCp.ptr, info->scsi.SCp.this_residual);
 		info->scsi.SCp.ptr = NULL;
-		print_command(SCpnt->cmnd);
+		__scsi_print_command(SCpnt->cmnd);
 	}
 
 	/*
@@ -2181,10 +2173,10 @@ static void fas216_done(FAS216_Info *info, unsigned int result)
 	info->device[SCpnt->device->id].parity_check = 0;
 	clear_bit(SCpnt->device->id * 8 + SCpnt->device->lun, info->busyluns);
 
-	fn = (void (*)(FAS216_Info *, Scsi_Cmnd *, unsigned int))SCpnt->host_scribble;
+	fn = (void (*)(FAS216_Info *, struct scsi_cmnd *, unsigned int))SCpnt->host_scribble;
 	fn(info, SCpnt, result);
 
-	if (info->scsi.irq != NO_IRQ) {
+	if (info->scsi.irq) {
 		spin_lock_irqsave(&info->host_lock, flags);
 		if (info->scsi.phase == PHASE_IDLE)
 			fas216_kick(info);
@@ -2206,7 +2198,8 @@ no_command:
  * Returns: 0 on success, else error.
  * Notes: io_request_lock is held, interrupts are disabled.
  */
-int fas216_queue_command(Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
+static int fas216_queue_command_lck(struct scsi_cmnd *SCpnt,
+			 void (*done)(struct scsi_cmnd *))
 {
 	FAS216_Info *info = (FAS216_Info *)SCpnt->device->host->hostdata;
 	int result;
@@ -2247,13 +2240,15 @@ int fas216_queue_command(Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
 	return result;
 }
 
+DEF_SCSI_QCMD(fas216_queue_command)
+
 /**
  * fas216_internal_done - trigger restart of a waiting thread in fas216_noqueue_command
  * @SCpnt: Command to wake
  *
  * Trigger restart of a waiting thread in fas216_command
  */
-static void fas216_internal_done(Scsi_Cmnd *SCpnt)
+static void fas216_internal_done(struct scsi_cmnd *SCpnt)
 {
 	FAS216_Info *info = (FAS216_Info *)SCpnt->device->host->hostdata;
 
@@ -2270,7 +2265,8 @@ static void fas216_internal_done(Scsi_Cmnd *SCpnt)
  * Returns: scsi result code.
  * Notes: io_request_lock is held, interrupts are disabled.
  */
-int fas216_noqueue_command(Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
+static int fas216_noqueue_command_lck(struct scsi_cmnd *SCpnt,
+			   void (*done)(struct scsi_cmnd *))
 {
 	FAS216_Info *info = (FAS216_Info *)SCpnt->device->host->hostdata;
 
@@ -2280,10 +2276,10 @@ int fas216_noqueue_command(Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
 	 * We should only be using this if we don't have an interrupt.
 	 * Provide some "incentive" to use the queueing code.
 	 */
-	BUG_ON(info->scsi.irq != NO_IRQ);
+	BUG_ON(info->scsi.irq);
 
 	info->internal_done = 0;
-	fas216_queue_command(SCpnt, fas216_internal_done);
+	fas216_queue_command_lck(SCpnt, fas216_internal_done);
 
 	/*
 	 * This wastes time, since we can't return until the command is
@@ -2298,7 +2294,7 @@ int fas216_noqueue_command(Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
 		 * If we don't have an IRQ, then we must poll the card for
 		 * it's interrupt, and use that to call this driver's
 		 * interrupt routine.  That way, we keep the command
-		 * progressing.  Maybe we can add some inteligence here
+		 * progressing.  Maybe we can add some intelligence here
 		 * and go to sleep if we know that the device is going
 		 * to be some time (eg, disconnected).
 		 */
@@ -2315,6 +2311,8 @@ int fas216_noqueue_command(Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
 
 	return 0;
 }
+
+DEF_SCSI_QCMD(fas216_noqueue_command)
 
 /*
  * Error handler timeout function.  Indicate that we timed out,
@@ -2349,7 +2347,8 @@ enum res_find {
  * Decide how to abort a command.
  * Returns: abort status
  */
-static enum res_find fas216_find_command(FAS216_Info *info, Scsi_Cmnd *SCpnt)
+static enum res_find fas216_find_command(FAS216_Info *info,
+					 struct scsi_cmnd *SCpnt)
 {
 	enum res_find res = res_failed;
 
@@ -2416,7 +2415,7 @@ static enum res_find fas216_find_command(FAS216_Info *info, Scsi_Cmnd *SCpnt)
  * Returns: FAILED if unable to abort
  * Notes: io_request_lock is taken, and irqs are disabled
  */
-int fas216_eh_abort(Scsi_Cmnd *SCpnt)
+int fas216_eh_abort(struct scsi_cmnd *SCpnt)
 {
 	FAS216_Info *info = (FAS216_Info *)SCpnt->device->host->hostdata;
 	int result = FAILED;
@@ -2426,7 +2425,7 @@ int fas216_eh_abort(Scsi_Cmnd *SCpnt)
 	info->stats.aborts += 1;
 
 	printk(KERN_WARNING "scsi%d: abort command ", info->host->host_no);
-	print_command(SCpnt->data_cmnd);
+	__scsi_print_command(SCpnt->cmnd);
 
 	print_debug_list();
 	fas216_dumpstate(info);
@@ -2473,7 +2472,7 @@ int fas216_eh_abort(Scsi_Cmnd *SCpnt)
  * Notes: We won't be re-entered, so we'll only have one device
  * reset on the go at one time.
  */
-int fas216_eh_device_reset(Scsi_Cmnd *SCpnt)
+int fas216_eh_device_reset(struct scsi_cmnd *SCpnt)
 {
 	FAS216_Info *info = (FAS216_Info *)SCpnt->device->host->hostdata;
 	unsigned long flags;
@@ -2521,7 +2520,7 @@ int fas216_eh_device_reset(Scsi_Cmnd *SCpnt)
 		if (info->scsi.phase == PHASE_IDLE)
 			fas216_kick(info);
 
-		mod_timer(&info->eh_timer, 30 * HZ);
+		mod_timer(&info->eh_timer, jiffies + 30 * HZ);
 		spin_unlock_irqrestore(&info->host_lock, flags);
 
 		/*
@@ -2554,11 +2553,11 @@ int fas216_eh_device_reset(Scsi_Cmnd *SCpnt)
  * Returns: FAILED if unable to reset.
  * Notes: Further commands are blocked.
  */
-int fas216_eh_bus_reset(Scsi_Cmnd *SCpnt)
+int fas216_eh_bus_reset(struct scsi_cmnd *SCpnt)
 {
 	FAS216_Info *info = (FAS216_Info *)SCpnt->device->host->hostdata;
 	unsigned long flags;
-	Scsi_Device *SDpnt;
+	struct scsi_device *SDpnt;
 
 	fas216_checkmagic(info);
 	fas216_log(info, LOG_ERROR, "resetting bus");
@@ -2654,14 +2653,16 @@ static void fas216_init_chip(FAS216_Info *info)
  * Returns: FAILED if unable to reset.
  * Notes: io_request_lock is taken, and irqs are disabled
  */
-int fas216_eh_host_reset(Scsi_Cmnd *SCpnt)
+int fas216_eh_host_reset(struct scsi_cmnd *SCpnt)
 {
 	FAS216_Info *info = (FAS216_Info *)SCpnt->device->host->hostdata;
+
+	spin_lock_irq(info->host->host_lock);
 
 	fas216_checkmagic(info);
 
 	printk("scsi%d.%c: %s: resetting host\n",
-		info->host->host_no, '0' + SCpnt->device->id, __FUNCTION__);
+		info->host->host_no, '0' + SCpnt->device->id, __func__);
 
 	/*
 	 * Reset the SCSI chip.
@@ -2685,6 +2686,7 @@ int fas216_eh_host_reset(Scsi_Cmnd *SCpnt)
 
 	fas216_init_chip(info);
 
+	spin_unlock_irq(info->host->host_lock);
 	return SUCCESS;
 }
 
@@ -2996,7 +2998,7 @@ int fas216_print_stats(FAS216_Info *info, char *buffer)
 int fas216_print_devices(FAS216_Info *info, char *buffer)
 {
 	struct fas216_device *dev;
-	Scsi_Device *scd;
+	struct scsi_device *scd;
 	char *p = buffer;
 
 	p += sprintf(p, "Device/Lun TaggedQ       Parity   Sync\n");

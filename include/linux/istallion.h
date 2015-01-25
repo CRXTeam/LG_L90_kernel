@@ -21,8 +21,6 @@
  *	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-#include <linux/version.h>
-
 /*****************************************************************************/
 #ifndef	_ISTALLION_H
 #define	_ISTALLION_H
@@ -51,30 +49,23 @@
  *	communication with the slave board will always be on a per port
  *	basis.
  */
-typedef struct {
+struct stliport {
 	unsigned long		magic;
-	int			portnr;
-	int			panelnr;
-	int			brdnr;
+	struct tty_port		port;
+	unsigned int		portnr;
+	unsigned int		panelnr;
+	unsigned int		brdnr;
 	unsigned long		state;
-	int			devnr;
-	int			flags;
+	unsigned int		devnr;
 	int			baud_base;
 	int			custom_divisor;
-	int			close_delay;
 	int			closing_wait;
-	int			refcount;
-	int			openwaitcnt;
 	int			rc;
 	int			argsize;
 	void			*argp;
 	unsigned int		rxmarkmsk;
-	struct tty_struct	*tty;
-	wait_queue_head_t	open_wait;
-	wait_queue_head_t	close_wait;
 	wait_queue_head_t	raw_wait;
-	struct work_struct	tqhangup;
-	asysigs_t		asig;
+	struct asysigs		asig;
 	unsigned long		addr;
 	unsigned long		rxoffset;
 	unsigned long		txoffset;
@@ -85,41 +76,41 @@ typedef struct {
 	unsigned char		reqbit;
 	unsigned char		portidx;
 	unsigned char		portbit;
-} stliport_t;
+};
 
 /*
  *	Use a structure of function pointers to do board level operations.
  *	These include, enable/disable, paging shared memory, interrupting, etc.
  */
-typedef struct stlibrd {
+struct stlibrd {
 	unsigned long	magic;
-	int		brdnr;
-	int		brdtype;
-	int		state;
-	int		nrpanels;
-	int		nrports;
-	int		nrdevs;
+	unsigned int	brdnr;
+	unsigned int	brdtype;
+	unsigned long	state;
+	unsigned int	nrpanels;
+	unsigned int	nrports;
+	unsigned int	nrdevs;
 	unsigned int	iobase;
 	int		iosize;
 	unsigned long	memaddr;
-	void		*membase;
-	int		memsize;
+	void		__iomem *membase;
+	unsigned long	memsize;
 	int		pagesize;
 	int		hostoffset;
 	int		slaveoffset;
 	int		bitsize;
 	int		enabval;
-	int		panels[STL_MAXPANELS];
+	unsigned int	panels[STL_MAXPANELS];
 	int		panelids[STL_MAXPANELS];
 	void		(*init)(struct stlibrd *brdp);
 	void		(*enable)(struct stlibrd *brdp);
 	void		(*reenable)(struct stlibrd *brdp);
 	void		(*disable)(struct stlibrd *brdp);
-	char		*(*getmemptr)(struct stlibrd *brdp, unsigned long offset, int line);
+	void		__iomem *(*getmemptr)(struct stlibrd *brdp, unsigned long offset, int line);
 	void		(*intr)(struct stlibrd *brdp);
 	void		(*reset)(struct stlibrd *brdp);
-	stliport_t	*ports[STL_MAXPORTS];
-} stlibrd_t;
+	struct stliport	*ports[STL_MAXPORTS];
+};
 
 
 /*

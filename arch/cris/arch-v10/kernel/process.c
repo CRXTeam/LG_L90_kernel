@@ -1,5 +1,4 @@
-/* $Id: process.c,v 1.9 2004/10/19 13:07:37 starvik Exp $
- * 
+/*
  *  linux/arch/cris/kernel/process.c
  *
  *  Copyright (C) 1995  Linus Torvalds
@@ -11,13 +10,13 @@
  * This file handles the architecture-dependent parts of process handling..
  */
 
-#include <linux/config.h>
 #include <linux/sched.h>
+#include <linux/slab.h>
 #include <linux/err.h>
 #include <linux/fs.h>
-#include <linux/slab.h>
-#include <asm/arch/svinto.h>
+#include <arch/svinto.h>
 #include <linux/init.h>
+#include <arch/system.h>
 
 #ifdef CONFIG_ETRAX_GPIO
 void etrax_gpio_wake_up_check(void); /* drivers/gpio.c */
@@ -65,7 +64,7 @@ void hard_reset_now (void)
 #if defined(CONFIG_ETRAX_WATCHDOG) && !defined(CONFIG_SVINTO_SIM)
 	cause_of_death = 0xbedead;
 #else
-	/* Since we dont plan to keep on reseting the watchdog,
+	/* Since we dont plan to keep on resetting the watchdog,
 	   the key can be arbitrary hence three */
 	*R_WATCHDOG = IO_FIELD(R_WATCHDOG, key, 3) |
 		IO_STATE(R_WATCHDOG, enable, start);
@@ -79,7 +78,7 @@ void hard_reset_now (void)
  */
 unsigned long thread_saved_pc(struct task_struct *t)
 {
-	return (unsigned long)user_regs(t->thread_info)->irp;
+	return task_pt_regs(t)->irp;
 }
 
 static void kernel_thread_helper(void* dummy, int (*fn)(void *), void * arg)
@@ -101,6 +100,7 @@ int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 	regs.r11 = (unsigned long)fn;
 	regs.r12 = (unsigned long)arg;
 	regs.irp = (unsigned long)kernel_thread_helper;
+	regs.dccr = 1 << I_DCCR_BITNR;
 
 	/* Ok, create the new process.. */
         return do_fork(flags | CLONE_VM | CLONE_UNTRACED, 0, &regs, 0, NULL, NULL);
@@ -116,7 +116,7 @@ int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
  */
 asmlinkage void ret_from_fork(void);
 
-int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
+int copy_thread(unsigned long clone_flags, unsigned long usp,
 		unsigned long unused,
 		struct task_struct *p, struct pt_regs *regs)
 {
@@ -127,7 +127,7 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 	 * remember that the task_struct doubles as the kernel stack for the task
 	 */
 
-	childregs = user_regs(p->thread_info);        
+	childregs = task_pt_regs(p);
         
 	*childregs = *regs;  /* struct copy of pt_regs */
         
@@ -205,7 +205,9 @@ asmlinkage int sys_vfork(long r10, long r11, long r12, long r13, long mof, long 
 /*
  * sys_execve() executes a new program.
  */
-asmlinkage int sys_execve(const char *fname, char **argv, char **envp,
+asmlinkage int sys_execve(const char *fname,
+			  const char *const *argv,
+			  const char *const *envp,
 			  long r13, long mof, long srp, 
 			  struct pt_regs *regs)
 {

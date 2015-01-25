@@ -5,8 +5,12 @@
  * (C)1998 Rusty Russell -- This code is GPL.
  */
 
-#include <linux/config.h>
 #include <linux/netfilter.h>
+
+/* only for userspace compatibility */
+#ifndef __KERNEL__
+
+#include <limits.h> /* for INT_MIN, INT_MAX */
 
 /* IP Cache bits. */
 /* Src IP address. */
@@ -48,6 +52,7 @@
 /* Packets about to hit the wire. */
 #define NF_IP_POST_ROUTING	4
 #define NF_IP_NUMHOOKS		5
+#endif /* ! __KERNEL__ */
 
 enum nf_ip_hook_priorities {
 	NF_IP_PRI_FIRST = INT_MIN,
@@ -55,13 +60,13 @@ enum nf_ip_hook_priorities {
 	NF_IP_PRI_RAW = -300,
 	NF_IP_PRI_SELINUX_FIRST = -225,
 	NF_IP_PRI_CONNTRACK = -200,
-	NF_IP_PRI_BRIDGE_SABOTAGE_FORWARD = -175,
 	NF_IP_PRI_MANGLE = -150,
 	NF_IP_PRI_NAT_DST = -100,
-	NF_IP_PRI_BRIDGE_SABOTAGE_LOCAL_OUT = -50,
 	NF_IP_PRI_FILTER = 0,
+	NF_IP_PRI_SECURITY = 50,
 	NF_IP_PRI_NAT_SRC = 100,
 	NF_IP_PRI_SELINUX_LAST = 225,
+	NF_IP_PRI_CONNTRACK_CONFIRM = INT_MAX,
 	NF_IP_PRI_LAST = INT_MAX,
 };
 
@@ -72,19 +77,10 @@ enum nf_ip_hook_priorities {
 #define SO_ORIGINAL_DST 80
 
 #ifdef __KERNEL__
-#ifdef CONFIG_NETFILTER_DEBUG
-void nf_debug_ip_local_deliver(struct sk_buff *skb);
-void nf_debug_ip_loopback_xmit(struct sk_buff *newskb);
-void nf_debug_ip_finish_output2(struct sk_buff *skb);
-#endif /*CONFIG_NETFILTER_DEBUG*/
-
-extern int ip_route_me_harder(struct sk_buff **pskb);
-
-/* Call this before modifying an existing IP packet: ensures it is
-   modifiable and linear to the point you care about (writable_len).
-   Returns true or false. */
-extern int skb_ip_make_writable(struct sk_buff **pskb,
-				unsigned int writable_len);
+extern int ip_route_me_harder(struct sk_buff *skb, unsigned addr_type);
+extern int ip_xfrm_me_harder(struct sk_buff *skb);
+extern __sum16 nf_ip_checksum(struct sk_buff *skb, unsigned int hook,
+				   unsigned int dataoff, u_int8_t protocol);
 #endif /*__KERNEL__*/
 
 #endif /*__LINUX_IP_NETFILTER_H*/

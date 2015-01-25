@@ -22,7 +22,6 @@
  *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 #include <linux/bitops.h>
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
@@ -30,11 +29,14 @@
 #include <linux/seq_file.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
+#include <asm/io.h>
+
+#include <asm/smp.h>
 
 #undef PARISC_IRQ_CR16_COUNTS
 
-extern irqreturn_t timer_interrupt(int, void *, struct pt_regs *);
-extern irqreturn_t ipi_interrupt(int, void *, struct pt_regs *);
+extern irqreturn_t timer_interrupt(int, void *);
+extern irqreturn_t ipi_interrupt(int, void *);
 
 #define EIEM_MASK(irq)       (1UL<<(CPU_IRQ_MAX - irq))
 
@@ -43,46 +45,111 @@ extern irqreturn_t ipi_interrupt(int, void *, struct pt_regs *);
 */
 static volatile unsigned long cpu_eiem = 0;
 
-static void cpu_set_eiem(void *info)
-{
-	set_eiem((unsigned long) info);
-}
+/*
+** local ACK bitmap ... habitually set to 1, but reset to zero
+** between ->ack() and ->end() of the interrupt to prevent
+** re-interruption of a processing interrupt.
+*/
+static DEFINE_PER_CPU(unsigned long, local_ack_eiem) = ~0UL;
 
-static inline void cpu_disable_irq(unsigned int irq)
+static void cpu_mask_irq(struct irq_data *d)
 {
-	unsigned long eirr_bit = EIEM_MASK(irq);
+	unsigned long eirr_bit = EIEM_MASK(d->irq);
 
 	cpu_eiem &= ~eirr_bit;
-        on_each_cpu(cpu_set_eiem, (void *) cpu_eiem, 1, 1);
+	/* Do nothing on the other CPUs.  If they get this interrupt,
+	 * The & cpu_eiem in the do_cpu_irq_mask() ensures they won't
+	 * handle it, and the set_eiem() at the bottom will ensure it
+	 * then gets disabled */
 }
 
-static void cpu_enable_irq(unsigned int irq)
+static void __cpu_unmask_irq(unsigned int irq)
 {
 	unsigned long eirr_bit = EIEM_MASK(irq);
 
-	mtctl(eirr_bit, 23);	/* clear EIRR bit before unmasking */
 	cpu_eiem |= eirr_bit;
-        on_each_cpu(cpu_set_eiem, (void *) cpu_eiem, 1, 1);
+
+	/* This is just a simple NOP IPI.  But what it does is cause
+	 * all the other CPUs to do a set_eiem(cpu_eiem) at the end
+	 * of the interrupt handler */
+	smp_send_all_nop();
 }
 
-static unsigned int cpu_startup_irq(unsigned int irq)
+static void cpu_unmask_irq(struct irq_data *d)
 {
-	cpu_enable_irq(irq);
+	__cpu_unmask_irq(d->irq);
+}
+
+void cpu_ack_irq(struct irq_data *d)
+{
+	unsigned long mask = EIEM_MASK(d->irq);
+	int cpu = smp_processor_id();
+
+	/* Clear in EIEM so we can no longer process */
+	per_cpu(local_ack_eiem, cpu) &= ~mask;
+
+	/* disable the interrupt */
+	set_eiem(cpu_eiem & per_cpu(local_ack_eiem, cpu));
+
+	/* and now ack it */
+	mtctl(mask, 23);
+}
+
+void cpu_eoi_irq(struct irq_data *d)
+{
+	unsigned long mask = EIEM_MASK(d->irq);
+	int cpu = smp_processor_id();
+
+	/* set it in the eiems---it's no longer in process */
+	per_cpu(local_ack_eiem, cpu) |= mask;
+
+	/* enable the interrupt */
+	set_eiem(cpu_eiem & per_cpu(local_ack_eiem, cpu));
+}
+
+#ifdef CONFIG_SMP
+int cpu_check_affinity(struct irq_data *d, const struct cpumask *dest)
+{
+	int cpu_dest;
+
+	/* timer and ipi have to always be received on all CPUs */
+	if (irqd_is_per_cpu(d))
+		return -EINVAL;
+
+	/* whatever mask they set, we just allow one CPU */
+	cpu_dest = first_cpu(*dest);
+
+	return cpu_dest;
+}
+
+static int cpu_set_affinity_irq(struct irq_data *d, const struct cpumask *dest,
+				bool force)
+{
+	int cpu_dest;
+
+	cpu_dest = cpu_check_affinity(d, dest);
+	if (cpu_dest < 0)
+		return -1;
+
+	cpumask_copy(d->affinity, dest);
+
 	return 0;
 }
+#endif
 
-void no_ack_irq(unsigned int irq) { }
-void no_end_irq(unsigned int irq) { }
-
-static struct hw_interrupt_type cpu_interrupt_type = {
-	.typename	= "CPU",
-	.startup	= cpu_startup_irq,
-	.shutdown	= cpu_disable_irq,
-	.enable		= cpu_enable_irq,
-	.disable	= cpu_disable_irq,
-	.ack		= no_ack_irq,
-	.end		= no_end_irq,
-//	.set_affinity	= cpu_set_affinity_irq,
+static struct irq_chip cpu_interrupt_type = {
+	.name			= "CPU",
+	.irq_mask		= cpu_mask_irq,
+	.irq_unmask		= cpu_unmask_irq,
+	.irq_ack		= cpu_ack_irq,
+	.irq_eoi		= cpu_eoi_irq,
+#ifdef CONFIG_SMP
+	.irq_set_affinity	= cpu_set_affinity_irq,
+#endif
+	/* XXX: Needs to be written.  We managed without it so far, but
+	 * we really ought to write it.
+	 */
+	.irq_retrigger	= NULL,
 };
 
 int show_interrupts(struct seq_file *p, void *v)
@@ -102,21 +169,22 @@ int show_interrupts(struct seq_file *p, void *v)
 	}
 
 	if (i < NR_IRQS) {
+		struct irq_desc *desc = irq_to_desc(i);
 		struct irqaction *action;
 
-		spin_lock_irqsave(&irq_desc[i].lock, flags);
-		action = irq_desc[i].action;
+		raw_spin_lock_irqsave(&desc->lock, flags);
+		action = desc->action;
 		if (!action)
 			goto skip;
 		seq_printf(p, "%3d: ", i);
 #ifdef CONFIG_SMP
 		for_each_online_cpu(j)
-			seq_printf(p, "%10u ", kstat_cpu(j).irqs[i]);
+			seq_printf(p, "%10u ", kstat_irqs_cpu(i, j));
 #else
 		seq_printf(p, "%10u ", kstat_irqs(i));
 #endif
 
-		seq_printf(p, " %14s", irq_desc[i].handler->typename);
+		seq_printf(p, " %14s", irq_desc_get_chip(desc)->name);
 #ifndef PARISC_IRQ_CR16_COUNTS
 		seq_printf(p, "  %s", action->name);
 
@@ -148,7 +216,7 @@ int show_interrupts(struct seq_file *p, void *v)
 
 		seq_putc(p, '\n');
  skip:
-		spin_unlock_irqrestore(&irq_desc[i].lock, flags);
+		raw_spin_unlock_irqrestore(&desc->lock, flags);
 	}
 
 	return 0;
@@ -164,17 +232,18 @@ int show_interrupts(struct seq_file *p, void *v)
 ** Then use that to get the Transaction address and data.
 */
 
-int cpu_claim_irq(unsigned int irq, struct hw_interrupt_type *type, void *data)
+int cpu_claim_irq(unsigned int irq, struct irq_chip *type, void *data)
 {
-	if (irq_desc[irq].action)
+	if (irq_has_action(irq))
 		return -EBUSY;
-	if (irq_desc[irq].handler != &cpu_interrupt_type)
+	if (irq_get_chip(irq) != &cpu_interrupt_type)
 		return -EBUSY;
 
+	/* for iosapic interrupts */
 	if (type) {
-		irq_desc[irq].handler = type;
-		irq_desc[irq].handler_data = data;
-		cpu_interrupt_type.enable(irq);
+		irq_set_chip_and_handler(irq, type, handle_percpu_irq);
+		irq_set_chip_data(irq, data);
+		__cpu_unmask_irq(irq);
 	}
 	return 0;
 }
@@ -219,6 +288,18 @@ int txn_alloc_irq(unsigned int bits_wide)
 	return -1;
 }
 
+
+unsigned long txn_affinity_addr(unsigned int irq, int cpu)
+{
+#ifdef CONFIG_SMP
+	struct irq_data *d = irq_get_irq_data(irq);
+	cpumask_copy(d->affinity, cpumask_of(cpu));
+#endif
+
+	return per_cpu(cpu_data, cpu).txn_addr;
+}
+
+
 unsigned long txn_alloc_addr(unsigned int virt_irq)
 {
 	static int next_cpu = -1;
@@ -226,14 +307,15 @@ unsigned long txn_alloc_addr(unsigned int virt_irq)
 	next_cpu++; /* assign to "next" CPU we want this bugger on */
 
 	/* validate entry */
-	while ((next_cpu < NR_CPUS) && (!cpu_data[next_cpu].txn_addr || 
-		!cpu_online(next_cpu)))
+	while ((next_cpu < nr_cpu_ids) &&
+		(!per_cpu(cpu_data, next_cpu).txn_addr ||
+		 !cpu_online(next_cpu)))
 		next_cpu++;
 
-	if (next_cpu >= NR_CPUS) 
+	if (next_cpu >= nr_cpu_ids) 
 		next_cpu = 0;	/* nothing else, assign monarch */
 
-	return cpu_data[next_cpu].txn_addr;
+	return txn_affinity_addr(virt_irq, next_cpu);
 }
 
 
@@ -242,61 +324,69 @@ unsigned int txn_alloc_data(unsigned int virt_irq)
 	return virt_irq - CPU_IRQ_BASE;
 }
 
+static inline int eirr_to_irq(unsigned long eirr)
+{
+	int bit = fls_long(eirr);
+	return (BITS_PER_LONG - bit) + TIMER_IRQ;
+}
+
 /* ONLY called from entry.S:intr_extint() */
 void do_cpu_irq_mask(struct pt_regs *regs)
 {
+	struct pt_regs *old_regs;
 	unsigned long eirr_val;
+	int irq, cpu = smp_processor_id();
+#ifdef CONFIG_SMP
+	struct irq_desc *desc;
+	cpumask_t dest;
+#endif
 
+	old_regs = set_irq_regs(regs);
+	local_irq_disable();
 	irq_enter();
 
-	/*
-	 * Only allow interrupt processing to be interrupted by the
-	 * timer tick
-	 */
-	set_eiem(EIEM_MASK(TIMER_IRQ));
+	eirr_val = mfctl(23) & cpu_eiem & per_cpu(local_ack_eiem, cpu);
+	if (!eirr_val)
+		goto set_out;
+	irq = eirr_to_irq(eirr_val);
 
-	/* 1) only process IRQs that are enabled/unmasked (cpu_eiem)
-	 * 2) We loop here on EIRR contents in order to avoid
-	 *    nested interrupts or having to take another interrupt
-	 *    when we could have just handled it right away.
-	 */
-	for (;;) {
-		unsigned long bit = (1UL << (BITS_PER_LONG - 1));
-		unsigned int irq;
-		eirr_val = mfctl(23) & cpu_eiem;
-		if (!eirr_val)
-			break;
+#ifdef CONFIG_SMP
+	desc = irq_to_desc(irq);
+	cpumask_copy(&dest, desc->irq_data.affinity);
+	if (irqd_is_per_cpu(&desc->irq_data) &&
+	    !cpu_isset(smp_processor_id(), dest)) {
+		int cpu = first_cpu(dest);
 
-		if (eirr_val & EIEM_MASK(TIMER_IRQ))
-			set_eiem(0);
-
-		mtctl(eirr_val, 23); /* reset bits we are going to process */
-
-		/* Work our way from MSb to LSb...same order we alloc EIRs */
-		for (irq = TIMER_IRQ; eirr_val && bit; bit>>=1, irq++) {
-			if (!(bit & eirr_val))
-				continue;
-
-			/* clear bit in mask - can exit loop sooner */
-			eirr_val &= ~bit;
-
-			__do_IRQ(irq, regs);
-		}
+		printk(KERN_DEBUG "redirecting irq %d from CPU %d to %d\n",
+		       irq, smp_processor_id(), cpu);
+		gsc_writel(irq + CPU_IRQ_BASE,
+			   per_cpu(cpu_data, cpu).hpa);
+		goto set_out;
 	}
-	set_eiem(cpu_eiem);
-	irq_exit();
-}
+#endif
+	generic_handle_irq(irq);
 
+ out:
+	irq_exit();
+	set_irq_regs(old_regs);
+	return;
+
+ set_out:
+	set_eiem(cpu_eiem & per_cpu(local_ack_eiem, cpu));
+	goto out;
+}
 
 static struct irqaction timer_action = {
 	.handler = timer_interrupt,
 	.name = "timer",
+	.flags = IRQF_DISABLED | IRQF_TIMER | IRQF_PERCPU | IRQF_IRQPOLL,
 };
 
 #ifdef CONFIG_SMP
 static struct irqaction ipi_action = {
 	.handler = ipi_interrupt,
 	.name = "IPI",
+	.flags = IRQF_DISABLED | IRQF_PERCPU,
 };
 #endif
 
@@ -304,14 +394,15 @@ static void claim_cpu_irqs(void)
 {
 	int i;
 	for (i = CPU_IRQ_BASE; i <= CPU_IRQ_MAX; i++) {
-		irq_desc[i].handler = &cpu_interrupt_type;
+		irq_set_chip_and_handler(i, &cpu_interrupt_type,
+					 handle_percpu_irq);
 	}
 
-	irq_desc[TIMER_IRQ].action = &timer_action;
-	irq_desc[TIMER_IRQ].status |= IRQ_PER_CPU;
+	irq_set_handler(TIMER_IRQ, handle_percpu_irq);
+	setup_irq(TIMER_IRQ, &timer_action);
 #ifdef CONFIG_SMP
-	irq_desc[IPI_IRQ].action = &ipi_action;
-	irq_desc[IPI_IRQ].status = IRQ_PER_CPU;
+	irq_set_handler(IPI_IRQ, handle_percpu_irq);
+	setup_irq(IPI_IRQ, &ipi_action);
 #endif
 }
 
@@ -330,14 +421,3 @@ void __init init_IRQ(void)
 
 }
 
-void hw_resend_irq(struct hw_interrupt_type *type, unsigned int irq)
-{
-	/* XXX: Needs to be written.  We managed without it so far, but
-	 * we really ought to write it.
-	 */
-}
-
-void ack_bad_irq(unsigned int irq)
-{
-	printk("unexpected IRQ %d\n", irq);
-}

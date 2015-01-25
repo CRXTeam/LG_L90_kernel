@@ -22,8 +22,6 @@
  *
  *  History:
  *   0.1  04.01.2000  Created
- *
- *  $Id: usbdevice_fs.h,v 1.1 2000/01/06 18:40:41 tom Exp $
  */
 
 /*****************************************************************************/
@@ -32,11 +30,9 @@
 #define _LINUX_USBDEVICE_FS_H
 
 #include <linux/types.h>
-#include <linux/compat.h>
+#include <linux/magic.h>
 
 /* --------------------------------------------------------------------- */
-
-#define USBDEVICE_SUPER_MAGIC 0x9fa2
 
 /* usbdevfs ioctl codes */
 
@@ -79,8 +75,12 @@ struct usbdevfs_connectinfo {
 	unsigned char slow;
 };
 
-#define USBDEVFS_URB_SHORT_NOT_OK          1
-#define USBDEVFS_URB_ISO_ASAP              2
+#define USBDEVFS_URB_SHORT_NOT_OK	0x01
+#define USBDEVFS_URB_ISO_ASAP		0x02
+#define USBDEVFS_URB_BULK_CONTINUATION	0x04
+#define USBDEVFS_URB_NO_FSBR		0x20
+#define USBDEVFS_URB_ZERO_PACKET	0x40
+#define USBDEVFS_URB_NO_INTERRUPT	0x80
 
 #define USBDEVFS_URB_TYPE_ISO		   0
 #define USBDEVFS_URB_TYPE_INTERRUPT	   1
@@ -104,8 +104,9 @@ struct usbdevfs_urb {
 	int start_frame;
 	int number_of_packets;
 	int error_count;
-	unsigned int signr;  /* signal to be sent on error, -1 if none should be sent */
-	void *usercontext;
+	unsigned int signr;	/* signal to be sent on completion,
+				  or 0 if none should be sent. */
+	void __user *usercontext;
 	struct usbdevfs_iso_packet_desc iso_frame_desc[0];
 };
 
@@ -124,7 +125,32 @@ struct usbdevfs_hub_portinfo {
 	char port [127];	/* e.g. port 3 connects to device 27 */
 };
 
+#ifdef __KERNEL__
 #ifdef CONFIG_COMPAT
+#include <linux/compat.h>
+
+struct usbdevfs_ctrltransfer32 {
+        u8 bRequestType;
+        u8 bRequest;
+        u16 wValue;
+        u16 wIndex;
+        u16 wLength;
+        u32 timeout;  /* in milliseconds */
+        compat_caddr_t data;
+};
+
+struct usbdevfs_bulktransfer32 {
+        compat_uint_t ep;
+        compat_uint_t len;
+        compat_uint_t timeout; /* in milliseconds */
+        compat_caddr_t data;
+};
+
+struct usbdevfs_disconnectsignal32 {
+        compat_int_t signr;
+        compat_caddr_t context;
+};
+
 struct usbdevfs_urb32 {
 	unsigned char type;
 	unsigned char endpoint;
@@ -140,10 +166,19 @@ struct usbdevfs_urb32 {
 	compat_caddr_t usercontext; /* unused */
 	struct usbdevfs_iso_packet_desc iso_frame_desc[0];
 };
+
+struct usbdevfs_ioctl32 {
+	s32 ifno;
+	s32 ioctl_code;
+	compat_caddr_t data;
+};
 #endif
+#endif /* __KERNEL__ */
 
 #define USBDEVFS_CONTROL           _IOWR('U', 0, struct usbdevfs_ctrltransfer)
+#define USBDEVFS_CONTROL32           _IOWR('U', 0, struct usbdevfs_ctrltransfer32)
 #define USBDEVFS_BULK              _IOWR('U', 2, struct usbdevfs_bulktransfer)
+#define USBDEVFS_BULK32              _IOWR('U', 2, struct usbdevfs_bulktransfer32)
 #define USBDEVFS_RESETEP           _IOR('U', 3, unsigned int)
 #define USBDEVFS_SETINTERFACE      _IOR('U', 4, struct usbdevfs_setinterface)
 #define USBDEVFS_SETCONFIGURATION  _IOR('U', 5, unsigned int)
@@ -152,17 +187,21 @@ struct usbdevfs_urb32 {
 #define USBDEVFS_SUBMITURB32       _IOR('U', 10, struct usbdevfs_urb32)
 #define USBDEVFS_DISCARDURB        _IO('U', 11)
 #define USBDEVFS_REAPURB           _IOW('U', 12, void *)
-#define USBDEVFS_REAPURB32         _IOW('U', 12, u32)
+#define USBDEVFS_REAPURB32         _IOW('U', 12, __u32)
 #define USBDEVFS_REAPURBNDELAY     _IOW('U', 13, void *)
-#define USBDEVFS_REAPURBNDELAY32   _IOW('U', 13, u32)
+#define USBDEVFS_REAPURBNDELAY32   _IOW('U', 13, __u32)
 #define USBDEVFS_DISCSIGNAL        _IOR('U', 14, struct usbdevfs_disconnectsignal)
+#define USBDEVFS_DISCSIGNAL32      _IOR('U', 14, struct usbdevfs_disconnectsignal32)
 #define USBDEVFS_CLAIMINTERFACE    _IOR('U', 15, unsigned int)
 #define USBDEVFS_RELEASEINTERFACE  _IOR('U', 16, unsigned int)
 #define USBDEVFS_CONNECTINFO       _IOW('U', 17, struct usbdevfs_connectinfo)
 #define USBDEVFS_IOCTL             _IOWR('U', 18, struct usbdevfs_ioctl)
+#define USBDEVFS_IOCTL32           _IOWR('U', 18, struct usbdevfs_ioctl32)
 #define USBDEVFS_HUB_PORTINFO      _IOR('U', 19, struct usbdevfs_hub_portinfo)
 #define USBDEVFS_RESET             _IO('U', 20)
 #define USBDEVFS_CLEAR_HALT        _IOR('U', 21, unsigned int)
 #define USBDEVFS_DISCONNECT        _IO('U', 22)
 #define USBDEVFS_CONNECT           _IO('U', 23)
+#define USBDEVFS_CLAIM_PORT        _IOR('U', 24, unsigned int)
+#define USBDEVFS_RELEASE_PORT      _IOR('U', 25, unsigned int)
 #endif /* _LINUX_USBDEVICE_FS_H */

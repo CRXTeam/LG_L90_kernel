@@ -1,7 +1,7 @@
-/* 
+/*
     bt878.h - Bt878 audio module (register offsets)
 
-    Copyright (C) 2002 Peter Hettkamp <peter.hettkamp@t-online.de>
+    Copyright (C) 2002 Peter Hettkamp <peter.hettkamp@htp-tel.de>
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -25,6 +25,8 @@
 #include <linux/pci.h>
 #include <linux/sched.h>
 #include <linux/spinlock.h>
+#include <linux/mutex.h>
+
 #include "bt848.h"
 #include "bttv.h"
 
@@ -88,10 +90,21 @@
 
 #define BT878_RISC_SYNC_MASK	(1 << 15)
 
+
+#define BTTV_BOARD_UNKNOWN                 0x00
+#define BTTV_BOARD_PINNACLESAT             0x5e
+#define BTTV_BOARD_NEBULA_DIGITV           0x68
+#define BTTV_BOARD_PC_HDTV                 0x70
+#define BTTV_BOARD_TWINHAN_DST             0x71
+#define BTTV_BOARD_AVDVBT_771              0x7b
+#define BTTV_BOARD_AVDVBT_761              0x7c
+#define BTTV_BOARD_DVICO_DVBT_LITE         0x80
+#define BTTV_BOARD_DVICO_FUSIONHDTV_5_LITE 0x87
+
 extern int bt878_num;
 
 struct bt878 {
-	struct semaphore  gpio_lock;
+	struct mutex gpio_lock;
 	unsigned int nr;
 	unsigned int bttv_nr;
 	struct i2c_adapter *adapter;
@@ -115,26 +128,25 @@ struct bt878 {
 	dma_addr_t buf_dma;
 
 	u32 risc_size;
-	u32 *risc_cpu;
+	__le32 *risc_cpu;
 	dma_addr_t risc_dma;
 	u32 risc_pos;
 
 	struct tasklet_struct tasklet;
-	int shutdown;	
+	int shutdown;
 };
 
 extern struct bt878 bt878[BT878_MAX];
 
 void bt878_start(struct bt878 *bt, u32 controlreg, u32 op_sync_orin,
 		u32 irq_err_ignore);
-void bt878_stop(struct bt878 *bt);	     
+void bt878_stop(struct bt878 *bt);
 
 #if defined(__powerpc__)	/* big-endian */
-extern __inline__ void io_st_le32(volatile unsigned __iomem *addr, unsigned val)
+static inline void io_st_le32(volatile unsigned __iomem *addr, unsigned val)
 {
-	__asm__ __volatile__("stwbrx %1,0,%2":"=m"(*addr):"r"(val),
-			     "r"(addr));
-	__asm__ __volatile__("eieio":::"memory");
+	st_le32(addr, val);
+	eieio();
 }
 
 #define bmtwrite(dat,adr)  io_st_le32((adr),(dat))

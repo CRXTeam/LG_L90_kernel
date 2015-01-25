@@ -11,51 +11,55 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/list.h>
-#include <linux/device.h>
+#include <linux/platform_device.h>
 #include <linux/dma-mapping.h>
-#include <linux/slab.h>
 #include <linux/string.h>
-#include <linux/sysdev.h>
+#include <linux/device.h>
+#include <linux/amba/bus.h>
+#include <linux/amba/kmi.h>
+#include <linux/amba/clcd.h>
+#include <linux/amba/mmci.h>
+#include <linux/io.h>
+#include <linux/gfp.h>
+#include <linux/clkdev.h>
+#include <linux/mtd/physmap.h>
 
-#include <asm/hardware.h>
-#include <asm/io.h>
-#include <asm/irq.h>
+#include <mach/hardware.h>
+#include <mach/platform.h>
 #include <asm/setup.h>
 #include <asm/mach-types.h>
-#include <asm/hardware/amba.h>
-#include <asm/hardware/amba_kmi.h>
-#include <asm/hardware/amba_clcd.h>
-#include <asm/hardware/icst525.h>
+#include <asm/hardware/arm_timer.h>
+#include <asm/hardware/icst.h>
 
-#include <asm/arch/cm.h>
-#include <asm/arch/lm.h>
+#include <mach/cm.h>
+#include <mach/lm.h>
+#include <mach/irqs.h>
 
 #include <asm/mach/arch.h>
-#include <asm/mach/flash.h>
 #include <asm/mach/irq.h>
-#include <asm/mach/mmc.h>
 #include <asm/mach/map.h>
 #include <asm/mach/time.h>
 
-#include "common.h"
-#include "clock.h"
+#include <asm/hardware/timer-sp.h>
 
-#define INTCP_PA_MMC_BASE		0x1c000000
-#define INTCP_PA_AACI_BASE		0x1d000000
+#include <plat/clcd.h>
+#include <plat/fpga-irq.h>
+#include <plat/sched_clock.h>
+
+#include "common.h"
 
 #define INTCP_PA_FLASH_BASE		0x24000000
 #define INTCP_FLASH_SIZE		SZ_32M
 
 #define INTCP_PA_CLCD_BASE		0xc0000000
 
-#define INTCP_VA_CIC_BASE		0xf1000040
-#define INTCP_VA_PIC_BASE		0xf1400000
-#define INTCP_VA_SIC_BASE		0xfca00000
+#define INTCP_VA_CIC_BASE		__io_address(INTEGRATOR_HDR_BASE + 0x40)
+#define INTCP_VA_PIC_BASE		__io_address(INTEGRATOR_IC_BASE)
+#define INTCP_VA_SIC_BASE		__io_address(INTEGRATOR_CP_SIC_BASE)
 
-#define INTCP_PA_ETH_BASE		0xc8000000
 #define INTCP_ETH_SIZE			0x10
 
-#define INTCP_VA_CTRL_BASE		0xfcb00000
+#define INTCP_VA_CTRL_BASE		IO_ADDRESS(INTEGRATOR_CP_CTL_BASE)
 #define INTCP_FLASHPROG			0x04
 #define CINTEGRATOR_FLASHPROG_FLVPPEN	(1 << 0)
 #define CINTEGRATOR_FLASHPROG_FLWREN	(1 << 1)
@@ -70,22 +74,68 @@
  * f1600000	16000000	UART 0
  * f1700000	17000000	UART 1
  * f1a00000	1a000000	Debug LEDs
- * f1b00000	1b000000	GPIO
+ * fc900000	c9000000	GPIO
+ * fca00000	ca000000	SIC
+ * fcb00000	cb000000	CP system control
  */
 
 static struct map_desc intcp_io_desc[] __initdata = {
- { IO_ADDRESS(INTEGRATOR_HDR_BASE),   INTEGRATOR_HDR_BASE,   SZ_4K,  MT_DEVICE },
- { IO_ADDRESS(INTEGRATOR_SC_BASE),    INTEGRATOR_SC_BASE,    SZ_4K,  MT_DEVICE },
- { IO_ADDRESS(INTEGRATOR_EBI_BASE),   INTEGRATOR_EBI_BASE,   SZ_4K,  MT_DEVICE },
- { IO_ADDRESS(INTEGRATOR_CT_BASE),    INTEGRATOR_CT_BASE,    SZ_4K,  MT_DEVICE },
- { IO_ADDRESS(INTEGRATOR_IC_BASE),    INTEGRATOR_IC_BASE,    SZ_4K,  MT_DEVICE },
- { IO_ADDRESS(INTEGRATOR_UART0_BASE), INTEGRATOR_UART0_BASE, SZ_4K,  MT_DEVICE },
- { IO_ADDRESS(INTEGRATOR_UART1_BASE), INTEGRATOR_UART1_BASE, SZ_4K,  MT_DEVICE },
- { IO_ADDRESS(INTEGRATOR_DBG_BASE),   INTEGRATOR_DBG_BASE,   SZ_4K,  MT_DEVICE },
- { IO_ADDRESS(INTEGRATOR_GPIO_BASE),  INTEGRATOR_GPIO_BASE,  SZ_4K,  MT_DEVICE },
- { 0xfc900000, 0xc9000000, SZ_4K, MT_DEVICE },
- { 0xfca00000, 0xca000000, SZ_4K, MT_DEVICE },
- { 0xfcb00000, 0xcb000000, SZ_4K, MT_DEVICE },
+	{
+		.virtual	= IO_ADDRESS(INTEGRATOR_HDR_BASE),
+		.pfn		= __phys_to_pfn(INTEGRATOR_HDR_BASE),
+		.length		= SZ_4K,
+		.type		= MT_DEVICE
+	}, {
+		.virtual	= IO_ADDRESS(INTEGRATOR_SC_BASE),
+		.pfn		= __phys_to_pfn(INTEGRATOR_SC_BASE),
+		.length		= SZ_4K,
+		.type		= MT_DEVICE
+	}, {
+		.virtual	= IO_ADDRESS(INTEGRATOR_EBI_BASE),
+		.pfn		= __phys_to_pfn(INTEGRATOR_EBI_BASE),
+		.length		= SZ_4K,
+		.type		= MT_DEVICE
+	}, {
+		.virtual	= IO_ADDRESS(INTEGRATOR_CT_BASE),
+		.pfn		= __phys_to_pfn(INTEGRATOR_CT_BASE),
+		.length		= SZ_4K,
+		.type		= MT_DEVICE
+	}, {
+		.virtual	= IO_ADDRESS(INTEGRATOR_IC_BASE),
+		.pfn		= __phys_to_pfn(INTEGRATOR_IC_BASE),
+		.length		= SZ_4K,
+		.type		= MT_DEVICE
+	}, {
+		.virtual	= IO_ADDRESS(INTEGRATOR_UART0_BASE),
+		.pfn		= __phys_to_pfn(INTEGRATOR_UART0_BASE),
+		.length		= SZ_4K,
+		.type		= MT_DEVICE
+	}, {
+		.virtual	= IO_ADDRESS(INTEGRATOR_UART1_BASE),
+		.pfn		= __phys_to_pfn(INTEGRATOR_UART1_BASE),
+		.length		= SZ_4K,
+		.type		= MT_DEVICE
+	}, {
+		.virtual	= IO_ADDRESS(INTEGRATOR_DBG_BASE),
+		.pfn		= __phys_to_pfn(INTEGRATOR_DBG_BASE),
+		.length		= SZ_4K,
+		.type		= MT_DEVICE
+	}, {
+		.virtual	= IO_ADDRESS(INTEGRATOR_CP_GPIO_BASE),
+		.pfn		= __phys_to_pfn(INTEGRATOR_CP_GPIO_BASE),
+		.length		= SZ_4K,
+		.type		= MT_DEVICE
+	}, {
+		.virtual	= IO_ADDRESS(INTEGRATOR_CP_SIC_BASE),
+		.pfn		= __phys_to_pfn(INTEGRATOR_CP_SIC_BASE),
+		.length		= SZ_4K,
+		.type		= MT_DEVICE
+	}, {
+		.virtual	= IO_ADDRESS(INTEGRATOR_CP_CTL_BASE),
+		.pfn		= __phys_to_pfn(INTEGRATOR_CP_CTL_BASE),
+		.length		= SZ_4K,
+		.type		= MT_DEVICE
+	}
 };
 
 static void __init intcp_map_io(void)
@@ -93,174 +143,110 @@ static void __init intcp_map_io(void)
 	iotable_init(intcp_io_desc, ARRAY_SIZE(intcp_io_desc));
 }
 
-#define cic_writel	__raw_writel
-#define cic_readl	__raw_readl
-#define pic_writel	__raw_writel
-#define pic_readl	__raw_readl
-#define sic_writel	__raw_writel
-#define sic_readl	__raw_readl
-
-static void cic_mask_irq(unsigned int irq)
-{
-	irq -= IRQ_CIC_START;
-	cic_writel(1 << irq, INTCP_VA_CIC_BASE + IRQ_ENABLE_CLEAR);
-}
-
-static void cic_unmask_irq(unsigned int irq)
-{
-	irq -= IRQ_CIC_START;
-	cic_writel(1 << irq, INTCP_VA_CIC_BASE + IRQ_ENABLE_SET);
-}
-
-static struct irqchip cic_chip = {
-	.ack	= cic_mask_irq,
-	.mask	= cic_mask_irq,
-	.unmask	= cic_unmask_irq,
+static struct fpga_irq_data cic_irq_data = {
+	.base		= INTCP_VA_CIC_BASE,
+	.irq_start	= IRQ_CIC_START,
+	.chip.name	= "CIC",
 };
 
-static void pic_mask_irq(unsigned int irq)
-{
-	irq -= IRQ_PIC_START;
-	pic_writel(1 << irq, INTCP_VA_PIC_BASE + IRQ_ENABLE_CLEAR);
-}
-
-static void pic_unmask_irq(unsigned int irq)
-{
-	irq -= IRQ_PIC_START;
-	pic_writel(1 << irq, INTCP_VA_PIC_BASE + IRQ_ENABLE_SET);
-}
-
-static struct irqchip pic_chip = {
-	.ack	= pic_mask_irq,
-	.mask	= pic_mask_irq,
-	.unmask = pic_unmask_irq,
+static struct fpga_irq_data pic_irq_data = {
+	.base		= INTCP_VA_PIC_BASE,
+	.irq_start	= IRQ_PIC_START,
+	.chip.name	= "PIC",
 };
 
-static void sic_mask_irq(unsigned int irq)
-{
-	irq -= IRQ_SIC_START;
-	sic_writel(1 << irq, INTCP_VA_SIC_BASE + IRQ_ENABLE_CLEAR);
-}
-
-static void sic_unmask_irq(unsigned int irq)
-{
-	irq -= IRQ_SIC_START;
-	sic_writel(1 << irq, INTCP_VA_SIC_BASE + IRQ_ENABLE_SET);
-}
-
-static struct irqchip sic_chip = {
-	.ack	= sic_mask_irq,
-	.mask	= sic_mask_irq,
-	.unmask	= sic_unmask_irq,
+static struct fpga_irq_data sic_irq_data = {
+	.base		= INTCP_VA_SIC_BASE,
+	.irq_start	= IRQ_SIC_START,
+	.chip.name	= "SIC",
 };
-
-static void
-sic_handle_irq(unsigned int irq, struct irqdesc *desc, struct pt_regs *regs)
-{
-	unsigned long status = sic_readl(INTCP_VA_SIC_BASE + IRQ_STATUS);
-
-	if (status == 0) {
-		do_bad_IRQ(irq, desc, regs);
-		return;
-	}
-
-	do {
-		irq = ffs(status) - 1;
-		status &= ~(1 << irq);
-
-		irq += IRQ_SIC_START;
-
-		desc = irq_desc + irq;
-		desc->handle(irq, desc, regs);
-	} while (status);
-}
 
 static void __init intcp_init_irq(void)
 {
-	unsigned int i;
+	u32 pic_mask, sic_mask;
+
+	pic_mask = ~((~0u) << (11 - IRQ_PIC_START));
+	pic_mask |= (~((~0u) << (29 - 22))) << 22;
+	sic_mask = ~((~0u) << (1 + IRQ_SIC_END - IRQ_SIC_START));
 
 	/*
 	 * Disable all interrupt sources
 	 */
-	pic_writel(0xffffffff, INTCP_VA_PIC_BASE + IRQ_ENABLE_CLEAR);
-	pic_writel(0xffffffff, INTCP_VA_PIC_BASE + FIQ_ENABLE_CLEAR);
+	writel(0xffffffff, INTCP_VA_PIC_BASE + IRQ_ENABLE_CLEAR);
+	writel(0xffffffff, INTCP_VA_PIC_BASE + FIQ_ENABLE_CLEAR);
+	writel(0xffffffff, INTCP_VA_CIC_BASE + IRQ_ENABLE_CLEAR);
+	writel(0xffffffff, INTCP_VA_CIC_BASE + FIQ_ENABLE_CLEAR);
+	writel(sic_mask, INTCP_VA_SIC_BASE + IRQ_ENABLE_CLEAR);
+	writel(sic_mask, INTCP_VA_SIC_BASE + FIQ_ENABLE_CLEAR);
 
-	for (i = IRQ_PIC_START; i <= IRQ_PIC_END; i++) {
-		if (i == 11)
-			i = 22;
-		if (i == IRQ_CP_CPPLDINT)
-			i++;
-		if (i == 29)
-			break;
-		set_irq_chip(i, &pic_chip);
-		set_irq_handler(i, do_level_IRQ);
-		set_irq_flags(i, IRQF_VALID | IRQF_PROBE);
-	}
+	fpga_irq_init(-1, pic_mask, &pic_irq_data);
 
-	cic_writel(0xffffffff, INTCP_VA_CIC_BASE + IRQ_ENABLE_CLEAR);
-	cic_writel(0xffffffff, INTCP_VA_CIC_BASE + FIQ_ENABLE_CLEAR);
+	fpga_irq_init(-1, ~((~0u) << (1 + IRQ_CIC_END - IRQ_CIC_START)),
+		&cic_irq_data);
 
-	for (i = IRQ_CIC_START; i <= IRQ_CIC_END; i++) {
-		set_irq_chip(i, &cic_chip);
-		set_irq_handler(i, do_level_IRQ);
-		set_irq_flags(i, IRQF_VALID);
-	}
-
-	sic_writel(0x00000fff, INTCP_VA_SIC_BASE + IRQ_ENABLE_CLEAR);
-	sic_writel(0x00000fff, INTCP_VA_SIC_BASE + FIQ_ENABLE_CLEAR);
-
-	for (i = IRQ_SIC_START; i <= IRQ_SIC_END; i++) {
-		set_irq_chip(i, &sic_chip);
-		set_irq_handler(i, do_level_IRQ);
-		set_irq_flags(i, IRQF_VALID | IRQF_PROBE);
-	}
-
-	set_irq_handler(IRQ_CP_CPPLDINT, sic_handle_irq);
-	pic_unmask_irq(IRQ_CP_CPPLDINT);
+	fpga_irq_init(IRQ_CP_CPPLDINT, sic_mask, &sic_irq_data);
 }
 
 /*
  * Clock handling
  */
-#define CM_LOCK (IO_ADDRESS(INTEGRATOR_HDR_BASE)+INTEGRATOR_HDR_LOCK_OFFSET)
-#define CM_AUXOSC (IO_ADDRESS(INTEGRATOR_HDR_BASE)+0x1c)
+#define CM_LOCK		(__io_address(INTEGRATOR_HDR_BASE)+INTEGRATOR_HDR_LOCK_OFFSET)
+#define CM_AUXOSC	(__io_address(INTEGRATOR_HDR_BASE)+0x1c)
 
-static const struct icst525_params cp_auxvco_params = {
-	.ref		= 24000,
-	.vco_max	= 320000,
+static const struct icst_params cp_auxvco_params = {
+	.ref		= 24000000,
+	.vco_max	= ICST525_VCO_MAX_5V,
+	.vco_min	= ICST525_VCO_MIN,
 	.vd_min 	= 8,
 	.vd_max 	= 263,
 	.rd_min 	= 3,
 	.rd_max 	= 65,
+	.s2div		= icst525_s2div,
+	.idx2s		= icst525_idx2s,
 };
 
-static void cp_auxvco_set(struct clk *clk, struct icst525_vco vco)
+static void cp_auxvco_set(struct clk *clk, struct icst_vco vco)
 {
 	u32 val;
 
-	val = readl(CM_AUXOSC) & ~0x7ffff;
+	val = readl(clk->vcoreg) & ~0x7ffff;
 	val |= vco.v | (vco.r << 9) | (vco.s << 16);
 
 	writel(0xa05f, CM_LOCK);
-	writel(val, CM_AUXOSC);
+	writel(val, clk->vcoreg);
 	writel(0, CM_LOCK);
 }
 
-static struct clk cp_clcd_clk = {
-	.name	= "CLCDCLK",
-	.params	= &cp_auxvco_params,
-	.setvco = cp_auxvco_set,
+static const struct clk_ops cp_auxclk_ops = {
+	.round	= icst_clk_round,
+	.set	= icst_clk_set,
+	.setvco	= cp_auxvco_set,
 };
 
-static struct clk cp_mmci_clk = {
-	.name	= "MCLK",
-	.rate	= 14745600,
+static struct clk cp_auxclk = {
+	.ops	= &cp_auxclk_ops,
+	.params	= &cp_auxvco_params,
+	.vcoreg	= CM_AUXOSC,
+};
+
+static struct clk sp804_clk = {
+	.rate	= 1000000,
+};
+
+static struct clk_lookup cp_lookups[] = {
+	{	/* CLCD */
+		.dev_id		= "mb:c0",
+		.clk		= &cp_auxclk,
+	}, {	/* SP804 timers */
+		.dev_id		= "sp804",
+		.clk		= &sp804_clk,
+	},
 };
 
 /*
  * Flash handling.
  */
-static int intcp_flash_init(void)
+static int intcp_flash_init(struct platform_device *dev)
 {
 	u32 val;
 
@@ -271,7 +257,7 @@ static int intcp_flash_init(void)
 	return 0;
 }
 
-static void intcp_flash_exit(void)
+static void intcp_flash_exit(struct platform_device *dev)
 {
 	u32 val;
 
@@ -280,7 +266,7 @@ static void intcp_flash_exit(void)
 	writel(val, INTCP_VA_CTRL_BASE + INTCP_FLASHPROG);
 }
 
-static void intcp_flash_set_vpp(int on)
+static void intcp_flash_set_vpp(struct platform_device *pdev, int on)
 {
 	u32 val;
 
@@ -292,8 +278,7 @@ static void intcp_flash_set_vpp(int on)
 	writel(val, INTCP_VA_CTRL_BASE + INTCP_FLASHPROG);
 }
 
-static struct flash_platform_data intcp_flash_data = {
-	.map_name	= "cfi_probe",
+static struct physmap_flash_data intcp_flash_data = {
 	.width		= 4,
 	.init		= intcp_flash_init,
 	.exit		= intcp_flash_exit,
@@ -307,7 +292,7 @@ static struct resource intcp_flash_resource = {
 };
 
 static struct platform_device intcp_flash_device = {
-	.name		= "armflash",
+	.name		= "physmap-flash",
 	.id		= 0,
 	.dev		= {
 		.platform_data	= &intcp_flash_data,
@@ -318,8 +303,8 @@ static struct platform_device intcp_flash_device = {
 
 static struct resource smc91x_resources[] = {
 	[0] = {
-		.start	= INTCP_PA_ETH_BASE,
-		.end	= INTCP_PA_ETH_BASE + INTCP_ETH_SIZE - 1,
+		.start	= INTEGRATOR_CP_ETH_BASE,
+		.end	= INTEGRATOR_CP_ETH_BASE + INTCP_ETH_SIZE - 1,
 		.flags	= IORESOURCE_MEM,
 	},
 	[1] = {
@@ -349,140 +334,81 @@ static struct platform_device *intcp_devs[] __initdata = {
  */
 static unsigned int mmc_status(struct device *dev)
 {
-	unsigned int status = readl(0xfca00004);
-	writel(8, 0xfcb00008);
+	unsigned int status = readl(IO_ADDRESS(0xca000000 + 4));
+	writel(8, IO_ADDRESS(INTEGRATOR_CP_CTL_BASE + 8));
 
 	return status & 8;
 }
 
-static struct mmc_platform_data mmc_data = {
+static struct mmci_platform_data mmc_data = {
 	.ocr_mask	= MMC_VDD_32_33|MMC_VDD_33_34,
 	.status		= mmc_status,
+	.gpio_wp	= -1,
+	.gpio_cd	= -1,
 };
 
-static struct amba_device mmc_device = {
-	.dev		= {
-		.bus_id	= "mb:1c",
-		.platform_data = &mmc_data,
-	},
-	.res		= {
-		.start	= INTCP_PA_MMC_BASE,
-		.end	= INTCP_PA_MMC_BASE + SZ_4K - 1,
-		.flags	= IORESOURCE_MEM,
-	},
-	.irq		= { IRQ_CP_MMCIINT0, IRQ_CP_MMCIINT1 },
-	.periphid	= 0,
-};
+#define INTEGRATOR_CP_MMC_IRQS	{ IRQ_CP_MMCIINT0, IRQ_CP_MMCIINT1 }
+#define INTEGRATOR_CP_AACI_IRQS	{ IRQ_CP_AACIINT }
 
-static struct amba_device aaci_device = {
-	.dev		= {
-		.bus_id	= "mb:1d",
-	},
-	.res		= {
-		.start	= INTCP_PA_AACI_BASE,
-		.end	= INTCP_PA_AACI_BASE + SZ_4K - 1,
-		.flags	= IORESOURCE_MEM,
-	},
-	.irq		= { IRQ_CP_AACIINT, NO_IRQ },
-	.periphid	= 0,
-};
+static AMBA_APB_DEVICE(mmc, "mb:1c", 0, INTEGRATOR_CP_MMC_BASE,
+	INTEGRATOR_CP_MMC_IRQS, &mmc_data);
+
+static AMBA_APB_DEVICE(aaci, "mb:1d", 0, INTEGRATOR_CP_AACI_BASE,
+	INTEGRATOR_CP_AACI_IRQS, NULL);
 
 
 /*
  * CLCD support
  */
-static struct clcd_panel vga = {
-	.mode		= {
-		.name		= "VGA",
-		.refresh	= 60,
-		.xres		= 640,
-		.yres		= 480,
-		.pixclock	= 39721,
-		.left_margin	= 40,
-		.right_margin	= 24,
-		.upper_margin	= 32,
-		.lower_margin	= 11,
-		.hsync_len	= 96,
-		.vsync_len	= 2,
-		.sync		= 0,
-		.vmode		= FB_VMODE_NONINTERLACED,
-	},
-	.width		= -1,
-	.height		= -1,
-	.tim2		= TIM2_BCD | TIM2_IPC,
-	.cntl		= CNTL_LCDTFT | CNTL_LCDVCOMP(1),
-	.bpp		= 16,
-	.grayscale	= 0,
-};
-
 /*
  * Ensure VGA is selected.
  */
 static void cp_clcd_enable(struct clcd_fb *fb)
 {
-	cm_control(CM_CTRL_LCDMUXSEL_MASK, CM_CTRL_LCDMUXSEL_VGA);
-}
+	struct fb_var_screeninfo *var = &fb->fb.var;
+	u32 val = CM_CTRL_STATIC1 | CM_CTRL_STATIC2;
 
-static unsigned long framesize = SZ_1M;
+	if (var->bits_per_pixel <= 8 ||
+	    (var->bits_per_pixel == 16 && var->green.length == 5))
+		/* Pseudocolor, RGB555, BGR555 */
+		val |= CM_CTRL_LCDMUXSEL_VGA555_TFT555;
+	else if (fb->fb.var.bits_per_pixel <= 16)
+		/* truecolor RGB565 */
+		val |= CM_CTRL_LCDMUXSEL_VGA565_TFT555;
+	else
+		val = 0; /* no idea for this, don't trust the docs */
+
+	cm_control(CM_CTRL_LCDMUXSEL_MASK|
+		   CM_CTRL_LCDEN0|
+		   CM_CTRL_LCDEN1|
+		   CM_CTRL_STATIC1|
+		   CM_CTRL_STATIC2|
+		   CM_CTRL_STATIC|
+		   CM_CTRL_n24BITEN, val);
+}
 
 static int cp_clcd_setup(struct clcd_fb *fb)
 {
-	dma_addr_t dma;
+	fb->panel = versatile_clcd_get_panel("VGA");
+	if (!fb->panel)
+		return -EINVAL;
 
-	fb->panel = &vga;
-
-	fb->fb.screen_base = dma_alloc_writecombine(&fb->dev->dev, framesize,
-						    &dma, GFP_KERNEL);
-	if (!fb->fb.screen_base) {
-		printk(KERN_ERR "CLCD: unable to map framebuffer\n");
-		return -ENOMEM;
-	}
-
-	fb->fb.fix.smem_start	= dma;
-	fb->fb.fix.smem_len	= framesize;
-
-	return 0;
-}
-
-static int cp_clcd_mmap(struct clcd_fb *fb, struct vm_area_struct *vma)
-{
-	return dma_mmap_writecombine(&fb->dev->dev, vma,
-				     fb->fb.screen_base,
-				     fb->fb.fix.smem_start,
-				     fb->fb.fix.smem_len);
-}
-
-static void cp_clcd_remove(struct clcd_fb *fb)
-{
-	dma_free_writecombine(&fb->dev->dev, fb->fb.fix.smem_len,
-			      fb->fb.screen_base, fb->fb.fix.smem_start);
+	return versatile_clcd_setup_dma(fb, SZ_1M);
 }
 
 static struct clcd_board clcd_data = {
 	.name		= "Integrator/CP",
+	.caps		= CLCD_CAP_5551 | CLCD_CAP_RGB565 | CLCD_CAP_888,
 	.check		= clcdfb_check,
 	.decode		= clcdfb_decode,
 	.enable		= cp_clcd_enable,
 	.setup		= cp_clcd_setup,
-	.mmap		= cp_clcd_mmap,
-	.remove		= cp_clcd_remove,
+	.mmap		= versatile_clcd_mmap_dma,
+	.remove		= versatile_clcd_remove_dma,
 };
 
-static struct amba_device clcd_device = {
-	.dev		= {
-		.bus_id	= "mb:c0",
-		.coherent_dma_mask = ~0,
-		.platform_data = &clcd_data,
-	},
-	.res		= {
-		.start	= INTCP_PA_CLCD_BASE,
-		.end	= INTCP_PA_CLCD_BASE + SZ_4K - 1,
-		.flags	= IORESOURCE_MEM,
-	},
-	.dma_mask	= ~0,
-	.irq		= { IRQ_CP_CLCDCINT, NO_IRQ },
-	.periphid	= 0,
-};
+static AMBA_AHB_DEVICE(clcd, "mb:c0", 0, INTCP_PA_CLCD_BASE,
+	{ IRQ_CP_CLCDCINT }, &clcd_data);
 
 static struct amba_device *amba_devs[] __initdata = {
 	&mmc_device,
@@ -490,12 +416,22 @@ static struct amba_device *amba_devs[] __initdata = {
 	&clcd_device,
 };
 
+#define REFCOUNTER (__io_address(INTEGRATOR_HDR_BASE) + 0x28)
+
+static void __init intcp_init_early(void)
+{
+	clkdev_add_table(cp_lookups, ARRAY_SIZE(cp_lookups));
+
+	integrator_init_early();
+
+#ifdef CONFIG_PLAT_VERSATILE_SCHED_CLOCK
+	versatile_sched_clock_init(REFCOUNTER, 24000000);
+#endif
+}
+
 static void __init intcp_init(void)
 {
 	int i;
-
-	clk_register(&cp_clcd_clk);
-	clk_register(&cp_mmci_clk);
 
 	platform_add_devices(intcp_devs, ARRAY_SIZE(intcp_devs));
 
@@ -505,24 +441,33 @@ static void __init intcp_init(void)
 	}
 }
 
-#define TIMER_CTRL_IE	(1 << 5)			/* Interrupt Enable */
+#define TIMER0_VA_BASE __io_address(INTEGRATOR_TIMER0_BASE)
+#define TIMER1_VA_BASE __io_address(INTEGRATOR_TIMER1_BASE)
+#define TIMER2_VA_BASE __io_address(INTEGRATOR_TIMER2_BASE)
 
 static void __init intcp_timer_init(void)
 {
-	integrator_time_init(1000000 / HZ, TIMER_CTRL_IE);
+	writel(0, TIMER0_VA_BASE + TIMER_CTRL);
+	writel(0, TIMER1_VA_BASE + TIMER_CTRL);
+	writel(0, TIMER2_VA_BASE + TIMER_CTRL);
+
+	sp804_clocksource_init(TIMER2_VA_BASE, "timer2");
+	sp804_clockevents_init(TIMER1_VA_BASE, IRQ_TIMERINT1, "timer1");
 }
 
 static struct sys_timer cp_timer = {
 	.init		= intcp_timer_init,
-	.offset		= integrator_gettimeoffset,
 };
 
 MACHINE_START(CINTEGRATOR, "ARM-IntegratorCP")
-	MAINTAINER("ARM Ltd/Deep Blue Solutions Ltd")
-	BOOT_MEM(0x00000000, 0x16000000, 0xf1600000)
-	BOOT_PARAMS(0x00000100)
-	MAPIO(intcp_map_io)
-	INITIRQ(intcp_init_irq)
+	/* Maintainer: ARM Ltd/Deep Blue Solutions Ltd */
+	.atag_offset	= 0x100,
+	.reserve	= integrator_reserve,
+	.map_io		= intcp_map_io,
+	.nr_irqs	= NR_IRQS_INTEGRATOR_CP,
+	.init_early	= intcp_init_early,
+	.init_irq	= intcp_init_irq,
 	.timer		= &cp_timer,
-	INIT_MACHINE(intcp_init)
+	.init_machine	= intcp_init,
+	.restart	= integrator_restart,
 MACHINE_END

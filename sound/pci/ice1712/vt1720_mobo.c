@@ -21,19 +21,18 @@
  *
  */      
 
-#include <sound/driver.h>
 #include <asm/io.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
-#include <linux/slab.h>
 #include <sound/core.h>
 
 #include "ice1712.h"
+#include "envy24ht.h"
 #include "vt1720_mobo.h"
 
 
-static int __devinit k8x800_init(ice1712_t *ice)
+static int __devinit k8x800_init(struct snd_ice1712 *ice)
 {
 	ice->vt1720 = 1;
 
@@ -47,7 +46,7 @@ static int __devinit k8x800_init(ice1712_t *ice)
 	return 0;
 }
 
-static int __devinit k8x800_add_controls(ice1712_t *ice)
+static int __devinit k8x800_add_controls(struct snd_ice1712 *ice)
 {
 	/* FIXME: needs some quirks for VT1616? */
 	return 0;
@@ -56,19 +55,35 @@ static int __devinit k8x800_add_controls(ice1712_t *ice)
 /* EEPROM image */
 
 static unsigned char k8x800_eeprom[] __devinitdata = {
-	0x01,	/* SYSCONF: clock 256, 1ADC, 2DACs */
-	0x02,	/* ACLINK: ACLINK, packed */
-	0x00,	/* I2S: - */
-	0x00,	/* SPDIF: - */
-	0xff,	/* GPIO_DIR */
-	0xff,	/* GPIO_DIR1 */
-	0x00,	/* - */
-	0xff,	/* GPIO_MASK */
-	0xff,	/* GPIO_MASK1 */
-	0x00,	/* - */
-	0x00,	/* GPIO_STATE */
-	0x00,	/* GPIO_STATE1 */
-	0x00,	/* - */
+	[ICE_EEP2_SYSCONF]     = 0x01,	/* clock 256, 1ADC, 2DACs */
+	[ICE_EEP2_ACLINK]      = 0x02,	/* ACLINK, packed */
+	[ICE_EEP2_I2S]         = 0x00,	/* - */
+	[ICE_EEP2_SPDIF]       = 0x00,	/* - */
+	[ICE_EEP2_GPIO_DIR]    = 0xff,
+	[ICE_EEP2_GPIO_DIR1]   = 0xff,
+	[ICE_EEP2_GPIO_DIR2]   = 0x00,	/* - */
+	[ICE_EEP2_GPIO_MASK]   = 0xff,
+	[ICE_EEP2_GPIO_MASK1]  = 0xff,
+	[ICE_EEP2_GPIO_MASK2]  = 0x00,	/* - */
+	[ICE_EEP2_GPIO_STATE]  = 0x00,
+	[ICE_EEP2_GPIO_STATE1] = 0x00,
+	[ICE_EEP2_GPIO_STATE2] = 0x00,	/* - */
+};
+
+static unsigned char sn25p_eeprom[] __devinitdata = {
+	[ICE_EEP2_SYSCONF]     = 0x01,	/* clock 256, 1ADC, 2DACs */
+	[ICE_EEP2_ACLINK]      = 0x02,	/* ACLINK, packed */
+	[ICE_EEP2_I2S]         = 0x00,	/* - */
+	[ICE_EEP2_SPDIF]       = 0x41,	/* - */
+	[ICE_EEP2_GPIO_DIR]    = 0xff,
+	[ICE_EEP2_GPIO_DIR1]   = 0xff,
+	[ICE_EEP2_GPIO_DIR2]   = 0x00,	/* - */
+	[ICE_EEP2_GPIO_MASK]   = 0xff,
+	[ICE_EEP2_GPIO_MASK1]  = 0xff,
+	[ICE_EEP2_GPIO_MASK2]  = 0x00,	/* - */
+	[ICE_EEP2_GPIO_STATE]  = 0x00,
+	[ICE_EEP2_GPIO_STATE1] = 0x00,
+	[ICE_EEP2_GPIO_STATE2] = 0x00,	/* - */
 };
 
 
@@ -109,6 +124,15 @@ struct snd_ice1712_card_info snd_vt1720_mobo_cards[] __devinitdata = {
 		.build_controls = k8x800_add_controls,
 		.eeprom_size = sizeof(k8x800_eeprom),
 		.eeprom_data = k8x800_eeprom,
+	},
+	{
+		.subvendor = VT1720_SUBDEVICE_SN25P,
+		.name = "Shuttle SN25P",
+		.model = "sn25p",
+		.chip_init = k8x800_init,
+		.build_controls = k8x800_add_controls,
+		.eeprom_size = sizeof(k8x800_eeprom),
+		.eeprom_data = sn25p_eeprom,
 	},
 	{ } /* terminator */
 };

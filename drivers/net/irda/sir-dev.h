@@ -15,23 +15,14 @@
 #define IRDA_SIR_H
 
 #include <linux/netdevice.h>
+#include <linux/workqueue.h>
 
 #include <net/irda/irda.h>
 #include <net/irda/irda_device.h>		// iobuff_t
 
-/* FIXME: unify irda_request with sir_fsm! */
-
-struct irda_request {
-	struct list_head lh_request;
-	unsigned long pending;
-	void (*func)(void *);
-	void *data;
-	struct timer_list timer;
-};
-
 struct sir_fsm {
 	struct semaphore	sem;
-	struct irda_request	rq;
+	struct delayed_work	work;
 	unsigned		state, substate;
 	int			param;
 	int			result;
@@ -133,8 +124,6 @@ extern int sirdev_put_dongle(struct sir_dev *self);
 
 extern void sirdev_enable_rx(struct sir_dev *dev);
 extern int sirdev_schedule_request(struct sir_dev *dev, int state, unsigned param);
-extern int __init irda_thread_create(void);
-extern void __exit irda_thread_join(void);
 
 /* inline helpers */
 
@@ -171,7 +160,6 @@ static inline int sirdev_schedule_mode(struct sir_dev *dev, int mode)
 
 struct sir_dev {
 	struct net_device *netdev;
-	struct net_device_stats stats;
 
 	struct irlap_cb    *irlap;
 

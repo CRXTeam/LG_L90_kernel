@@ -2,16 +2,13 @@
  *  ATI Mach64 CT/VT/GT/LT Cursor Support
  */
 
-#include <linux/slab.h>
 #include <linux/fb.h>
 #include <linux/init.h>
 #include <linux/string.h>
 
 #include <asm/io.h>
-#include <asm/uaccess.h>
 
 #ifdef __sparc__
-#include <asm/pbm.h>
 #include <asm/fbio.h>
 #endif
 
@@ -54,7 +51,7 @@
  * to a larger number and saturate CUR_HORZ_POSN to zero.
  *
  * if Y becomes negative, CUR_VERT_OFFSET must be adjusted to a larger number,
- * CUR_OFFSET must be adjusted to a point to the appropraite line in the cursor
+ * CUR_OFFSET must be adjusted to a point to the appropriate line in the cursor
  * definitation and CUR_VERT_POSN must be saturated to zero.
  */
 
@@ -64,11 +61,6 @@
 static const u8 cursor_bits_lookup[16] = {
 	0x00, 0x40, 0x10, 0x50, 0x04, 0x44, 0x14, 0x54,
 	0x01, 0x41, 0x11, 0x51, 0x05, 0x45, 0x15, 0x55
-};
-
-static const u8 cursor_mask_lookup[16] = {
-	0xaa, 0x2a, 0x8a, 0x0a, 0xa2, 0x22, 0x82, 0x02,
-	0xa8, 0x28, 0x88, 0x08, 0xa0, 0x20, 0x80, 0x00
 };
 
 static int atyfb_cursor(struct fb_info *info, struct fb_cursor *cursor)
@@ -84,9 +76,13 @@ static int atyfb_cursor(struct fb_info *info, struct fb_cursor *cursor)
 	if (par->asleep)
 		return -EPERM;
 
-	/* Hide cursor */
 	wait_for_fifo(1, par);
-	aty_st_le32(GEN_TEST_CNTL, aty_ld_le32(GEN_TEST_CNTL, par) & ~HWCURSOR_ENABLE, par);
+	if (cursor->enable)
+		aty_st_le32(GEN_TEST_CNTL, aty_ld_le32(GEN_TEST_CNTL, par)
+			    | HWCURSOR_ENABLE, par);
+	else
+		aty_st_le32(GEN_TEST_CNTL, aty_ld_le32(GEN_TEST_CNTL, par)
+				& ~HWCURSOR_ENABLE, par);
 
 	/* set position */
 	if (cursor->set & FB_CUR_SETPOS) {
@@ -116,7 +112,7 @@ static int atyfb_cursor(struct fb_info *info, struct fb_cursor *cursor)
 			y<<=1;
 			h<<=1;
 		}
-		wait_for_fifo(4, par);
+		wait_for_fifo(3, par);
 		aty_st_le32(CUR_OFFSET, (info->fix.smem_len >> 3) + (yoff << 1), par);
 		aty_st_le32(CUR_HORZ_VERT_OFF,
 			    ((u32) (64 - h + yoff) << 16) | xoff, par);
@@ -130,13 +126,13 @@ static int atyfb_cursor(struct fb_info *info, struct fb_cursor *cursor)
 		fg_idx = cursor->image.fg_color;
 		bg_idx = cursor->image.bg_color;
 
-		fg = (info->cmap.red[fg_idx] << 24) |
-		     (info->cmap.green[fg_idx] << 16) |
-		     (info->cmap.blue[fg_idx] << 8) | 15;
+		fg = ((info->cmap.red[fg_idx] & 0xff) << 24) |
+		     ((info->cmap.green[fg_idx] & 0xff) << 16) |
+		     ((info->cmap.blue[fg_idx] & 0xff) << 8) | 0xff;
 
-		bg = (info->cmap.red[bg_idx] << 24) |
-		     (info->cmap.green[bg_idx] << 16) |
-		     (info->cmap.blue[bg_idx] << 8);
+		bg = ((info->cmap.red[bg_idx] & 0xff) << 24) |
+		     ((info->cmap.green[bg_idx] & 0xff) << 16) |
+		     ((info->cmap.blue[bg_idx] & 0xff) << 8);
 
 		wait_for_fifo(2, par);
 		aty_st_le32(CUR_CLR0, bg, par);
@@ -166,19 +162,17 @@ static int atyfb_cursor(struct fb_info *info, struct fb_cursor *cursor)
 			switch (cursor->rop) {
 			case ROP_XOR:
 			    // Upper 4 bits of mask data
-			    fb_writeb(cursor_mask_lookup[m >> 4 ] |
-				cursor_bits_lookup[(b ^ m) >> 4], dst++);
+			    fb_writeb(cursor_bits_lookup[(b ^ m) >> 4], dst++);
 			    // Lower 4 bits of mask
-			    fb_writeb(cursor_mask_lookup[m & 0x0f ] |
-				cursor_bits_lookup[(b ^ m) & 0x0f], dst++);
+			    fb_writeb(cursor_bits_lookup[(b ^ m) & 0x0f],
+				      dst++);
 			    break;
 			case ROP_COPY:
 			    // Upper 4 bits of mask data
-			    fb_writeb(cursor_mask_lookup[m >> 4 ] |
-				cursor_bits_lookup[(b & m) >> 4], dst++);
+			    fb_writeb(cursor_bits_lookup[(b & m) >> 4], dst++);
 			    // Lower 4 bits of mask
-			    fb_writeb(cursor_mask_lookup[m & 0x0f ] |
-				cursor_bits_lookup[(b & m) & 0x0f], dst++);
+			    fb_writeb(cursor_bits_lookup[(b & m) & 0x0f],
+				      dst++);
 			    break;
 			}
 		}
@@ -186,15 +180,10 @@ static int atyfb_cursor(struct fb_info *info, struct fb_cursor *cursor)
 	    }
 	}
 
-	if (cursor->enable) {
-		wait_for_fifo(1, par);
-		aty_st_le32(GEN_TEST_CNTL, aty_ld_le32(GEN_TEST_CNTL, par)
-			    | HWCURSOR_ENABLE, par);
-	}
 	return 0;
 }
 
-int __init aty_init_cursor(struct fb_info *info)
+int __devinit aty_init_cursor(struct fb_info *info)
 {
 	unsigned long addr;
 

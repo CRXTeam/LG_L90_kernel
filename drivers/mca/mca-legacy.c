@@ -180,7 +180,6 @@ struct mca_device *mca_find_device_by_slot(int slot)
 
 	return info.mca_dev;
 }
-EXPORT_SYMBOL(mca_find_device_by_slot);
 
 /**
  *	mca_read_stored_pos - read POS register from boot data
@@ -281,24 +280,6 @@ void mca_set_adapter_name(int slot, char* name)
 	mca_device_set_name(mca_dev, name);
 }
 EXPORT_SYMBOL(mca_set_adapter_name);
-
-/**
- *	mca_is_adapter_used - check if claimed by driver
- *	@slot:	slot to check
- *
- *	Returns 1 if the slot has been claimed by a driver
- */
-
-int mca_is_adapter_used(int slot)
-{
-	struct mca_device *mca_dev = mca_find_device_by_slot(slot);
-
-	if(!mca_dev)
-		return 0;
-
-	return mca_device_claimed(mca_dev);
-}
-EXPORT_SYMBOL(mca_is_adapter_used);
 
 /**
  *	mca_mark_as_used - claim an MCA device

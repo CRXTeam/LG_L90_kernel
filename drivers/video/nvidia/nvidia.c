@@ -9,18 +9,18 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/tty.h>
 #include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/fb.h>
 #include <linux/init.h>
 #include <linux/pci.h>
+#include <linux/console.h>
+#include <linux/backlight.h>
 #ifdef CONFIG_MTRR
 #include <asm/mtrr.h>
 #endif
@@ -28,8 +28,8 @@
 #include <asm/prom.h>
 #include <asm/pci-bridge.h>
 #endif
-#ifdef CONFIG_PMAC_BACKLIGHT
-#include <asm/backlight.h>
+#ifdef CONFIG_BOOTX_TEXT
+#include <asm/btext.h>
 #endif
 
 #include "nv_local.h"
@@ -37,25 +37,20 @@
 #include "nv_proto.h"
 #include "nv_dma.h"
 
-#ifndef CONFIG_PCI		/* sanity check */
-#error This driver requires PCI support.
-#endif
-
-#undef CONFIG_FB_NVIDIA_DEBUG
 #ifdef CONFIG_FB_NVIDIA_DEBUG
 #define NVTRACE          printk
 #else
 #define NVTRACE          if (0) printk
 #endif
 
-#define NVTRACE_ENTER(...)  NVTRACE("%s START\n", __FUNCTION__)
-#define NVTRACE_LEAVE(...)  NVTRACE("%s END\n", __FUNCTION__)
+#define NVTRACE_ENTER(...)  NVTRACE("%s START\n", __func__)
+#define NVTRACE_LEAVE(...)  NVTRACE("%s END\n", __func__)
 
 #ifdef CONFIG_FB_NVIDIA_DEBUG
 #define assert(expr) \
 	if (!(expr)) { \
 	printk( "Assertion failed! %s,%s,%s,line=%d\n",\
-	#expr,__FILE__,__FUNCTION__,__LINE__); \
+	#expr,__FILE__,__func__,__LINE__); \
 	BUG(); \
 	}
 #else
@@ -68,348 +63,30 @@
 #define MAX_CURS		32
 
 static struct pci_device_id nvidiafb_pci_tbl[] = {
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_TNT,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_TNT2,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_UTNT2,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_TNT_UNKNOWN,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_VTNT2,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_UVTNT2,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_ITNT2,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_SDR,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_DDR,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE2_MX,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE2_MX2,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE2_GO,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO2_MXR,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE2_GTS,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE2_GTS2,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE2_ULTRA,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO2_PRO,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_MX_460,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_MX_440,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_MX_420,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_MX_440_SE,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_440_GO,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_420_GO,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_460_GO,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_420_GO_M32,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO4_500XGL,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_440_GO_M64,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO4_200,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO4_550XGL,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO4_500_GOGL,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_410_GO_M16,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_MX_440_8X,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_MX_440SE_8X,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_MX_420_8X,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_448_GO,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_488_GO,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO4_580_XGL,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_MX_MAC,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO4_280_NVS,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO4_380_XGL,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_IGEFORCE2,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE3,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE3_1,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE3_2,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO_DDC,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_TI_4600,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_TI_4400,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_TI_4200,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO4_900XGL,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO4_750XGL,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO4_700XGL,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_TI_4800,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_TI_4800_8X,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_TI_4800SE,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE4_4200_GO,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO4_980_XGL,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO4_780_XGL,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO4_700_GOGL,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_5800_ULTRA,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_5800,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO_FX_2000,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO_FX_1000,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_5600_ULTRA,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_5600,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_5600SE,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_GO5600,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_GO5650,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO_FX_GO700,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_5200,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_5200_ULTRA,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_5200_1,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_5200SE,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_GO5200,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_GO5250,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_GO5250_32,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_GO_5200,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO_NVS_280_PCI,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO_FX_500,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_GO5300,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_GO5100,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_5900_ULTRA,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_5900,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_5900XT,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_5950_ULTRA,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO_FX_3000,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_5700_ULTRA,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_5700,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_5700LE,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_5700VE,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_GO5700_1,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_GO5700_2,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO_FX_GO1000,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO_FX_1100,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_5500,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_5100,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO_FX_700,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_FX_5900ZT,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_6800_ULTRA,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_6800,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_6800_LE,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_6800_GT,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO_FX_4000,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_6600_GT,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_6600,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_6610_XL,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO_FX_540,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_6200,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x0252,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x0313,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x0316,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x0317,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x031D,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x031E,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x031F,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x0329,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x032F,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x0345,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x0349,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x034B,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x034F,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x00c0,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_GEFORCE_6800A,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_GEFORCE_6800A_LE,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_GEFORCE_GO_6800,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_GEFORCE_GO_6800_ULTRA,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_QUADRO_FX_GO1400,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x00cd,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_QUADRO_FX_1400,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x0142,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x0143,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x0144,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x0145,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x0146,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x0147,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x0148,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x0149,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x014b,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x14c,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x014d,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x0160,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_6200_TURBOCACHE,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x0162,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x0163,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_GO_6200,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x0165,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_GO_6250,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_GO_6200_1,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_GO_6250_1,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x0169,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x016b,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x016c,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x016d,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x016e,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x0210,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_6800B,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_6800B_LE,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE_6800B_GT,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x021d,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x021e,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x0220,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x0221,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x0222,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_NVIDIA, 0x0228,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0,}			/* terminate list */
+	{PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID, PCI_ANY_ID, PCI_ANY_ID,
+	 PCI_BASE_CLASS_DISPLAY << 16, 0xff0000, 0},
+	{ 0, }
 };
-
 MODULE_DEVICE_TABLE(pci, nvidiafb_pci_tbl);
 
 /* command line data, set in nvidiafb_setup() */
 static int flatpanel __devinitdata = -1;	/* Autodetect later */
+static int fpdither __devinitdata = -1;
 static int forceCRTC __devinitdata = -1;
 static int hwcur __devinitdata = 0;
 static int noaccel __devinitdata = 0;
 static int noscale __devinitdata = 0;
 static int paneltweak __devinitdata = 0;
+static int vram __devinitdata = 0;
+static int bpp __devinitdata = 8;
+static int reverse_i2c __devinitdata;
 #ifdef CONFIG_MTRR
-static int nomtrr __devinitdata = 0;
+static bool nomtrr __devinitdata = false;
+#endif
+#ifdef CONFIG_PMAC_BACKLIGHT
+static int backlight __devinitdata = 1;
+#else
+static int backlight __devinitdata = 0;
 #endif
 
 static char *mode_option __devinitdata = NULL;
@@ -443,81 +120,12 @@ static struct fb_var_screeninfo __devinitdata nvidiafb_default_var = {
 	.vmode = FB_VMODE_NONINTERLACED
 };
 
-/*
- * Backlight control
- */
-#ifdef CONFIG_PMAC_BACKLIGHT
-
-static int nvidia_backlight_levels[] = {
-	0x158,
-	0x192,
-	0x1c6,
-	0x200,
-	0x234,
-	0x268,
-	0x2a2,
-	0x2d6,
-	0x310,
-	0x344,
-	0x378,
-	0x3b2,
-	0x3e6,
-	0x41a,
-	0x454,
-	0x534,
-};
-
-/* ------------------------------------------------------------------------- *
- *
- * Backlight operations
- *
- * ------------------------------------------------------------------------- */
-
-static int nvidia_set_backlight_enable(int on, int level, void *data)
-{
-	struct nvidia_par *par = (struct nvidia_par *)data;
-	u32 tmp_pcrt, tmp_pmc, fpcontrol;
-
-	tmp_pmc = NV_RD32(par->PMC, 0x10F0) & 0x0000FFFF;
-	tmp_pcrt = NV_RD32(par->PCRTC0, 0x081C) & 0xFFFFFFFC;
-	fpcontrol = NV_RD32(par->PRAMDAC, 0x0848) & 0xCFFFFFCC;
-
-	if (on && (level > BACKLIGHT_OFF)) {
-		tmp_pcrt |= 0x1;
-		tmp_pmc |= (1 << 31);	// backlight bit
-		tmp_pmc |= nvidia_backlight_levels[level - 1] << 16;
-	}
-
-	if (on)
-		fpcontrol |= par->fpSyncs;
-	else
-		fpcontrol |= 0x20000022;
-
-	NV_WR32(par->PCRTC0, 0x081C, tmp_pcrt);
-	NV_WR32(par->PMC, 0x10F0, tmp_pmc);
-	NV_WR32(par->PRAMDAC, 0x848, fpcontrol);
-
-	return 0;
-}
-
-static int nvidia_set_backlight_level(int level, void *data)
-{
-	return nvidia_set_backlight_enable(1, level, data);
-}
-
-static struct backlight_controller nvidia_backlight_controller = {
-	nvidia_set_backlight_enable,
-	nvidia_set_backlight_level
-};
-
-#endif				/* CONFIG_PMAC_BACKLIGHT */
-
 static void nvidiafb_load_cursor_image(struct nvidia_par *par, u8 * data8,
 				       u16 bg, u16 fg, u32 w, u32 h)
 {
+	u32 *data = (u32 *) data8;
 	int i, j, k = 0;
 	u32 b, tmp;
-	u32 *data = (u32 *) data8;
 
 	w = (w + 1) & ~1;
 
@@ -592,6 +200,30 @@ static int nvidia_panel_tweak(struct nvidia_par *par,
    return tweak;
 }
 
+static void nvidia_screen_off(struct nvidia_par *par, int on)
+{
+	unsigned char tmp;
+
+	if (on) {
+		/*
+		 * Turn off screen and disable sequencer.
+		 */
+		tmp = NVReadSeq(par, 0x01);
+
+		NVWriteSeq(par, 0x00, 0x01);		/* Synchronous Reset */
+		NVWriteSeq(par, 0x01, tmp | 0x20);	/* disable the display */
+	} else {
+		/*
+		 * Reenable sequencer, then turn on screen.
+		 */
+
+		tmp = NVReadSeq(par, 0x01);
+
+		NVWriteSeq(par, 0x01, tmp & ~0x20);	/* reenable display */
+		NVWriteSeq(par, 0x00, 0x03);		/* End Reset */
+	}
+}
+
 static void nvidia_save_vga(struct nvidia_par *par,
 			    struct _riva_hw_state *state)
 {
@@ -618,19 +250,28 @@ static void nvidia_save_vga(struct nvidia_par *par,
 	NVTRACE_LEAVE();
 }
 
-static void nvidia_write_regs(struct nvidia_par *par)
+#undef DUMP_REG
+
+static void nvidia_write_regs(struct nvidia_par *par,
+			      struct _riva_hw_state *state)
 {
-	struct _riva_hw_state *state = &par->ModeReg;
 	int i;
 
 	NVTRACE_ENTER();
-	NVWriteCrtc(par, 0x11, 0x00);
-
-	NVLockUnlock(par, 0);
 
 	NVLoadStateExt(par, state);
 
 	NVWriteMiscOut(par, state->misc_output);
+
+	for (i = 1; i < NUM_SEQ_REGS; i++) {
+#ifdef DUMP_REG
+		printk(" SEQ[%02x] = %08x\n", i, state->seq[i]);
+#endif
+		NVWriteSeq(par, i, state->seq[i]);
+	}
+
+	/* Ensure CRTC registers 0-7 are unlocked by clearing bit 7 of CRTC[17] */
+	NVWriteCrtc(par, 0x11, state->crtc[0x11] & ~0x80);
 
 	for (i = 0; i < NUM_CRT_REGS; i++) {
 		switch (i) {
@@ -638,18 +279,27 @@ static void nvidia_write_regs(struct nvidia_par *par)
 		case 0x20 ... 0x40:
 			break;
 		default:
+#ifdef DUMP_REG
+			printk("CRTC[%02x] = %08x\n", i, state->crtc[i]);
+#endif
 			NVWriteCrtc(par, i, state->crtc[i]);
 		}
 	}
 
-	for (i = 0; i < NUM_ATC_REGS; i++)
-		NVWriteAttr(par, i, state->attr[i]);
-
-	for (i = 0; i < NUM_GRC_REGS; i++)
+	for (i = 0; i < NUM_GRC_REGS; i++) {
+#ifdef DUMP_REG
+		printk(" GRA[%02x] = %08x\n", i, state->gra[i]);
+#endif
 		NVWriteGr(par, i, state->gra[i]);
+	}
 
-	for (i = 0; i < NUM_SEQ_REGS; i++)
-		NVWriteSeq(par, i, state->seq[i]);
+	for (i = 0; i < NUM_ATC_REGS; i++) {
+#ifdef DUMP_REG
+		printk("ATTR[%02x] = %08x\n", i, state->attr[i]);
+#endif
+		NVWriteAttr(par, i, state->attr[i]);
+	}
+
 	NVTRACE_LEAVE();
 }
 
@@ -657,7 +307,7 @@ static int nvidia_calc_regs(struct fb_info *info)
 {
 	struct nvidia_par *par = info->par;
 	struct _riva_hw_state *state = &par->ModeReg;
-	int i, depth = fb_get_color_depth(&info->var);
+	int i, depth = fb_get_color_depth(&info->var, &info->fix);
 	int h_display = info->var.xres / 8 - 1;
 	int h_start = (info->var.xres + info->var.right_margin) / 8 - 1;
 	int h_end = (info->var.xres + info->var.right_margin +
@@ -859,7 +509,7 @@ static void nvidia_init_vga(struct fb_info *info)
 	for (i = 0; i < 0x10; i++)
 		state->attr[i] = i;
 	state->attr[0x10] = 0x41;
-	state->attr[0x11] = 0x01;
+	state->attr[0x11] = 0xff;
 	state->attr[0x12] = 0x0f;
 	state->attr[0x13] = 0x00;
 	state->attr[0x14] = 0x00;
@@ -889,11 +539,11 @@ static int nvidiafb_cursor(struct fb_info *info, struct fb_cursor *cursor)
 {
 	struct nvidia_par *par = info->par;
 	u8 data[MAX_CURS * MAX_CURS / 8];
-	u16 fg, bg;
 	int i, set = cursor->set;
+	u16 fg, bg;
 
 	if (cursor->image.width > MAX_CURS || cursor->image.height > MAX_CURS)
-		return soft_cursor(info, cursor);
+		return -ENXIO;
 
 	NVShowHideCursor(par, 0);
 
@@ -930,21 +580,18 @@ static int nvidiafb_cursor(struct fb_info *info, struct fb_cursor *cursor)
 		if (src) {
 			switch (cursor->rop) {
 			case ROP_XOR:
-				for (i = 0; i < s_pitch * cursor->image.height;
-				     i++)
+				for (i = 0; i < s_pitch * cursor->image.height; i++)
 					src[i] = dat[i] ^ msk[i];
 				break;
 			case ROP_COPY:
 			default:
-				for (i = 0; i < s_pitch * cursor->image.height;
-				     i++)
+				for (i = 0; i < s_pitch * cursor->image.height; i++)
 					src[i] = dat[i] & msk[i];
 				break;
 			}
 
-			fb_sysmove_buf_aligned(info, &info->pixmap, data,
-					       d_pitch, src, s_pitch,
-					       cursor->image.height);
+			fb_pad_aligned_buffer(data, d_pitch, src, s_pitch,
+						cursor->image.height);
 
 			bg = ((info->cmap.red[bg_idx] & 0xf8) << 7) |
 			    ((info->cmap.green[bg_idx] & 0xf8) << 2) |
@@ -976,13 +623,24 @@ static int nvidiafb_set_par(struct fb_info *info)
 	NVTRACE_ENTER();
 
 	NVLockUnlock(par, 1);
-	if (!par->FlatPanel || (info->var.bits_per_pixel != 24) ||
-	    !par->twoHeads)
+	if (!par->FlatPanel || !par->twoHeads)
 		par->FPDither = 0;
+
+	if (par->FPDither < 0) {
+		if ((par->Chipset & 0x0ff0) == 0x0110)
+			par->FPDither = !!(NV_RD32(par->PRAMDAC, 0x0528)
+					   & 0x00010000);
+		else
+			par->FPDither = !!(NV_RD32(par->PRAMDAC, 0x083C) & 1);
+		printk(KERN_INFO PFX "Flat panel dithering %s\n",
+		       par->FPDither ? "enabled" : "disabled");
+	}
+
+	info->fix.visual = (info->var.bits_per_pixel == 8) ?
+	    FB_VISUAL_PSEUDOCOLOR : FB_VISUAL_DIRECTCOLOR;
 
 	nvidia_init_vga(info);
 	nvidia_calc_regs(info);
-	nvidia_write_regs(par);
 
 	NVLockUnlock(par, 0);
 	if (par->twoHeads) {
@@ -991,12 +649,25 @@ static int nvidiafb_set_par(struct fb_info *info)
 		NVLockUnlock(par, 0);
 	}
 
-	NVWriteCrtc(par, 0x11, 0x00);
+	nvidia_screen_off(par, 1);
+
+	nvidia_write_regs(par, &par->ModeReg);
+	NVSetStartAddress(par, 0);
+
+#if defined (__BIG_ENDIAN)
+	/* turn on LFB swapping */
+	{
+		unsigned char tmp;
+
+		VGA_WR08(par->PCIO, 0x3d4, 0x46);
+		tmp = VGA_RD08(par->PCIO, 0x3d5);
+		tmp |= (1 << 7);
+		VGA_WR08(par->PCIO, 0x3d5, tmp);
+    }
+#endif
+
 	info->fix.line_length = (info->var.xres_virtual *
 				 info->var.bits_per_pixel) >> 3;
-	info->fix.visual = (info->var.bits_per_pixel == 8) ?
-	    FB_VISUAL_PSEUDOCOLOR : FB_VISUAL_DIRECTCOLOR;
-
 	if (info->var.accel_flags) {
 		info->fbops->fb_imageblit = nvidiafb_imageblit;
 		info->fbops->fb_fillrect = nvidiafb_fillrect;
@@ -1004,6 +675,7 @@ static int nvidiafb_set_par(struct fb_info *info)
 		info->fbops->fb_sync = nvidiafb_sync;
 		info->pixmap.scan_align = 4;
 		info->flags &= ~FBINFO_HWACCEL_DISABLED;
+		info->flags |= FBINFO_READS_FAST;
 		NVResetGraphics(info);
 	} else {
 		info->fbops->fb_imageblit = cfb_imageblit;
@@ -1012,12 +684,21 @@ static int nvidiafb_set_par(struct fb_info *info)
 		info->fbops->fb_sync = NULL;
 		info->pixmap.scan_align = 1;
 		info->flags |= FBINFO_HWACCEL_DISABLED;
+		info->flags &= ~FBINFO_READS_FAST;
 	}
 
 	par->cursor_reset = 1;
 
-	NVWriteCrtc(par, 0x11, 0xff);
+	nvidia_screen_off(par, 0);
 
+#ifdef CONFIG_BOOTX_TEXT
+	/* Update debug text engine */
+	btext_update_display(info->fix.smem_start,
+			     info->var.xres, info->var.yres,
+			     info->var.bits_per_pixel, info->fix.line_length);
+#endif
+
+	NVLockUnlock(par, 0);
 	NVTRACE_LEAVE();
 	return 0;
 }
@@ -1156,7 +837,7 @@ static int nvidiafb_check_var(struct fb_var_screeninfo *var,
 	}
 
 	if (!mode_valid) {
-		struct fb_videomode *mode;
+		const struct fb_videomode *mode;
 
 		mode = fb_find_best_mode(var, &info->modelist);
 		if (mode) {
@@ -1168,9 +849,27 @@ static int nvidiafb_check_var(struct fb_var_screeninfo *var,
 	if (!mode_valid && info->monspecs.modedb_len)
 		return -EINVAL;
 
+	/*
+	 * If we're on a flat panel, check if the mode is outside of the
+	 * panel dimensions. If so, cap it and try for the next best mode
+	 * before bailing out.
+	 */
 	if (par->fpWidth && par->fpHeight && (par->fpWidth < var->xres ||
-					      par->fpHeight < var->yres))
-		return -EINVAL;
+					      par->fpHeight < var->yres)) {
+		const struct fb_videomode *mode;
+
+		var->xres = par->fpWidth;
+		var->yres = par->fpHeight;
+
+		mode = fb_find_best_mode(var, &info->modelist);
+		if (!mode) {
+			printk(KERN_ERR PFX "mode out of range of flat "
+			       "panel dimensions\n");
+			return -EINVAL;
+		}
+
+		fb_videomode_to_var(var, mode);
+	}
 
 	if (var->yres_virtual < var->yres)
 		var->yres_virtual = var->yres;
@@ -1180,7 +879,7 @@ static int nvidiafb_check_var(struct fb_var_screeninfo *var,
 
 	var->xres_virtual = (var->xres_virtual + 63) & ~63;
 
-	vramlen = info->fix.smem_len;
+	vramlen = info->screen_size;
 	pitch = ((var->xres_virtual * var->bits_per_pixel) + 7) / 8;
 	memlen = pitch * var->yres_virtual;
 
@@ -1227,7 +926,7 @@ static int nvidiafb_pan_display(struct fb_var_screeninfo *var,
 	struct nvidia_par *par = info->par;
 	u32 total;
 
-	total = info->var.yoffset * info->fix.line_length + info->var.xoffset;
+	total = var->yoffset * info->fix.line_length + var->xoffset;
 
 	NVSetStartAddress(par, total);
 
@@ -1265,19 +964,79 @@ static int nvidiafb_blank(int blank, struct fb_info *info)
 	NVWriteSeq(par, 0x01, tmp);
 	NVWriteCrtc(par, 0x1a, vesa);
 
-#ifdef CONFIG_PMAC_BACKLIGHT
-	if (par->FlatPanel && _machine == _MACH_Pmac) {
-		set_backlight_enable(!blank);
-	}
-#endif
-
 	NVTRACE_LEAVE();
 
 	return 0;
 }
 
+/*
+ * Because the VGA registers are not mapped linearly in its MMIO space,
+ * restrict VGA register saving and restore to x86 only, where legacy VGA IO
+ * access is legal. Consequently, we must also check if the device is the
+ * primary display.
+ */
+#ifdef CONFIG_X86
+static void save_vga_x86(struct nvidia_par *par)
+{
+	struct resource *res= &par->pci_dev->resource[PCI_ROM_RESOURCE];
+
+	if (res && res->flags & IORESOURCE_ROM_SHADOW) {
+		memset(&par->vgastate, 0, sizeof(par->vgastate));
+		par->vgastate.flags = VGA_SAVE_MODE | VGA_SAVE_FONTS |
+			VGA_SAVE_CMAP;
+		save_vga(&par->vgastate);
+	}
+}
+
+static void restore_vga_x86(struct nvidia_par *par)
+{
+	struct resource *res= &par->pci_dev->resource[PCI_ROM_RESOURCE];
+
+	if (res && res->flags & IORESOURCE_ROM_SHADOW)
+		restore_vga(&par->vgastate);
+}
+#else
+#define save_vga_x86(x) do {} while (0)
+#define restore_vga_x86(x) do {} while (0)
+#endif /* X86 */
+
+static int nvidiafb_open(struct fb_info *info, int user)
+{
+	struct nvidia_par *par = info->par;
+
+	if (!par->open_count) {
+		save_vga_x86(par);
+		nvidia_save_vga(par, &par->initial_state);
+	}
+
+	par->open_count++;
+	return 0;
+}
+
+static int nvidiafb_release(struct fb_info *info, int user)
+{
+	struct nvidia_par *par = info->par;
+	int err = 0;
+
+	if (!par->open_count) {
+		err = -EINVAL;
+		goto done;
+	}
+
+	if (par->open_count == 1) {
+		nvidia_write_regs(par, &par->initial_state);
+		restore_vga_x86(par);
+	}
+
+	par->open_count--;
+done:
+	return err;
+}
+
 static struct fb_ops nvidia_fb_ops = {
 	.owner          = THIS_MODULE,
+	.fb_open        = nvidiafb_open,
+	.fb_release     = nvidiafb_release,
 	.fb_check_var   = nvidiafb_check_var,
 	.fb_set_par     = nvidiafb_set_par,
 	.fb_setcolreg   = nvidiafb_setcolreg,
@@ -1289,6 +1048,62 @@ static struct fb_ops nvidia_fb_ops = {
 	.fb_cursor      = nvidiafb_cursor,
 	.fb_sync        = nvidiafb_sync,
 };
+
+#ifdef CONFIG_PM
+static int nvidiafb_suspend(struct pci_dev *dev, pm_message_t mesg)
+{
+	struct fb_info *info = pci_get_drvdata(dev);
+	struct nvidia_par *par = info->par;
+
+	if (mesg.event == PM_EVENT_PRETHAW)
+		mesg.event = PM_EVENT_FREEZE;
+	console_lock();
+	par->pm_state = mesg.event;
+
+	if (mesg.event & PM_EVENT_SLEEP) {
+		fb_set_suspend(info, 1);
+		nvidiafb_blank(FB_BLANK_POWERDOWN, info);
+		nvidia_write_regs(par, &par->SavedReg);
+		pci_save_state(dev);
+		pci_disable_device(dev);
+		pci_set_power_state(dev, pci_choose_state(dev, mesg));
+	}
+	dev->dev.power.power_state = mesg;
+
+	console_unlock();
+	return 0;
+}
+
+static int nvidiafb_resume(struct pci_dev *dev)
+{
+	struct fb_info *info = pci_get_drvdata(dev);
+	struct nvidia_par *par = info->par;
+
+	console_lock();
+	pci_set_power_state(dev, PCI_D0);
+
+	if (par->pm_state != PM_EVENT_FREEZE) {
+		pci_restore_state(dev);
+
+		if (pci_enable_device(dev))
+			goto fail;
+
+		pci_set_master(dev);
+	}
+
+	par->pm_state = PM_EVENT_ON;
+	nvidiafb_set_par(info);
+	fb_set_suspend (info, 0);
+	nvidiafb_blank(FB_BLANK_UNBLANK, info);
+
+fail:
+	console_unlock();
+	return 0;
+}
+#else
+#define nvidiafb_suspend NULL
+#define nvidiafb_resume NULL
+#endif
 
 static int __devinit nvidia_set_fbinfo(struct fb_info *info)
 {
@@ -1308,29 +1123,36 @@ static int __devinit nvidia_set_fbinfo(struct fb_info *info)
 				 info->monspecs.modedb_len, &info->modelist);
 	fb_var_to_videomode(&modedb, &nvidiafb_default_var);
 
+	switch (bpp) {
+	case 0 ... 8:
+		bpp = 8;
+		break;
+	case 9 ... 16:
+		bpp = 16;
+		break;
+	default:
+		bpp = 32;
+		break;
+	}
+
 	if (specs->modedb != NULL) {
-		/* get preferred timing */
-		if (specs->misc & FB_MISC_1ST_DETAIL) {
-			int i;
+		const struct fb_videomode *mode;
 
-			for (i = 0; i < specs->modedb_len; i++) {
-				if (specs->modedb[i].flag & FB_MODE_IS_FIRST) {
-					modedb = specs->modedb[i];
-					break;
-				}
-			}
-		} else {
-			/* otherwise, get first mode in database */
-			modedb = specs->modedb[0];
-		}
+		mode = fb_find_best_display(specs, &info->modelist);
+		fb_videomode_to_var(&nvidiafb_default_var, mode);
+		nvidiafb_default_var.bits_per_pixel = bpp;
+	} else if (par->fpWidth && par->fpHeight) {
+		char buf[16];
 
-		fb_videomode_to_var(&nvidiafb_default_var, &modedb);
-		nvidiafb_default_var.bits_per_pixel = 8;
+		memset(buf, 0, 16);
+		snprintf(buf, 15, "%dx%dMR", par->fpWidth, par->fpHeight);
+		fb_find_mode(&nvidiafb_default_var, info, buf, specs->modedb,
+			     specs->modedb_len, &modedb, bpp);
 	}
 
 	if (mode_option)
 		fb_find_mode(&nvidiafb_default_var, info, mode_option,
-			     specs->modedb, specs->modedb_len, &modedb, 8);
+			     specs->modedb, specs->modedb_len, &modedb, bpp);
 
 	info->var = nvidiafb_default_var;
 	info->fix.visual = (info->var.bits_per_pixel == 8) ?
@@ -1343,15 +1165,17 @@ static int __devinit nvidia_set_fbinfo(struct fb_info *info)
 	/* maximize virtual vertical length */
 	lpitch = info->var.xres_virtual *
 		((info->var.bits_per_pixel + 7) >> 3);
-	info->var.yres_virtual = info->fix.smem_len / lpitch;
+	info->var.yres_virtual = info->screen_size / lpitch;
 
 	info->pixmap.scan_align = 4;
 	info->pixmap.buf_align = 4;
+	info->pixmap.access_align = 32;
 	info->pixmap.size = 8 * 1024;
 	info->pixmap.flags = FB_PIXMAP_SYSTEM;
 
 	if (!hwcur)
-		info->fbops->fb_cursor = soft_cursor;
+	    info->fbops->fb_cursor = NULL;
+
 	info->var.accel_flags = (!noaccel);
 
 	switch (par->Architecture) {
@@ -1377,11 +1201,35 @@ static int __devinit nvidia_set_fbinfo(struct fb_info *info)
 	return nvidiafb_check_var(&info->var, info);
 }
 
-static u32 __devinit nvidia_get_arch(struct pci_dev *pd)
+static u32 __devinit nvidia_get_chipset(struct fb_info *info)
 {
+	struct nvidia_par *par = info->par;
+	u32 id = (par->pci_dev->vendor << 16) | par->pci_dev->device;
+
+	printk(KERN_INFO PFX "Device ID: %x \n", id);
+
+	if ((id & 0xfff0) == 0x00f0 ||
+	    (id & 0xfff0) == 0x02e0) {
+		/* pci-e */
+		id = NV_RD32(par->REGS, 0x1800);
+
+		if ((id & 0x0000ffff) == 0x000010DE)
+			id = 0x10DE0000 | (id >> 16);
+		else if ((id & 0xffff0000) == 0xDE100000) /* wrong endian */
+			id = 0x10DE0000 | ((id << 8) & 0x0000ff00) |
+                            ((id >> 8) & 0x000000ff);
+		printk(KERN_INFO PFX "Subsystem ID: %x \n", id);
+	}
+
+	return id;
+}
+
+static u32 __devinit nvidia_get_arch(struct fb_info *info)
+{
+	struct nvidia_par *par = info->par;
 	u32 arch = 0;
 
-	switch (pd->device & 0x0ff0) {
+	switch (par->Chipset & 0x0ff0) {
 	case 0x0100:		/* GeForce 256 */
 	case 0x0110:		/* GeForce2 MX */
 	case 0x0150:		/* GeForce2 */
@@ -1403,17 +1251,19 @@ static u32 __devinit nvidia_get_arch(struct pci_dev *pd)
 	case 0x0340:		/* GeForceFX 5700 */
 		arch = NV_ARCH_30;
 		break;
-	case 0x0040:
-	case 0x00C0:
-	case 0x0120:
-	case 0x0130:
-	case 0x0140:
-	case 0x0160:
-	case 0x01D0:
-	case 0x0090:
-	case 0x0210:
-	case 0x0220:
-	case 0x0230:
+	case 0x0040:		/* GeForce 6800 */
+	case 0x00C0:		/* GeForce 6800 */
+	case 0x0120:		/* GeForce 6800 */
+	case 0x0140:		/* GeForce 6600 */
+	case 0x0160:		/* GeForce 6200 */
+	case 0x01D0:		/* GeForce 7200, 7300, 7400 */
+	case 0x0090:		/* GeForce 7800 */
+	case 0x0210:		/* GeForce 6800 */
+	case 0x0220:		/* GeForce 6200 */
+	case 0x0240:		/* GeForce 6100 */
+	case 0x0290:		/* GeForce 7900 */
+	case 0x0390:		/* GeForce 7600 */
+	case 0x03D0:
 		arch = NV_ARCH_40;
 		break;
 	case 0x0020:		/* TNT, TNT2 */
@@ -1442,15 +1292,12 @@ static int __devinit nvidiafb_probe(struct pci_dev *pd,
 	if (!info)
 		goto err_out;
 
-	par = (struct nvidia_par *)info->par;
+	par = info->par;
 	par->pci_dev = pd;
-
-	info->pixmap.addr = kmalloc(8 * 1024, GFP_KERNEL);
+	info->pixmap.addr = kzalloc(8 * 1024, GFP_KERNEL);
 
 	if (info->pixmap.addr == NULL)
 		goto err_out_kfree;
-
-	memset(info->pixmap.addr, 0, 8 * 1024);
 
 	if (pci_enable_device(pd)) {
 		printk(KERN_ERR PFX "cannot enable PCI device\n");
@@ -1459,33 +1306,18 @@ static int __devinit nvidiafb_probe(struct pci_dev *pd,
 
 	if (pci_request_regions(pd, "nvidiafb")) {
 		printk(KERN_ERR PFX "cannot request PCI regions\n");
-		goto err_out_request;
+		goto err_out_enable;
 	}
-
-	par->Architecture = nvidia_get_arch(pd);
-
-	par->Chipset = (pd->vendor << 16) | pd->device;
-	printk(KERN_INFO PFX "nVidia device/chipset %X\n", par->Chipset);
-
-#ifdef CONFIG_PCI_NAMES
-	printk(KERN_INFO PFX "%s\n", pd->pretty_name);
-#endif
-
-	if (par->Architecture == 0) {
-		printk(KERN_ERR PFX "unknown NV_ARCH\n");
-		goto err_out_free_base0;
-	}
-
-	sprintf(nvidiafb_fix.id, "NV%x", (pd->device & 0x0ff0) >> 4);
 
 	par->FlatPanel = flatpanel;
-
 	if (flatpanel == 1)
 		printk(KERN_INFO PFX "flatpanel support enabled\n");
+	par->FPDither = fpdither;
 
 	par->CRTCnumber = forceCRTC;
 	par->FpScale = (!noscale);
 	par->paneltweak = paneltweak;
+	par->reverse_i2c = reverse_i2c;
 
 	/* enable IO and mem if not already done */
 	pci_read_config_word(pd, PCI_COMMAND, &cmd);
@@ -1503,16 +1335,40 @@ static int __devinit nvidiafb_probe(struct pci_dev *pd,
 		goto err_out_free_base0;
 	}
 
-	NVCommonSetup(info);
+	par->Chipset = nvidia_get_chipset(info);
+	par->Architecture = nvidia_get_arch(info);
+
+	if (par->Architecture == 0) {
+		printk(KERN_ERR PFX "unknown NV_ARCH\n");
+		goto err_out_arch;
+	}
+
+	sprintf(nvidiafb_fix.id, "NV%x", (pd->device & 0x0ff0) >> 4);
+
+	if (NVCommonSetup(info))
+		goto err_out_arch;
 
 	par->FbAddress = nvidiafb_fix.smem_start;
 	par->FbMapSize = par->RamAmountKBytes * 1024;
-	par->FbUsableSize = par->FbMapSize - (128 * 1024);
+	if (vram && vram * 1024 * 1024 < par->FbMapSize)
+		par->FbMapSize = vram * 1024 * 1024;
+
+	/* Limit amount of vram to 64 MB */
+	if (par->FbMapSize > 64 * 1024 * 1024)
+		par->FbMapSize = 64 * 1024 * 1024;
+
+	if(par->Architecture >= NV_ARCH_40)
+  	        par->FbUsableSize = par->FbMapSize - (560 * 1024);
+	else
+		par->FbUsableSize = par->FbMapSize - (128 * 1024);
 	par->ScratchBufferSize = (par->Architecture < NV_ARCH_10) ? 8 * 1024 :
 	    16 * 1024;
 	par->ScratchBufferStart = par->FbUsableSize - par->ScratchBufferSize;
+	par->CursorStart = par->FbUsableSize + (32 * 1024);
+
 	info->screen_base = ioremap(nvidiafb_fix.smem_start, par->FbMapSize);
-	nvidiafb_fix.smem_len = par->FbUsableSize;
+	info->screen_size = par->FbUsableSize;
+	nvidiafb_fix.smem_len = par->RamAmountKBytes * 1024;
 
 	if (!info->screen_base) {
 		printk(KERN_ERR PFX "cannot ioremap FB base\n");
@@ -1524,7 +1380,8 @@ static int __devinit nvidiafb_probe(struct pci_dev *pd,
 #ifdef CONFIG_MTRR
 	if (!nomtrr) {
 		par->mtrr.vram = mtrr_add(nvidiafb_fix.smem_start,
-					  par->FbMapSize, MTRR_TYPE_WRCOMB, 1);
+					  par->RamAmountKBytes * 1024,
+					  MTRR_TYPE_WRCOMB, 1);
 		if (par->mtrr.vram < 0) {
 			printk(KERN_ERR PFX "unable to setup MTRR\n");
 		} else {
@@ -1545,53 +1402,53 @@ static int __devinit nvidiafb_probe(struct pci_dev *pd,
 
 	nvidia_save_vga(par, &par->SavedReg);
 
+	pci_set_drvdata(pd, info);
+
+	if (backlight)
+		nvidia_bl_init(par);
+
 	if (register_framebuffer(info) < 0) {
 		printk(KERN_ERR PFX "error registering nVidia framebuffer\n");
 		goto err_out_iounmap_fb;
 	}
 
-	pci_set_drvdata(pd, info);
 
 	printk(KERN_INFO PFX
 	       "PCI nVidia %s framebuffer (%dMB @ 0x%lX)\n",
 	       info->fix.id,
 	       par->FbMapSize / (1024 * 1024), info->fix.smem_start);
-#ifdef CONFIG_PMAC_BACKLIGHT
-	if (par->FlatPanel && _machine == _MACH_Pmac)
-		register_backlight_controller(&nvidia_backlight_controller,
-					      par, "mnca");
-#endif
+
 	NVTRACE_LEAVE();
 	return 0;
 
-      err_out_iounmap_fb:
+err_out_iounmap_fb:
 	iounmap(info->screen_base);
+err_out_free_base1:
 	fb_destroy_modedb(info->monspecs.modedb);
 	nvidia_delete_i2c_busses(par);
-      err_out_free_base1:
+err_out_arch:
 	iounmap(par->REGS);
-      err_out_free_base0:
+ err_out_free_base0:
 	pci_release_regions(pd);
-      err_out_request:
-	pci_disable_device(pd);
-      err_out_enable:
+err_out_enable:
 	kfree(info->pixmap.addr);
-      err_out_kfree:
+err_out_kfree:
 	framebuffer_release(info);
-      err_out:
+err_out:
 	return -ENODEV;
 }
 
-static void __exit nvidiafb_remove(struct pci_dev *pd)
+static void __devexit nvidiafb_remove(struct pci_dev *pd)
 {
 	struct fb_info *info = pci_get_drvdata(pd);
 	struct nvidia_par *par = info->par;
 
 	NVTRACE_ENTER();
-	if (!info)
-		return;
 
 	unregister_framebuffer(info);
+
+	nvidia_bl_exit(par);
+
 #ifdef CONFIG_MTRR
 	if (par->mtrr.vram_valid)
 		mtrr_del(par->mtrr.vram, info->fix.smem_start,
@@ -1603,7 +1460,6 @@ static void __exit nvidiafb_remove(struct pci_dev *pd)
 	nvidia_delete_i2c_busses(par);
 	iounmap(par->REGS);
 	pci_release_regions(pd);
-	pci_disable_device(pd);
 	kfree(info->pixmap.addr);
 	framebuffer_release(info);
 	pci_set_drvdata(pd, NULL);
@@ -1643,12 +1499,22 @@ static int __devinit nvidiafb_setup(char *options)
 			noaccel = 1;
 		} else if (!strncmp(this_opt, "noscale", 7)) {
 			noscale = 1;
+		} else if (!strncmp(this_opt, "reverse_i2c", 11)) {
+			reverse_i2c = 1;
 		} else if (!strncmp(this_opt, "paneltweak:", 11)) {
 			paneltweak = simple_strtoul(this_opt+11, NULL, 0);
+		} else if (!strncmp(this_opt, "vram:", 5)) {
+			vram = simple_strtoul(this_opt+5, NULL, 0);
+		} else if (!strncmp(this_opt, "backlight:", 10)) {
+			backlight = simple_strtoul(this_opt+10, NULL, 0);
 #ifdef CONFIG_MTRR
 		} else if (!strncmp(this_opt, "nomtrr", 6)) {
-			nomtrr = 1;
+			nomtrr = true;
 #endif
+		} else if (!strncmp(this_opt, "fpdither:", 9)) {
+			fpdither = simple_strtol(this_opt+9, NULL, 0);
+		} else if (!strncmp(this_opt, "bpp:", 4)) {
+			bpp = simple_strtoul(this_opt+4, NULL, 0);
 		} else
 			mode_option = this_opt;
 	}
@@ -1660,8 +1526,10 @@ static int __devinit nvidiafb_setup(char *options)
 static struct pci_driver nvidiafb_driver = {
 	.name = "nvidiafb",
 	.id_table = nvidiafb_pci_tbl,
-	.probe = nvidiafb_probe,
-	.remove = __exit_p(nvidiafb_remove),
+	.probe    = nvidiafb_probe,
+	.suspend  = nvidiafb_suspend,
+	.resume   = nvidiafb_resume,
+	.remove   = __devexit_p(nvidiafb_remove),
 };
 
 /* ------------------------------------------------------------------------- *
@@ -1684,7 +1552,6 @@ static int __devinit nvidiafb_init(void)
 
 module_init(nvidiafb_init);
 
-#ifdef MODULE
 static void __exit nvidiafb_exit(void)
 {
 	pci_unregister_driver(&nvidiafb_driver);
@@ -1695,7 +1562,11 @@ module_exit(nvidiafb_exit);
 module_param(flatpanel, int, 0);
 MODULE_PARM_DESC(flatpanel,
 		 "Enables experimental flat panel support for some chipsets. "
-		 "(0 or 1=enabled) (default=0)");
+		 "(0=disabled, 1=enabled, -1=autodetect) (default=-1)");
+module_param(fpdither, int, 0);
+MODULE_PARM_DESC(fpdither,
+		 "Enables dithering of flat panel for 6 bits panels. "
+		 "(0=disabled, 1=enabled, -1=autodetect) (default=-1)");
 module_param(hwcur, int, 0);
 MODULE_PARM_DESC(hwcur,
 		 "Enables hardware cursor implementation. (0 or 1=enabled) "
@@ -1716,8 +1587,19 @@ module_param(forceCRTC, int, 0);
 MODULE_PARM_DESC(forceCRTC,
 		 "Forces usage of a particular CRTC in case autodetection "
 		 "fails. (0 or 1) (default=autodetect)");
+module_param(vram, int, 0);
+MODULE_PARM_DESC(vram,
+		 "amount of framebuffer memory to remap in MiB"
+		 "(default=0 - remap entire memory)");
+module_param(mode_option, charp, 0);
+MODULE_PARM_DESC(mode_option, "Specify initial video mode");
+module_param(bpp, int, 0);
+MODULE_PARM_DESC(bpp, "pixel width in bits"
+		 "(default=8)");
+module_param(reverse_i2c, int, 0);
+MODULE_PARM_DESC(reverse_i2c, "reverse port assignment of the i2c bus");
 #ifdef CONFIG_MTRR
-module_param(nomtrr, bool, 0);
+module_param(nomtrr, bool, false);
 MODULE_PARM_DESC(nomtrr, "Disables MTRR support (0 or 1=disabled) "
 		 "(default=0)");
 #endif
@@ -1725,5 +1607,3 @@ MODULE_PARM_DESC(nomtrr, "Disables MTRR support (0 or 1=disabled) "
 MODULE_AUTHOR("Antonino Daplas");
 MODULE_DESCRIPTION("Framebuffer driver for nVidia graphics chipset");
 MODULE_LICENSE("GPL");
-#endif				/* MODULE */
-

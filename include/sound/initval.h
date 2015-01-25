@@ -3,7 +3,7 @@
 
 /*
  *  Init values for soundcard modules
- *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -50,24 +50,10 @@
 #define SNDRV_DEFAULT_DMA_SIZE	{ [0 ... (SNDRV_CARDS-1)] = SNDRV_AUTO_DMA_SIZE }
 #define SNDRV_DEFAULT_PTR	SNDRV_DEFAULT_STR
 
-#ifdef SNDRV_LEGACY_AUTO_PROBE
-static int snd_legacy_auto_probe(unsigned long *ports, int (*probe)(unsigned long port))
-{
-	int result = 0;	/* number of detected cards */
-
-	while ((signed long)*ports != -1) {
-		if (probe(*ports) >= 0)
-			result++;
-		ports++;
-	}
-	return result;
-}
-#endif
-
 #ifdef SNDRV_LEGACY_FIND_FREE_IRQ
 #include <linux/interrupt.h>
 
-static irqreturn_t snd_legacy_empty_irq_handler(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t snd_legacy_empty_irq_handler(int irq, void *dev_id)
 {
 	return IRQ_HANDLED;
 }
@@ -76,7 +62,8 @@ static int snd_legacy_find_free_irq(int *irq_table)
 {
 	while (*irq_table != -1) {
 		if (!request_irq(*irq_table, snd_legacy_empty_irq_handler,
-				 SA_INTERRUPT, "ALSA Test IRQ", (void *) irq_table)) {
+				 IRQF_PROBE_SHARED, "ALSA Test IRQ",
+				 (void *) irq_table)) {
 			free_irq(*irq_table, (void *) irq_table);
 			return *irq_table;
 		}

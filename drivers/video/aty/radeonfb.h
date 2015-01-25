@@ -1,7 +1,10 @@
 #ifndef __RADEONFB_H__
 #define __RADEONFB_H__
 
-#include <linux/config.h>
+#ifdef CONFIG_FB_RADEON_DEBUG
+#define DEBUG		1
+#endif
+
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -10,13 +13,14 @@
 #include <linux/fb.h>
 
 
+#ifdef CONFIG_FB_RADEON_I2C
 #include <linux/i2c.h>
-#include <linux/i2c-id.h>
 #include <linux/i2c-algo-bit.h>
+#endif
 
 #include <asm/io.h>
 
-#ifdef CONFIG_PPC_OF
+#if defined(CONFIG_PPC_OF) || defined(CONFIG_SPARC)
 #include <asm/prom.h>
 #endif
 
@@ -48,6 +52,9 @@ enum radeon_family {
 	CHIP_FAMILY_RV350,
 	CHIP_FAMILY_RV380,    /* RV370/RV380/M22/M24 */
 	CHIP_FAMILY_R420,     /* R420/R423/M18 */
+	CHIP_FAMILY_RC410,
+	CHIP_FAMILY_RS400,
+	CHIP_FAMILY_RS480,
 	CHIP_FAMILY_LAST,
 };
 
@@ -64,7 +71,9 @@ enum radeon_family {
 				((rinfo)->family == CHIP_FAMILY_RV350) || \
 				((rinfo)->family == CHIP_FAMILY_R350)  || \
 				((rinfo)->family == CHIP_FAMILY_RV380) || \
-				((rinfo)->family == CHIP_FAMILY_R420))
+				((rinfo)->family == CHIP_FAMILY_R420)  || \
+                               ((rinfo)->family == CHIP_FAMILY_RC410) || \
+                               ((rinfo)->family == CHIP_FAMILY_RS480))
 
 /*
  * Chip flags
@@ -273,13 +282,15 @@ enum radeon_pm_mode {
 	radeon_pm_off	= 0x00000002,	/* Can resume from D3 cold */
 };
 
+typedef void (*reinit_function_ptr)(struct radeonfb_info *rinfo);
+
 struct radeonfb_info {
 	struct fb_info		*info;
 
 	struct radeon_regs 	state;
 	struct radeon_regs	init_state;
 
-	char			name[DEVICE_NAME_SIZE];
+	char			name[50];
 
 	unsigned long		mmio_base_phys;
 	unsigned long		fb_base_phys;
@@ -290,14 +301,14 @@ struct radeonfb_info {
 	unsigned long		fb_local_base;
 
 	struct pci_dev		*pdev;
-#ifdef CONFIG_PPC_OF
+#if defined(CONFIG_PPC_OF) || defined(CONFIG_SPARC)
 	struct device_node	*of_node;
 #endif
 
 	void __iomem		*bios_seg;
 	int			fp_bios_start;
 
-	u32			pseudo_palette[17];
+	u32			pseudo_palette[16];
 	struct { u8 red, green, blue, pad; }
 				palette[256];
 
@@ -338,7 +349,7 @@ struct radeonfb_info {
 	int			dynclk;
 	int			no_schedule;
 	enum radeon_pm_mode	pm_mode;
-	void			(*reinit_func)(struct radeonfb_info *rinfo);
+	reinit_function_ptr     reinit_func;
 
 	/* Lock on register access */
 	spinlock_t		reg_lock;
@@ -350,28 +361,10 @@ struct radeonfb_info {
 #ifdef CONFIG_FB_RADEON_I2C
 	struct radeon_i2c_chan 	i2c[4];
 #endif
-
-	u32			cfg_save[64];
 };
 
 
 #define PRIMARY_MONITOR(rinfo)	(rinfo->mon1_type)
-
-
-/*
- * Debugging stuffs
- */
-#ifdef CONFIG_FB_RADEON_DEBUG
-#define DEBUG		1
-#else
-#define DEBUG		0
-#endif
-
-#if DEBUG
-#define RTRACE		printk
-#else
-#define RTRACE		if(0) printk
-#endif
 
 
 /*
@@ -381,7 +374,7 @@ struct radeonfb_info {
 /* Note about this function: we have some rare cases where we must not schedule,
  * this typically happen with our special "wake up early" hook which allows us to
  * wake up the graphic chip (and thus get the console back) before everything else
- * on some machines that support that mecanism. At this point, interrupts are off
+ * on some machines that support that mechanism. At this point, interrupts are off
  * and scheduling is not permitted
  */
 static inline void _radeon_msleep(struct radeonfb_info *rinfo, unsigned long ms)
@@ -395,6 +388,8 @@ static inline void _radeon_msleep(struct radeonfb_info *rinfo, unsigned long ms)
 
 #define INREG8(addr)		readb((rinfo->mmio_base)+addr)
 #define OUTREG8(addr,val)	writeb(val, (rinfo->mmio_base)+addr)
+#define INREG16(addr)		readw((rinfo->mmio_base)+addr)
+#define OUTREG16(addr,val)	writew(val, (rinfo->mmio_base)+addr)
 #define INREG(addr)		readl((rinfo->mmio_base)+addr)
 #define OUTREG(addr,val)	writel(val, (rinfo->mmio_base)+addr)
 
@@ -537,22 +532,6 @@ static inline u32 radeon_get_dstbpp(u16 depth)
 /*
  * 2D Engine helper routines
  */
-static inline void radeon_engine_flush (struct radeonfb_info *rinfo)
-{
-	int i;
-
-	/* initiate flush */
-	OUTREGP(RB2D_DSTCACHE_CTLSTAT, RB2D_DC_FLUSH_ALL,
-	        ~RB2D_DC_FLUSH_ALL);
-
-	for (i=0; i < 2000000; i++) {
-		if (!(INREG(RB2D_DSTCACHE_CTLSTAT) & RB2D_DC_BUSY))
-			return;
-		udelay(1);
-	}
-	printk(KERN_ERR "radeonfb: Flush Timeout !\n");
-}
-
 
 static inline void _radeon_fifo_wait(struct radeonfb_info *rinfo, int entries)
 {
@@ -564,6 +543,28 @@ static inline void _radeon_fifo_wait(struct radeonfb_info *rinfo, int entries)
 		udelay(1);
 	}
 	printk(KERN_ERR "radeonfb: FIFO Timeout !\n");
+}
+
+static inline void radeon_engine_flush (struct radeonfb_info *rinfo)
+{
+	int i;
+
+	/* Initiate flush */
+	OUTREGP(DSTCACHE_CTLSTAT, RB2D_DC_FLUSH_ALL,
+	        ~RB2D_DC_FLUSH_ALL);
+
+	/* Ensure FIFO is empty, ie, make sure the flush commands
+	 * has reached the cache
+	 */
+	_radeon_fifo_wait (rinfo, 64);
+
+	/* Wait for the flush to complete */
+	for (i=0; i < 2000000; i++) {
+		if (!(INREG(DSTCACHE_CTLSTAT) & RB2D_DC_BUSY))
+			return;
+		udelay(1);
+	}
+	printk(KERN_ERR "radeonfb: Flush Timeout !\n");
 }
 
 
@@ -598,7 +599,7 @@ extern int radeon_probe_i2c_connector(struct radeonfb_info *rinfo, int conn, u8 
 /* PM Functions */
 extern int radeonfb_pci_suspend(struct pci_dev *pdev, pm_message_t state);
 extern int radeonfb_pci_resume(struct pci_dev *pdev);
-extern void radeonfb_pm_init(struct radeonfb_info *rinfo, int dynclk);
+extern void radeonfb_pm_init(struct radeonfb_info *rinfo, int dynclk, int ignore_devlist, int force_sleep);
 extern void radeonfb_pm_exit(struct radeonfb_info *rinfo);
 
 /* Monitor probe functions */
@@ -621,5 +622,14 @@ extern void radeonfb_engine_reset(struct radeonfb_info *rinfo);
 extern int radeon_screen_blank(struct radeonfb_info *rinfo, int blank, int mode_switch);
 extern void radeon_write_mode (struct radeonfb_info *rinfo, struct radeon_regs *mode,
 			       int reg_only);
+
+/* Backlight functions */
+#ifdef CONFIG_FB_RADEON_BACKLIGHT
+extern void radeonfb_bl_init(struct radeonfb_info *rinfo);
+extern void radeonfb_bl_exit(struct radeonfb_info *rinfo);
+#else
+static inline void radeonfb_bl_init(struct radeonfb_info *rinfo) {}
+static inline void radeonfb_bl_exit(struct radeonfb_info *rinfo) {}
+#endif
 
 #endif /* __RADEONFB_H__ */

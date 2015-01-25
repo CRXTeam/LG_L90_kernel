@@ -1,5 +1,3 @@
-/* $Id: parport.h,v 1.1 1998/05/17 10:57:52 andrea Exp andrea $ */
-
 /*
  * Any part of this program may be used in documents licensed under
  * the GNU Free Documentation License, Version 1.1 or any later version
@@ -96,14 +94,13 @@ typedef enum {
 /* The rest is for the kernel only */
 #ifdef __KERNEL__
 
-#include <linux/config.h>
 #include <linux/jiffies.h>
 #include <linux/proc_fs.h>
 #include <linux/spinlock.h>
 #include <linux/wait.h>
-#include <asm/system.h>
+#include <linux/irqreturn.h>
+#include <linux/semaphore.h>
 #include <asm/ptrace.h>
-#include <asm/semaphore.h>
 
 /* Define this later. */
 struct parport;
@@ -128,13 +125,24 @@ struct amiga_parport_state {
        unsigned char statusdir;/* ciab.ddrb & 7 */
 };
 
+struct ax88796_parport_state {
+	unsigned char cpr;
+};
+
+struct ip32_parport_state {
+	unsigned int dcr;
+	unsigned int ecr;
+};
+
 struct parport_state {
 	union {
 		struct pc_parport_state pc;
 		/* ARC has no state. */
 		struct ax_parport_state ax;
 		struct amiga_parport_state amiga;
+		struct ax88796_parport_state ax88796;
 		/* Atari has not state. */
+		struct ip32_parport_state ip32;
 		void *misc; 
 	} u;
 };
@@ -219,7 +227,7 @@ struct pardevice {
 	int (*preempt)(void *);
 	void (*wakeup)(void *);
 	void *private;
-	void (*irq_func)(int, void *, struct pt_regs *);
+	void (*irq_func)(void *);
 	unsigned int flags;
 	struct pardevice *next;
 	struct pardevice *prev;
@@ -236,7 +244,8 @@ struct pardevice {
 
 /* IEEE1284 information */
 
-/* IEEE1284 phases */
+/* IEEE1284 phases. These are exposed to userland through ppdev IOCTL
+ * PP[GS]ETPHASE, so do not change existing values. */
 enum ieee1284_phase {
 	IEEE1284_PH_FWD_DATA,
 	IEEE1284_PH_FWD_IDLE,
@@ -268,6 +277,10 @@ struct parport {
 	int dma;
 	int muxport;		/* which muxport (if any) this is */
 	int portnum;		/* which physical parallel port (not mux) */
+	struct device *dev;	/* Physical device associated with IO/DMA.
+				 * This may unfortulately be null if the
+				 * port has a legacy driver.
+				 */
 
 	struct parport *physport;
 				/* If this is a non-default mux
@@ -278,7 +291,7 @@ struct parport {
 				   following structure members are
 				   meaningless: devices, cad, muxsel,
 				   waithead, waittail, flags, pdir,
-				   ieee1284, *_lock.
+				   dev, ieee1284, *_lock.
 
 				   It this is a default mux parport, or
 				   there is no mux involved, this points to
@@ -291,7 +304,7 @@ struct parport {
 
 	struct pardevice *waithead;
 	struct pardevice *waittail;
-	
+
 	struct list_head list;
 	unsigned int flags;
 
@@ -309,6 +322,10 @@ struct parport {
 
 	int spintime;
 	atomic_t ref_count;
+
+	unsigned long devflags;
+#define PARPORT_DEVPROC_REGISTERED	0
+	struct pardevice *proc_device;	/* Currently register proc device */
 
 	struct list_head full_list;
 	struct parport *slaves[3];
@@ -351,6 +368,9 @@ extern void parport_unregister_driver (struct parport_driver *);
 extern struct parport *parport_find_number (int);
 extern struct parport *parport_find_base (unsigned long);
 
+/* generic irq handler, if it suits your needs */
+extern irqreturn_t parport_irq_handler(int irq, void *dev_id);
+
 /* Reference counting for ports. */
 extern struct parport *parport_get_port (struct parport *);
 extern void parport_put_port (struct parport *);
@@ -364,7 +384,7 @@ extern void parport_put_port (struct parport *);
 struct pardevice *parport_register_device(struct parport *port, 
 			  const char *name,
 			  int (*pf)(void *), void (*kf)(void *),
-			  void (*irq_func)(int, void *, struct pt_regs *), 
+			  void (*irq_func)(void *), 
 			  int flags, void *handle);
 
 /* parport_unregister unlinks a device from the chain. */
@@ -446,7 +466,7 @@ static __inline__ int parport_yield_blocking(struct pardevice *dev)
 #define PARPORT_FLAG_EXCL		(1<<1)	/* EXCL driver registered. */
 
 /* IEEE1284 functions */
-extern void parport_ieee1284_interrupt (int, void *, struct pt_regs *);
+extern void parport_ieee1284_interrupt (void *);
 extern int parport_negotiate (struct parport *, int mode);
 extern ssize_t parport_write (struct parport *, const void *buf, size_t len);
 extern ssize_t parport_read (struct parport *, void *buf, size_t len);
@@ -488,26 +508,19 @@ extern size_t parport_ieee1284_epp_read_addr (struct parport *,
 /* IEEE1284.3 functions */
 extern int parport_daisy_init (struct parport *port);
 extern void parport_daisy_fini (struct parport *port);
-extern struct pardevice *parport_open (int devnum, const char *name,
-				       int (*pf) (void *),
-				       void (*kf) (void *),
-				       void (*irqf) (int, void *,
-						     struct pt_regs *),
-				       int flags, void *handle);
+extern struct pardevice *parport_open (int devnum, const char *name);
 extern void parport_close (struct pardevice *dev);
 extern ssize_t parport_device_id (int devnum, char *buffer, size_t len);
-extern int parport_device_num (int parport, int mux, int daisy);
 extern void parport_daisy_deselect_all (struct parport *port);
 extern int parport_daisy_select (struct parport *port, int daisy, int mode);
 
 /* Lowlevel drivers _can_ call this support function to handle irqs.  */
-static __inline__ void parport_generic_irq(int irq, struct parport *port,
-					   struct pt_regs *regs)
+static inline void parport_generic_irq(struct parport *port)
 {
-	parport_ieee1284_interrupt (irq, port, regs);
+	parport_ieee1284_interrupt (port);
 	read_lock(&port->cad_lock);
 	if (port->cad && port->cad->irq_func)
-		port->cad->irq_func(irq, port->cad->private, regs);
+		port->cad->irq_func(port->cad->private);
 	read_unlock(&port->cad_lock);
 }
 
@@ -547,6 +560,9 @@ extern int parport_device_proc_unregister(struct pardevice *device);
 #define parport_data_reverse(p)            (p)->ops->data_reverse(p)
 
 #endif /*  !CONFIG_PARPORT_NOT_PC  */
+
+extern unsigned long parport_default_timeslice;
+extern int parport_default_spintime;
 
 #endif /* __KERNEL__ */
 #endif /* _PARPORT_H_ */

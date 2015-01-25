@@ -41,11 +41,6 @@
 #include "rivafb.h"
 #include "nvreg.h"
 
-
-#ifndef CONFIG_PCI		/* sanity check */
-#error This driver requires PCI support.
-#endif
-
 #define PFX "rivafb: "
 
 static inline unsigned char MISCin(struct riva_par *par)
@@ -163,7 +158,7 @@ unsigned long riva_get_memlen(struct riva_par *par)
 	unsigned long memlen = 0;
 	unsigned int chipset = par->Chipset;
 	struct pci_dev* dev;
-	int amt;
+	u32 amt;
 
 	switch (chip->Architecture) {
 	case NV_ARCH_03:
@@ -231,12 +226,14 @@ unsigned long riva_get_memlen(struct riva_par *par)
 	case NV_ARCH_30:
 		if(chipset == NV_CHIP_IGEFORCE2) {
 
-			dev = pci_find_slot(0, 1);
+			dev = pci_get_bus_and_slot(0, 1);
 			pci_read_config_dword(dev, 0x7C, &amt);
+			pci_dev_put(dev);
 			memlen = (((amt >> 6) & 31) + 1) * 1024;
 		} else if (chipset == NV_CHIP_0x01F0) {
-			dev = pci_find_slot(0, 1);
+			dev = pci_get_bus_and_slot(0, 1);
 			pci_read_config_dword(dev, 0x84, &amt);
+			pci_dev_put(dev);
 			memlen = (((amt >> 4) & 127) + 1) * 1024;
 		} else {
 			switch ((NV_RD32(chip->PFB, 0x0000020C) >> 20) &

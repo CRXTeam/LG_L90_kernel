@@ -37,6 +37,8 @@
 #ifndef NFS_IDMAP_H
 #define NFS_IDMAP_H
 
+#include <linux/types.h>
+
 /* XXX from bits/utmp.h  */
 #define IDMAP_NAMESZ  128
 
@@ -62,15 +64,39 @@ struct idmap_msg {
 #ifdef __KERNEL__
 
 /* Forward declaration to make this header independent of others */
-struct nfs4_client;
+struct nfs_client;
+struct nfs_server;
+struct nfs_fattr;
+struct nfs4_string;
 
-void nfs_idmap_new(struct nfs4_client *);
-void nfs_idmap_delete(struct nfs4_client *);
+#ifdef CONFIG_NFS_V4
+int nfs_idmap_init(void);
+void nfs_idmap_quit(void);
+#else
+static inline int nfs_idmap_init(void)
+{
+	return 0;
+}
 
-int nfs_map_name_to_uid(struct nfs4_client *, const char *, size_t, __u32 *);
-int nfs_map_group_to_gid(struct nfs4_client *, const char *, size_t, __u32 *);
-int nfs_map_uid_to_name(struct nfs4_client *, __u32, char *);
-int nfs_map_gid_to_group(struct nfs4_client *, __u32, char *);
+static inline void nfs_idmap_quit(void)
+{}
+#endif
+
+int nfs_idmap_new(struct nfs_client *);
+void nfs_idmap_delete(struct nfs_client *);
+
+void nfs_fattr_init_names(struct nfs_fattr *fattr,
+		struct nfs4_string *owner_name,
+		struct nfs4_string *group_name);
+void nfs_fattr_free_names(struct nfs_fattr *);
+void nfs_fattr_map_and_free_names(struct nfs_server *, struct nfs_fattr *);
+
+int nfs_map_name_to_uid(const struct nfs_server *, const char *, size_t, __u32 *);
+int nfs_map_group_to_gid(const struct nfs_server *, const char *, size_t, __u32 *);
+int nfs_map_uid_to_name(const struct nfs_server *, __u32, char *, size_t);
+int nfs_map_gid_to_group(const struct nfs_server *, __u32, char *, size_t);
+
+extern unsigned int nfs_idmap_cache_timeout;
 #endif /* __KERNEL__ */
 
 #endif /* NFS_IDMAP_H */

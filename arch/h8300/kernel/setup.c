@@ -16,11 +16,11 @@
  * This file handles the architecture-dependent parts of system setup
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
+#include <linux/mm.h>
 #include <linux/fs.h>
 #include <linux/fb.h>
 #include <linux/console.h>
@@ -34,10 +34,7 @@
 
 #include <asm/setup.h>
 #include <asm/irq.h>
-
-#ifdef CONFIG_BLK_DEV_INITRD
 #include <asm/pgtable.h>
-#endif
 
 #if defined(__H8300H__)
 #define CPU "H8/300H"
@@ -49,13 +46,13 @@
 #include <asm/regs267x.h>
 #endif
 
-#define STUBSIZE 0xc000;
+#define STUBSIZE 0xc000
 
 unsigned long rom_length;
 unsigned long memory_start;
 unsigned long memory_end;
 
-char command_line[COMMAND_LINE_SIZE];
+char __initdata command_line[COMMAND_LINE_SIZE];
 
 extern int _stext, _etext, _sdata, _edata, _sbss, _ebss, _end;
 extern int _ramstart, _ramend;
@@ -117,7 +114,7 @@ void __init setup_arch(char **cmdline_p)
 #endif
 #else
 	if ((memory_end < CONFIG_BLKDEV_RESERVE_ADDRESS) && 
-	    (memory_end > CONFIG_BLKDEV_RESERVE_ADDRESS)
+	    (memory_end > CONFIG_BLKDEV_RESERVE_ADDRESS))
 	    /* overlap userarea */
 	    memory_end = CONFIG_BLKDEV_RESERVE_ADDRESS; 
 #endif
@@ -155,8 +152,8 @@ void __init setup_arch(char **cmdline_p)
 #endif
 	/* Keep a copy of command line */
 	*cmdline_p = &command_line[0];
-	memcpy(saved_command_line, command_line, COMMAND_LINE_SIZE);
-	saved_command_line[COMMAND_LINE_SIZE-1] = 0;
+	memcpy(boot_command_line, command_line, COMMAND_LINE_SIZE);
+	boot_command_line[COMMAND_LINE_SIZE-1] = 0;
 
 #ifdef DEBUG
 	if (strlen(*cmdline_p)) 
@@ -177,7 +174,7 @@ void __init setup_arch(char **cmdline_p)
 	 * the bootmem bitmap so we then reserve it after freeing it :-)
 	 */
 	free_bootmem(memory_start, memory_end - memory_start);
-	reserve_bootmem(memory_start, bootmap_size);
+	reserve_bootmem(memory_start, bootmap_size, BOOTMEM_DEFAULT);
 	/*
 	 * get kmalloc into gear
 	 */
@@ -240,7 +237,7 @@ static void c_stop(struct seq_file *m, void *v)
 {
 }
 
-struct seq_operations cpuinfo_op = {
+const struct seq_operations cpuinfo_op = {
 	.start	= c_start,
 	.next	= c_next,
 	.stop	= c_stop,

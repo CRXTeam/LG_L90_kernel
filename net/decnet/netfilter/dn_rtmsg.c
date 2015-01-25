@@ -14,18 +14,18 @@
  */
 #include <linux/module.h>
 #include <linux/skbuff.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/netdevice.h>
 #include <linux/netfilter.h>
 #include <linux/spinlock.h>
 #include <linux/netlink.h>
+#include <linux/netfilter_decnet.h>
 
 #include <net/sock.h>
 #include <net/flow.h>
 #include <net/dn.h>
 #include <net/dn_route.h>
-
-#include <linux/netfilter_decnet.h>
 
 static struct sock *dnrmg = NULL;
 
@@ -34,7 +34,7 @@ static struct sk_buff *dnrmg_build_message(struct sk_buff *rt_skb, int *errp)
 {
 	struct sk_buff *skb = NULL;
 	size_t size;
-	unsigned char *old_tail;
+	sk_buff_data_t old_tail;
 	struct nlmsghdr *nlh;
 	unsigned char *ptr;
 	struct nf_dn_rtmsg *rtm;
@@ -49,7 +49,7 @@ static struct sk_buff *dnrmg_build_message(struct sk_buff *rt_skb, int *errp)
 	rtm = (struct nf_dn_rtmsg *)NLMSG_DATA(nlh);
 	rtm->nfdn_ifindex = rt_skb->dev->ifindex;
 	ptr = NFDN_RTMSG(rtm);
-	memcpy(ptr, rt_skb->data, rt_skb->len);
+	skb_copy_from_linear_data(rt_skb, ptr, rt_skb->len);
 	nlh->nlmsg_len = skb->tail - old_tail;
 	return skb;
 
@@ -69,32 +69,32 @@ static void dnrmg_send_peer(struct sk_buff *skb)
 	int group = 0;
 	unsigned char flags = *skb->data;
 
-	switch(flags & DN_RT_CNTL_MSK) {
-		case DN_RT_PKT_L1RT:
-			group = DNRMG_L1_GROUP;
-			break;
-		case DN_RT_PKT_L2RT:
-			group = DNRMG_L2_GROUP;
-			break;
-		default:
-			return;
+	switch (flags & DN_RT_CNTL_MSK) {
+	case DN_RT_PKT_L1RT:
+		group = DNRNG_NLGRP_L1;
+		break;
+	case DN_RT_PKT_L2RT:
+		group = DNRNG_NLGRP_L2;
+		break;
+	default:
+		return;
 	}
 
 	skb2 = dnrmg_build_message(skb, &status);
 	if (skb2 == NULL)
 		return;
-	NETLINK_CB(skb2).dst_groups = group;
+	NETLINK_CB(skb2).dst_group = group;
 	netlink_broadcast(dnrmg, skb2, 0, group, GFP_ATOMIC);
 }
 
 
 static unsigned int dnrmg_hook(unsigned int hook,
-			struct sk_buff **pskb,
+			struct sk_buff *skb,
 			const struct net_device *in,
 			const struct net_device *out,
 			int (*okfn)(struct sk_buff *))
 {
-	dnrmg_send_peer(*pskb);
+	dnrmg_send_peer(skb);
 	return NF_ACCEPT;
 }
 
@@ -103,12 +103,12 @@ static unsigned int dnrmg_hook(unsigned int hook,
 
 static inline void dnrmg_receive_user_skb(struct sk_buff *skb)
 {
-	struct nlmsghdr *nlh = (struct nlmsghdr *)skb->data;
+	struct nlmsghdr *nlh = nlmsg_hdr(skb);
 
 	if (nlh->nlmsg_len < sizeof(*nlh) || skb->len < nlh->nlmsg_len)
 		return;
 
-	if (!cap_raised(NETLINK_CB(skb).eff_cap, CAP_NET_ADMIN))
+	if (!capable(CAP_NET_ADMIN))
 		RCV_SKB_FAIL(-EPERM);
 
 	/* Eventually we might send routing messages too */
@@ -116,28 +116,21 @@ static inline void dnrmg_receive_user_skb(struct sk_buff *skb)
 	RCV_SKB_FAIL(-EINVAL);
 }
 
-static void dnrmg_receive_user_sk(struct sock *sk, int len)
-{
-	struct sk_buff *skb;
-
-	while((skb = skb_dequeue(&sk->sk_receive_queue)) != NULL) {
-		dnrmg_receive_user_skb(skb);
-		kfree_skb(skb);
-	}
-}
-
-static struct nf_hook_ops dnrmg_ops = {
+static struct nf_hook_ops dnrmg_ops __read_mostly = {
 	.hook		= dnrmg_hook,
 	.pf		= PF_DECnet,
 	.hooknum	= NF_DN_ROUTE,
 	.priority	= NF_DN_PRI_DNRTMSG,
 };
 
-static int __init init(void)
+static int __init dn_rtmsg_init(void)
 {
 	int rv = 0;
 
-	dnrmg = netlink_kernel_create(NETLINK_DNRTMSG, dnrmg_receive_user_sk);
+	dnrmg = netlink_kernel_create(&init_net,
+				      NETLINK_DNRTMSG, DNRNG_NLGRP_MAX,
+				      dnrmg_receive_user_skb,
+				      NULL, THIS_MODULE);
 	if (dnrmg == NULL) {
 		printk(KERN_ERR "dn_rtmsg: Cannot create netlink socket");
 		return -ENOMEM;
@@ -145,23 +138,24 @@ static int __init init(void)
 
 	rv = nf_register_hook(&dnrmg_ops);
 	if (rv) {
-		sock_release(dnrmg->sk_socket);
+		netlink_kernel_release(dnrmg);
 	}
 
 	return rv;
 }
 
-static void __exit fini(void)
+static void __exit dn_rtmsg_fini(void)
 {
 	nf_unregister_hook(&dnrmg_ops);
-	sock_release(dnrmg->sk_socket);
+	netlink_kernel_release(dnrmg);
 }
 
 
 MODULE_DESCRIPTION("DECnet Routing Message Grabulator");
 MODULE_AUTHOR("Steven Whitehouse <steve@chygwyn.com>");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS_NET_PF_PROTO(PF_NETLINK, NETLINK_DNRTMSG);
 
-module_init(init);
-module_exit(fini);
+module_init(dn_rtmsg_init);
+module_exit(dn_rtmsg_fini);
 

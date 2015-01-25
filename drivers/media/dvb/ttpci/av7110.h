@@ -5,10 +5,7 @@
 #include <linux/socket.h>
 #include <linux/netdevice.h>
 #include <linux/i2c.h>
-
-#ifdef CONFIG_DEVFS_FS
-#include <linux/devfs_fs_kernel.h>
-#endif
+#include <linux/input.h>
 
 #include <linux/dvb/video.h>
 #include <linux/dvb/audio.h>
@@ -16,6 +13,7 @@
 #include <linux/dvb/ca.h>
 #include <linux/dvb/osd.h>
 #include <linux/dvb/net.h>
+#include <linux/mutex.h>
 
 #include "dvbdev.h"
 #include "demux.h"
@@ -38,16 +36,20 @@
 
 #define ANALOG_TUNER_VES1820 1
 #define ANALOG_TUNER_STV0297 2
-#define ANALOG_TUNER_VBI     0x100
 
 extern int av7110_debug;
 
 #define dprintk(level,args...) \
-	    do { if ((av7110_debug & level)) { printk("dvb-ttpci: %s(): ", __FUNCTION__); printk(args); } } while (0)
+	    do { if ((av7110_debug & level)) { printk("dvb-ttpci: %s(): ", __func__); printk(args); } } while (0)
 
 #define MAXFILT 32
 
 enum {AV_PES_STREAM, PS_STREAM, TS_STREAM, PES_STREAM};
+
+enum av7110_video_mode {
+	AV7110_VIDEO_MODE_PAL 	= 0,
+	AV7110_VIDEO_MODE_NTSC	= 1
+};
 
 struct av7110_p2t {
 	u8		  pes[TS_SIZE];
@@ -67,6 +69,27 @@ struct dvb_video_events {
 	int			  overflow;
 	wait_queue_head_t	  wait_queue;
 	spinlock_t		  lock;
+};
+
+
+struct av7110;
+
+/* infrared remote control */
+struct infrared {
+	u16	key_map[256];
+	struct input_dev	*input_dev;
+	char			input_phys[32];
+	struct timer_list	keyup_timer;
+	struct tasklet_struct	ir_tasklet;
+	void			(*ir_handler)(struct av7110 *av7110, u32 ircom);
+	u32			ir_command;
+	u32			ir_config;
+	u32			device_mask;
+	u8			protocol;
+	u8			inversion;
+	u16			last_key;
+	u16			last_toggle;
+	u8			delay_timer_finished;
 };
 
 
@@ -98,7 +121,8 @@ struct av7110 {
 	int adac_type;	       /* audio DAC type */
 #define DVB_ADAC_TI	  0
 #define DVB_ADAC_CRYSTAL  1
-#define DVB_ADAC_MSP	  2
+#define DVB_ADAC_MSP34x0  2
+#define DVB_ADAC_MSP34x5  3
 #define DVB_ADAC_NONE	 -1
 
 
@@ -119,15 +143,14 @@ struct av7110 {
 	volatile int		bmp_state;
 #define BMP_NONE     0
 #define BMP_LOADING  1
-#define BMP_LOADINGS 2
-#define BMP_LOADED   3
+#define BMP_LOADED   2
 	wait_queue_head_t	bmpq;
 
 
 	/* DEBI and polled command interface */
 
 	spinlock_t		debilock;
-	struct semaphore	dcomlock;
+	struct mutex		dcomlock;
 	volatile int		debitype;
 	volatile int		debilen;
 
@@ -146,13 +169,13 @@ struct av7110 {
 
 	int			osdwin;      /* currently active window */
 	u16			osdbpp[8];
-	struct semaphore	osd_sema;
+	struct mutex		osd_mutex;
 
 	/* CA */
 
 	ca_slot_info_t		ci_slot[2];
 
-	int			vidmode;
+	enum av7110_video_mode	vidmode;
 	struct dmxdev		dmxdev;
 	struct dvb_demux	demux;
 
@@ -165,17 +188,18 @@ struct av7110 {
 	struct dvb_net		dvb_net1;
 	spinlock_t		feedlock1;
 	int			feeding1;
-	u8			tsf;
 	u32			ttbp;
 	unsigned char           *grabbing;
 	struct saa7146_pgtable  pt;
 	struct tasklet_struct   vpe_tasklet;
+	bool			full_ts;
 
 	int			fe_synced;
-	struct semaphore	pid_mutex;
+	struct mutex		pid_mutex;
 
 	int			video_blank;
 	struct video_status	videostate;
+	u16			display_panscan;
 	int			display_ar;
 	int			trickmode;
 #define TRICK_NONE   0
@@ -208,7 +232,6 @@ struct av7110 {
 	struct task_struct *arm_thread;
 	wait_queue_head_t   arm_wait;
 	u16		    arm_loops;
-	int		    arm_rmmod;
 
 	void		   *debi_virt;
 	dma_addr_t	    debi_bus;
@@ -220,7 +243,7 @@ struct av7110 {
 
 	struct audio_mixer	mixer;
 
-	struct dvb_adapter	 *dvb_adapter;
+	struct dvb_adapter	 dvb_adapter;
 	struct dvb_device	 *video_dev;
 	struct dvb_device	 *audio_dev;
 	struct dvb_device	 *ca_dev;
@@ -229,7 +252,10 @@ struct av7110 {
 	struct dvb_video_events  video_events;
 	video_size_t		 video_size;
 
-	u32		    ir_config;
+	u16			wssMode;
+	u16			wssData;
+
+	struct infrared		ir;
 
 	/* firmware stuff */
 	unsigned char *bin_fw;
@@ -243,6 +269,14 @@ struct av7110 {
 
 	struct dvb_frontend* fe;
 	fe_status_t fe_status;
+
+	/* crash recovery */
+	void				(*recover)(struct av7110* av7110);
+	fe_sec_voltage_t		saved_voltage;
+	fe_sec_tone_mode_t		saved_tone;
+	struct dvb_diseqc_master_cmd	saved_master_cmd;
+	fe_sec_mini_cmd_t		saved_minicmd;
+
 	int (*fe_init)(struct dvb_frontend* fe);
 	int (*fe_read_status)(struct dvb_frontend* fe, fe_status_t* status);
 	int (*fe_diseqc_reset_overload)(struct dvb_frontend* fe);
@@ -250,20 +284,17 @@ struct av7110 {
 	int (*fe_diseqc_send_burst)(struct dvb_frontend* fe, fe_sec_mini_cmd_t minicmd);
 	int (*fe_set_tone)(struct dvb_frontend* fe, fe_sec_tone_mode_t tone);
 	int (*fe_set_voltage)(struct dvb_frontend* fe, fe_sec_voltage_t voltage);
-	int (*fe_dishnetwork_send_legacy_command)(struct dvb_frontend* fe, unsigned int cmd);
-	int (*fe_set_frontend)(struct dvb_frontend* fe, struct dvb_frontend_parameters* params);
+	int (*fe_dishnetwork_send_legacy_command)(struct dvb_frontend* fe, unsigned long cmd);
+	int (*fe_set_frontend)(struct dvb_frontend *fe);
 };
 
 
-extern void ChangePIDs(struct av7110 *av7110, u16 vpid, u16 apid, u16 ttpid,
+extern int ChangePIDs(struct av7110 *av7110, u16 vpid, u16 apid, u16 ttpid,
 		       u16 subpid, u16 pcrpid);
 
-extern void av7110_register_irc_handler(void (*func)(u32));
-extern void av7110_unregister_irc_handler(void (*func)(u32));
-extern void av7110_setup_irc_config (struct av7110 *av7110, u32 ir_config);
-
-extern int av7110_ir_init (void);
-extern void av7110_ir_exit (void);
+extern int av7110_check_ir_config(struct av7110 *av7110, int force);
+extern int av7110_ir_init(struct av7110 *av7110);
+extern void av7110_ir_exit(struct av7110 *av7110);
 
 /* msp3400 i2c subaddresses */
 #define MSP_WR_DEM 0x10
@@ -274,7 +305,6 @@ extern void av7110_ir_exit (void);
 extern int i2c_writereg(struct av7110 *av7110, u8 id, u8 reg, u8 val);
 extern u8 i2c_readreg(struct av7110 *av7110, u8 id, u8 reg);
 extern int msp_writereg(struct av7110 *av7110, u8 dev, u16 reg, u16 val);
-extern int msp_readreg(struct av7110 *av7110, u8 dev, u16 reg, u16 *val);
 
 
 extern int av7110_init_analog_module(struct av7110 *av7110);

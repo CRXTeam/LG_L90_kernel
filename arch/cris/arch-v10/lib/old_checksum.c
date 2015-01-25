@@ -1,5 +1,4 @@
-/* $Id: old_checksum.c,v 1.3 2003/10/27 08:04:32 starvik Exp $
- *
+/*
  * INET		An implementation of the TCP/IP protocol suite for the LINUX
  *		operating system.  INET is implemented using the  BSD Socket
  *		interface as the means of communication with the user level.
@@ -47,39 +46,41 @@
 
 #include <asm/delay.h>
 
-unsigned int csum_partial(const unsigned char * buff, int len, unsigned int sum)
+__wsum csum_partial(const void *p, int len, __wsum __sum)
 {
-  /*
-   * Experiments with ethernet and slip connections show that buff
-   * is aligned on either a 2-byte or 4-byte boundary.
-   */
-  const unsigned char *endMarker = buff + len;
-  const unsigned char *marker = endMarker - (len % 16);
+	u32 sum = (__force u32)__sum;
+	const u16 *buff = p;
+	/*
+	* Experiments with ethernet and slip connections show that buff
+	* is aligned on either a 2-byte or 4-byte boundary.
+	*/
+	const void *endMarker = p + len;
+	const void *marker = endMarker - (len % 16);
 #if 0
-  if((int)buff & 0x3)
-    printk("unaligned buff %p\n", buff);
-  __delay(900); /* extra delay of 90 us to test performance hit */
+	if((int)buff & 0x3)
+		printk("unaligned buff %p\n", buff);
+	__delay(900); /* extra delay of 90 us to test performance hit */
 #endif
-  BITON;
-  while (buff < marker) {
-    sum += *((unsigned short *)buff)++;
-    sum += *((unsigned short *)buff)++;
-    sum += *((unsigned short *)buff)++;
-    sum += *((unsigned short *)buff)++;
-    sum += *((unsigned short *)buff)++;
-    sum += *((unsigned short *)buff)++;
-    sum += *((unsigned short *)buff)++;
-    sum += *((unsigned short *)buff)++;
-  }
-  marker = endMarker - (len % 2);
-  while(buff < marker) {
-    sum += *((unsigned short *)buff)++;
-  }
-  if(endMarker - buff > 0) {
-    sum += *buff;                 /* add extra byte seperately */
-  }
-  BITOFF;
-  return(sum);
+	BITON;
+	while (buff < marker) {
+		sum += *buff++;
+		sum += *buff++;
+		sum += *buff++;
+		sum += *buff++;
+		sum += *buff++;
+		sum += *buff++;
+		sum += *buff++;
+		sum += *buff++;
+	}
+	marker = endMarker - (len % 2);
+	while (buff < marker)
+		sum += *buff++;
+
+	if (endMarker > buff)
+		sum += *(const u8 *)buff;	/* add extra byte separately */
+
+	BITOFF;
+	return (__force __wsum)sum;
 }
 
 EXPORT_SYMBOL(csum_partial);

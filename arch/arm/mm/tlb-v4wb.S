@@ -14,7 +14,7 @@
  */
 #include <linux/linkage.h>
 #include <linux/init.h>
-#include <asm/constants.h>
+#include <asm/asm-offsets.h>
 #include <asm/tlbflush.h>
 #include "proc-macros.S"
 
@@ -69,9 +69,5 @@ ENTRY(v4wb_flush_kern_tlb_range)
 
 	__INITDATA
 
-	.type	v4wb_tlb_fns, #object
-ENTRY(v4wb_tlb_fns)
-	.long	v4wb_flush_user_tlb_range
-	.long	v4wb_flush_kern_tlb_range
-	.long	v4wb_tlb_flags
-	.size	v4wb_tlb_fns, . - v4wb_tlb_fns
+	/* define struct cpu_tlb_fns (see <asm/tlbflush.h> and proc-macros.S) */
+	define_tlb_functions v4wb, v4wb_tlb_flags

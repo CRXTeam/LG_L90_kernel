@@ -1,21 +1,24 @@
 /*
- * Setup the interrupt stuff.
+ * System-specific setup, especially interrupts.
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
  * Copyright (C) 1998 Harald Koerfgen
- * Copyright (C) 2000, 2001, 2002, 2003  Maciej W. Rozycki
+ * Copyright (C) 2000, 2001, 2002, 2003, 2005  Maciej W. Rozycki
  */
-#include <linux/sched.h>
-#include <linux/interrupt.h>
-#include <linux/param.h>
 #include <linux/console.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
+#include <linux/ioport.h>
 #include <linux/module.h>
+#include <linux/param.h>
+#include <linux/sched.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
+#include <linux/pm.h>
+#include <linux/irq.h>
 
 #include <asm/bootinfo.h>
 #include <asm/cpu.h>
@@ -38,19 +41,26 @@
 #include <asm/dec/kn02ca.h>
 #include <asm/dec/kn03.h>
 #include <asm/dec/kn230.h>
+#include <asm/dec/system.h>
 
 
 extern void dec_machine_restart(char *command);
 extern void dec_machine_halt(void);
 extern void dec_machine_power_off(void);
-extern irqreturn_t dec_intr_halt(int irq, void *dev_id, struct pt_regs *regs);
+extern irqreturn_t dec_intr_halt(int irq, void *dev_id);
 
-extern asmlinkage void decstation_handle_int(void);
+unsigned long dec_kn_slot_base, dec_kn_slot_size;
 
-spinlock_t ioasic_ssr_lock;
+EXPORT_SYMBOL(dec_kn_slot_base);
+EXPORT_SYMBOL(dec_kn_slot_size);
+
+int dec_tc_bus;
+
+DEFINE_SPINLOCK(ioasic_ssr_lock);
 
 volatile u32 *ioasic_base;
-unsigned long dec_kn_slot_size;
+
+EXPORT_SYMBOL(ioasic_base);
 
 /*
  * IRQ routing and priority tables.  Priorites are set as follows:
@@ -77,6 +87,9 @@ unsigned long dec_kn_slot_size;
 int dec_interrupt[DEC_NR_INTS] = {
 	[0 ... DEC_NR_INTS - 1] = -1
 };
+
+EXPORT_SYMBOL(dec_interrupt);
+
 int_ptr cpu_mask_nr_tbl[DEC_MAX_CPU_INTS][2] = {
 	{ { .i = ~0 }, { .p = dec_intr_unimplemented } },
 };
@@ -88,31 +101,43 @@ int cpu_fpu_mask = DEC_CPU_IRQ_MASK(DEC_CPU_INR_FPU);
 static struct irqaction ioirq = {
 	.handler = no_action,
 	.name = "cascade",
+	.flags = IRQF_NO_THREAD,
 };
 static struct irqaction fpuirq = {
 	.handler = no_action,
 	.name = "fpu",
+	.flags = IRQF_NO_THREAD,
 };
 
 static struct irqaction busirq = {
-	.flags = SA_INTERRUPT,
 	.name = "bus error",
+	.flags = IRQF_NO_THREAD,
 };
 
 static struct irqaction haltirq = {
 	.handler = dec_intr_halt,
 	.name = "halt",
+	.flags = IRQF_NO_THREAD,
 };
 
 
 /*
  * Bus error (DBE/IBE exceptions and bus interrupts) handling setup.
  */
-void __init dec_be_init(void)
+static void __init dec_be_init(void)
 {
 	switch (mips_machtype) {
 	case MACH_DS23100:	/* DS2100/DS3100 Pmin/Pmax */
-		busirq.flags |= SA_SHIRQ;
+		board_be_handler = dec_kn01_be_handler;
+		busirq.handler = dec_kn01_be_interrupt;
+		busirq.flags |= IRQF_SHARED;
+		dec_kn01_be_init();
+		break;
+	case MACH_DS5000_1XX:	/* DS5000/1xx 3min */
+	case MACH_DS5000_XX:	/* DS5000/xx Maxine */
+		board_be_handler = dec_kn02xa_be_handler;
+		busirq.handler = dec_kn02xa_be_interrupt;
+		dec_kn02xa_be_init();
 		break;
 	case MACH_DS5000_200:	/* DS5000/200 3max */
 	case MACH_DS5000_2X0:	/* DS5000/240 3max+ */
@@ -124,24 +149,19 @@ void __init dec_be_init(void)
 	}
 }
 
-
-extern void dec_time_init(void);
-extern void dec_timer_setup(struct irqaction *);
-
-static void __init decstation_setup(void)
+void __init plat_mem_setup(void)
 {
 	board_be_init = dec_be_init;
-	board_time_init = dec_time_init;
-	board_timer_setup = dec_timer_setup;
 
 	wbflush_setup();
 
 	_machine_restart = dec_machine_restart;
 	_machine_halt = dec_machine_halt;
-	_machine_power_off = dec_machine_power_off;
-}
+	pm_power_off = dec_machine_power_off;
 
-early_initcall(decstation_setup);
+	ioport_resource.start = ~0UL;
+	ioport_resource.end = 0UL;
+}
 
 /*
  * Machine-specific initialisation for KN01, aka DS2100 (aka Pmin)
@@ -206,7 +226,7 @@ static int_ptr kn01_cpu_mask_nr_tbl[][2] __initdata = {
 		{ .p = cpu_all_int } },
 };
 
-void __init dec_init_kn01(void)
+static void __init dec_init_kn01(void)
 {
 	/* IRQ routing. */
 	memcpy(&dec_interrupt, &kn01_interrupt,
@@ -216,7 +236,7 @@ void __init dec_init_kn01(void)
 	memcpy(&cpu_mask_nr_tbl, &kn01_cpu_mask_nr_tbl,
 		sizeof(kn01_cpu_mask_nr_tbl));
 
-	mips_cpu_irq_init(DEC_CPU_IRQ_BASE);
+	mips_cpu_irq_init();
 
 }				/* dec_init_kn01 */
 
@@ -281,7 +301,7 @@ static int_ptr kn230_cpu_mask_nr_tbl[][2] __initdata = {
 		{ .p = cpu_all_int } },
 };
 
-void __init dec_init_kn230(void)
+static void __init dec_init_kn230(void)
 {
 	/* IRQ routing. */
 	memcpy(&dec_interrupt, &kn230_interrupt,
@@ -291,7 +311,7 @@ void __init dec_init_kn230(void)
 	memcpy(&cpu_mask_nr_tbl, &kn230_cpu_mask_nr_tbl,
 		sizeof(kn230_cpu_mask_nr_tbl));
 
-	mips_cpu_irq_init(DEC_CPU_IRQ_BASE);
+	mips_cpu_irq_init();
 
 }				/* dec_init_kn230 */
 
@@ -371,7 +391,7 @@ static int_ptr kn02_asic_mask_nr_tbl[][2] __initdata = {
 		{ .p = kn02_all_int } },
 };
 
-void __init dec_init_kn02(void)
+static void __init dec_init_kn02(void)
 {
 	/* IRQ routing. */
 	memcpy(&dec_interrupt, &kn02_interrupt,
@@ -385,7 +405,7 @@ void __init dec_init_kn02(void)
 	memcpy(&asic_mask_nr_tbl, &kn02_asic_mask_nr_tbl,
 		sizeof(kn02_asic_mask_nr_tbl));
 
-	mips_cpu_irq_init(DEC_CPU_IRQ_BASE);
+	mips_cpu_irq_init();
 	init_kn02_irqs(KN02_IRQ_BASE);
 
 }				/* dec_init_kn02 */
@@ -472,7 +492,7 @@ static int_ptr kn02ba_asic_mask_nr_tbl[][2] __initdata = {
 		{ .p = asic_all_int } },
 };
 
-void __init dec_init_kn02ba(void)
+static void __init dec_init_kn02ba(void)
 {
 	/* IRQ routing. */
 	memcpy(&dec_interrupt, &kn02ba_interrupt,
@@ -486,7 +506,7 @@ void __init dec_init_kn02ba(void)
 	memcpy(&asic_mask_nr_tbl, &kn02ba_asic_mask_nr_tbl,
 		sizeof(kn02ba_asic_mask_nr_tbl));
 
-	mips_cpu_irq_init(DEC_CPU_IRQ_BASE);
+	mips_cpu_irq_init();
 	init_ioasic_irqs(IO_IRQ_BASE);
 
 }				/* dec_init_kn02ba */
@@ -569,7 +589,7 @@ static int_ptr kn02ca_asic_mask_nr_tbl[][2] __initdata = {
 		{ .p = asic_all_int } },
 };
 
-void __init dec_init_kn02ca(void)
+static void __init dec_init_kn02ca(void)
 {
 	/* IRQ routing. */
 	memcpy(&dec_interrupt, &kn02ca_interrupt,
@@ -583,7 +603,7 @@ void __init dec_init_kn02ca(void)
 	memcpy(&asic_mask_nr_tbl, &kn02ca_asic_mask_nr_tbl,
 		sizeof(kn02ca_asic_mask_nr_tbl));
 
-	mips_cpu_irq_init(DEC_CPU_IRQ_BASE);
+	mips_cpu_irq_init();
 	init_ioasic_irqs(IO_IRQ_BASE);
 
 }				/* dec_init_kn02ca */
@@ -670,7 +690,7 @@ static int_ptr kn03_asic_mask_nr_tbl[][2] __initdata = {
 		{ .p = asic_all_int } },
 };
 
-void __init dec_init_kn03(void)
+static void __init dec_init_kn03(void)
 {
 	/* IRQ routing. */
 	memcpy(&dec_interrupt, &kn03_interrupt,
@@ -684,7 +704,7 @@ void __init dec_init_kn03(void)
 	memcpy(&asic_mask_nr_tbl, &kn03_asic_mask_nr_tbl,
 		sizeof(kn03_asic_mask_nr_tbl));
 
-	mips_cpu_irq_init(DEC_CPU_IRQ_BASE);
+	mips_cpu_irq_init();
 	init_ioasic_irqs(IO_IRQ_BASE);
 
 }				/* dec_init_kn03 */
@@ -722,7 +742,6 @@ void __init arch_init_irq(void)
 		panic("Don't know how to set this up!");
 		break;
 	}
-	set_except_vector(0, decstation_handle_int);
 
 	/* Free the FPU interrupt if the exception is present. */
 	if (!cpu_has_nofpuex) {
@@ -745,6 +764,8 @@ void __init arch_init_irq(void)
 		setup_irq(dec_interrupt[DEC_IRQ_HALT], &haltirq);
 }
 
-EXPORT_SYMBOL(ioasic_base);
-EXPORT_SYMBOL(dec_kn_slot_size);
-EXPORT_SYMBOL(dec_interrupt);
+asmlinkage unsigned int dec_irq_dispatch(unsigned int irq)
+{
+	do_IRQ(irq);
+	return 0;
+}

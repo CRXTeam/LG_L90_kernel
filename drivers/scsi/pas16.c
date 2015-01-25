@@ -2,6 +2,7 @@
 #define PSEUDO_DMA
 #define FOO
 #define UNSAFE  /* Not unsafe for PAS16 -- use it */
+#define PDEBUG 0
 
 /*
  * This driver adapted from Drew Eckhardt's Trantor T128 driver
@@ -112,10 +113,8 @@
  
 #include <linux/module.h>
 
-#include <asm/system.h>
 #include <linux/signal.h>
 #include <linux/proc_fs.h>
-#include <linux/sched.h>
 #include <asm/io.h>
 #include <asm/dma.h>
 #include <linux/blkdev.h>
@@ -137,7 +136,7 @@ static unsigned short pas16_addr = 0;
 static int pas16_irq = 0;
  
 
-int scsi_irq_translate[] =
+static const int scsi_irq_translate[] =
 	{ 0,  0,  1,  2,  3,  4,  5,  6, 0,  0,  7,  8,  9,  0, 10, 11 };
 
 /* The default_irqs array contains values used to set the irq into the
@@ -145,7 +144,7 @@ int scsi_irq_translate[] =
  * irq jumpers on the board).  The first value in the array will be
  * assigned to logical board 0, the next to board 1, etc.
  */
-int default_irqs[] __initdata = 
+static int default_irqs[] __initdata =
 	{  PAS16_DEFAULT_BOARD_1_IRQ,
 	   PAS16_DEFAULT_BOARD_2_IRQ,
 	   PAS16_DEFAULT_BOARD_3_IRQ,
@@ -155,7 +154,7 @@ int default_irqs[] __initdata =
 static struct override {
     unsigned short io_port;
     int  irq;
-} overrides 
+} overrides
 #ifdef PAS16_OVERRIDE
     [] __initdata = PAS16_OVERRIDE;
 #else
@@ -163,21 +162,21 @@ static struct override {
 	{0,IRQ_AUTO}};
 #endif
 
-#define NO_OVERRIDES (sizeof(overrides) / sizeof(struct override))
+#define NO_OVERRIDES ARRAY_SIZE(overrides)
 
 static struct base {
     unsigned short io_port;
     int noauto;
-} bases[] __initdata = 
+} bases[] __initdata =
 	{ {PAS16_DEFAULT_BASE_1, 0},
 	  {PAS16_DEFAULT_BASE_2, 0},
 	  {PAS16_DEFAULT_BASE_3, 0},
 	  {PAS16_DEFAULT_BASE_4, 0}
 	};
 
-#define NO_BASES (sizeof (bases) / sizeof (struct base))
+#define NO_BASES ARRAY_SIZE(bases)
 
-unsigned short  pas16_offset[ 8 ] =
+static const unsigned short  pas16_offset[ 8 ] =
     {
 	0x1c00,    /* OUTPUT_DATA_REG */
 	0x1c01,    /* INITIATOR_COMMAND_REG */
@@ -368,7 +367,7 @@ void __init pas16_setup(char *str, int *ints)
 }
 
 /* 
- * Function : int pas16_detect(Scsi_Host_Template * tpnt)
+ * Function : int pas16_detect(struct scsi_host_template * tpnt)
  *
  * Purpose : detects and initializes PAS16 controllers
  *	that were autoprobed, overridden on the LILO command line, 
@@ -380,7 +379,7 @@ void __init pas16_setup(char *str, int *ints)
  *
  */
 
-int __init pas16_detect(Scsi_Host_Template * tpnt)
+int __init pas16_detect(struct scsi_host_template * tpnt)
 {
     static int current_override = 0;
     static unsigned short current_base = 0;
@@ -453,7 +452,8 @@ int __init pas16_detect(Scsi_Host_Template * tpnt)
 	    instance->irq = NCR5380_probe_irq(instance, PAS16_IRQS);
 
 	if (instance->irq != SCSI_IRQ_NONE) 
-	    if (request_irq(instance->irq, pas16_intr, SA_INTERRUPT, "pas16", instance)) {
+	    if (request_irq(instance->irq, pas16_intr, IRQF_DISABLED,
+			    "pas16", instance)) {
 		printk("scsi%d : IRQ%d not free, interrupts disabled\n", 
 		    instance->host_no, instance->irq);
 		instance->irq = SCSI_IRQ_NONE;
@@ -604,7 +604,7 @@ static inline int NCR5380_pwrite (struct Scsi_Host *instance, unsigned char *src
 static int pas16_release(struct Scsi_Host *shost)
 {
 	if (shost->irq)
-		free_irq(shost->irq, NULL);
+		free_irq(shost->irq, shost);
 	NCR5380_exit(shost);
 	if (shost->dma_channel != 0xff)
 		free_dma(shost->dma_channel);
@@ -614,15 +614,13 @@ static int pas16_release(struct Scsi_Host *shost)
 	return 0;
 }
 
-static Scsi_Host_Template driver_template = {
+static struct scsi_host_template driver_template = {
 	.name           = "Pro Audio Spectrum-16 SCSI",
 	.detect         = pas16_detect,
 	.release        = pas16_release,
 	.queuecommand   = pas16_queue_command,
 	.eh_abort_handler = pas16_abort,
 	.eh_bus_reset_handler = pas16_bus_reset,
-	.eh_device_reset_handler = pas16_device_reset,
-	.eh_host_reset_handler = pas16_host_reset,
 	.bios_param     = pas16_biosparam, 
 	.can_queue      = CAN_QUEUE,
 	.this_id        = 7,

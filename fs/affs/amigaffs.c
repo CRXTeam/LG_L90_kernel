@@ -128,7 +128,7 @@ affs_fix_dcache(struct dentry *dentry, u32 entry_ino)
 	void *data = dentry->d_fsdata;
 	struct list_head *head, *next;
 
-	spin_lock(&dcache_lock);
+	spin_lock(&inode->i_lock);
 	head = &inode->i_dentry;
 	next = head->next;
 	while (next != head) {
@@ -139,7 +139,7 @@ affs_fix_dcache(struct dentry *dentry, u32 entry_ino)
 		}
 		next = next->next;
 	}
-	spin_unlock(&dcache_lock);
+	spin_unlock(&inode->i_lock);
 }
 
 
@@ -170,21 +170,27 @@ affs_remove_link(struct dentry *dentry)
 		if (!link_bh)
 			goto done;
 
-		dir = iget(sb, be32_to_cpu(AFFS_TAIL(sb, link_bh)->parent));
-		if (!dir)
+		dir = affs_iget(sb, be32_to_cpu(AFFS_TAIL(sb, link_bh)->parent));
+		if (IS_ERR(dir)) {
+			retval = PTR_ERR(dir);
 			goto done;
+		}
 
 		affs_lock_dir(dir);
 		affs_fix_dcache(dentry, link_ino);
 		retval = affs_remove_hash(dir, link_bh);
-		if (retval)
+		if (retval) {
+			affs_unlock_dir(dir);
 			goto done;
+		}
 		mark_buffer_dirty_inode(link_bh, inode);
 
 		memcpy(AFFS_TAIL(sb, bh)->name, AFFS_TAIL(sb, link_bh)->name, 32);
 		retval = affs_insert_hash(dir, bh);
-		if (retval)
+		if (retval) {
+			affs_unlock_dir(dir);
 			goto done;
+		}
 		mark_buffer_dirty_inode(bh, inode);
 
 		affs_unlock_dir(dir);
@@ -209,7 +215,7 @@ affs_remove_link(struct dentry *dentry)
 				break;
 			default:
 				if (!AFFS_TAIL(sb, bh)->link_chain)
-					inode->i_nlink = 1;
+					set_nlink(inode, 1);
 			}
 			affs_free_block(sb, link_ino);
 			goto done;
@@ -310,7 +316,7 @@ affs_remove_header(struct dentry *dentry)
 	if (inode->i_nlink > 1)
 		retval = affs_remove_link(dentry);
 	else
-		inode->i_nlink = 0;
+		clear_nlink(inode);
 	affs_unlock_link(inode);
 	inode->i_ctime = CURRENT_TIME_SEC;
 	mark_inode_dirty(inode);
@@ -384,10 +390,10 @@ secs_to_datestamp(time_t secs, struct affs_date *ds)
 	ds->ticks = cpu_to_be32(secs * 50);
 }
 
-mode_t
+umode_t
 prot_to_mode(u32 prot)
 {
-	int mode = 0;
+	umode_t mode = 0;
 
 	if (!(prot & FIBF_NOWRITE))
 		mode |= S_IWUSR;
@@ -415,7 +421,7 @@ void
 mode_to_prot(struct inode *inode)
 {
 	u32 prot = AFFS_I(inode)->i_protect;
-	mode_t mode = inode->i_mode;
+	umode_t mode = inode->i_mode;
 
 	if (!(mode & S_IXUSR))
 		prot |= FIBF_NOEXECUTE;
@@ -445,7 +451,7 @@ affs_error(struct super_block *sb, const char *function, const char *fmt, ...)
 	va_list	 args;
 
 	va_start(args,fmt);
-	vsprintf(ErrorBuffer,fmt,args);
+	vsnprintf(ErrorBuffer,sizeof(ErrorBuffer),fmt,args);
 	va_end(args);
 
 	printk(KERN_CRIT "AFFS error (device %s): %s(): %s\n", sb->s_id,
@@ -461,7 +467,7 @@ affs_warning(struct super_block *sb, const char *function, const char *fmt, ...)
 	va_list	 args;
 
 	va_start(args,fmt);
-	vsprintf(ErrorBuffer,fmt,args);
+	vsnprintf(ErrorBuffer,sizeof(ErrorBuffer),fmt,args);
 	va_end(args);
 
 	printk(KERN_WARNING "AFFS warning (device %s): %s(): %s\n", sb->s_id,

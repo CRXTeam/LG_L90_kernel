@@ -9,11 +9,10 @@
  */
 
 #include <linux/pagemap.h>
+#include <linux/slab.h>
 #include <linux/swap.h>
 
 #include "btree.h"
-
-#define REF_PAGES	0
 
 void hfs_bnode_read(struct hfs_bnode *node, void *buf,
 		int off, int len)
@@ -200,7 +199,7 @@ void hfs_bnode_unlink(struct hfs_bnode *node)
 
 	// move down?
 	if (!node->prev && !node->next) {
-		printk("hfs_btree_del_level\n");
+		printk(KERN_DEBUG "hfs_btree_del_level\n");
 	}
 	if (!node->parent) {
 		tree->root = 0;
@@ -221,7 +220,7 @@ struct hfs_bnode *hfs_bnode_findhash(struct hfs_btree *tree, u32 cnid)
 	struct hfs_bnode *node;
 
 	if (cnid >= tree->node_count) {
-		printk("HFS: request for non-existent node %d in B*Tree\n", cnid);
+		printk(KERN_ERR "hfs: request for non-existent node %d in B*Tree\n", cnid);
 		return NULL;
 	}
 
@@ -244,17 +243,16 @@ static struct hfs_bnode *__hfs_bnode_create(struct hfs_btree *tree, u32 cnid)
 	loff_t off;
 
 	if (cnid >= tree->node_count) {
-		printk("HFS: request for non-existent node %d in B*Tree\n", cnid);
+		printk(KERN_ERR "hfs: request for non-existent node %d in B*Tree\n", cnid);
 		return NULL;
 	}
 
 	sb = tree->inode->i_sb;
 	size = sizeof(struct hfs_bnode) + tree->pages_per_bnode *
 		sizeof(struct page *);
-	node = kmalloc(size, GFP_KERNEL);
+	node = kzalloc(size, GFP_KERNEL);
 	if (!node)
 		return NULL;
-	memset(node, 0, size);
 	node->tree = tree;
 	node->this = cnid;
 	set_bit(HFS_BNODE_NEW, &node->flags);
@@ -282,16 +280,14 @@ static struct hfs_bnode *__hfs_bnode_create(struct hfs_btree *tree, u32 cnid)
 	block = off >> PAGE_CACHE_SHIFT;
 	node->page_offset = off & ~PAGE_CACHE_MASK;
 	for (i = 0; i < tree->pages_per_bnode; i++) {
-		page = read_cache_page(mapping, block++, (filler_t *)mapping->a_ops->readpage, NULL);
+		page = read_mapping_page(mapping, block++, NULL);
 		if (IS_ERR(page))
 			goto fail;
 		if (PageError(page)) {
 			page_cache_release(page);
 			goto fail;
 		}
-#if !REF_PAGES
 		page_cache_release(page);
-#endif
 		node->page[i] = page;
 	}
 
@@ -310,8 +306,7 @@ void hfs_bnode_unhash(struct hfs_bnode *node)
 	for (p = &node->tree->node_hash[hfs_bnode_hash(node->this)];
 	     *p && *p != node; p = &(*p)->next_hash)
 		;
-	if (!*p)
-		BUG();
+	BUG_ON(!*p);
 	*p = node->next_hash;
 	node->tree->node_hash_cnt--;
 }
@@ -419,8 +414,7 @@ struct hfs_bnode *hfs_bnode_create(struct hfs_btree *tree, u32 num)
 	spin_lock(&tree->hash_lock);
 	node = hfs_bnode_findhash(tree, num);
 	spin_unlock(&tree->hash_lock);
-	if (node)
-		BUG();
+	BUG_ON(node);
 	node = __hfs_bnode_create(tree, num);
 	if (!node)
 		return ERR_PTR(-ENOMEM);
@@ -449,13 +443,6 @@ void hfs_bnode_get(struct hfs_bnode *node)
 {
 	if (node) {
 		atomic_inc(&node->refcnt);
-#if REF_PAGES
-		{
-		int i;
-		for (i = 0; i < node->tree->pages_per_bnode; i++)
-			get_page(node->page[i]);
-		}
-#endif
 		dprint(DBG_BNODE_REFS, "get_node(%d:%d): %d\n",
 		       node->tree->cnid, node->this, atomic_read(&node->refcnt));
 	}
@@ -470,20 +457,13 @@ void hfs_bnode_put(struct hfs_bnode *node)
 
 		dprint(DBG_BNODE_REFS, "put_node(%d:%d): %d\n",
 		       node->tree->cnid, node->this, atomic_read(&node->refcnt));
-		if (!atomic_read(&node->refcnt))
-			BUG();
-		if (!atomic_dec_and_lock(&node->refcnt, &tree->hash_lock)) {
-#if REF_PAGES
-			for (i = 0; i < tree->pages_per_bnode; i++)
-				put_page(node->page[i]);
-#endif
+		BUG_ON(!atomic_read(&node->refcnt));
+		if (!atomic_dec_and_lock(&node->refcnt, &tree->hash_lock))
 			return;
-		}
 		for (i = 0; i < tree->pages_per_bnode; i++) {
+			if (!node->page[i])
+				continue;
 			mark_page_accessed(node->page[i]);
-#if REF_PAGES
-			put_page(node->page[i]);
-#endif
 		}
 
 		if (test_bit(HFS_BNODE_DELETED, &node->flags)) {

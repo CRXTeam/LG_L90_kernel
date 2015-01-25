@@ -1,4 +1,4 @@
-/* 
+/*
    HIDP implementation for Linux Bluetooth stack (BlueZ).
    Copyright (C) 2003-2004 Marcel Holtmann <marcel@holtmann.org>
 
@@ -10,13 +10,13 @@
    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF THIRD PARTY RIGHTS.
    IN NO EVENT SHALL THE COPYRIGHT HOLDER(S) AND AUTHOR(S) BE LIABLE FOR ANY
-   CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES 
-   WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN 
-   ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF 
+   CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES
+   WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+   ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
    OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-   ALL LIABILITY, INCLUDING LIABILITY FOR INFRINGEMENT OF ANY PATENTS, 
-   COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS, RELATING TO USE OF THIS 
+   ALL LIABILITY, INCLUDING LIABILITY FOR INFRINGEMENT OF ANY PATENTS,
+   COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS, RELATING TO USE OF THIS
    SOFTWARE IS DISCLAIMED.
 */
 
@@ -82,11 +82,11 @@
 #define HIDP_BLUETOOTH_VENDOR_ID	9
 
 struct hidp_connadd_req {
-	int   ctrl_sock;	// Connected control socket
-	int   intr_sock;	// Connteted interrupt socket
+	int   ctrl_sock;	/* Connected control socket */
+	int   intr_sock;	/* Connected interrupt socket */
 	__u16 parser;
 	__u16 rd_size;
-	__u8 *rd_data;
+	__u8 __user *rd_data;
 	__u8  country;
 	__u8  subclass;
 	__u16 vendor;
@@ -126,6 +126,8 @@ int hidp_get_conninfo(struct hidp_conninfo *ci);
 struct hidp_session {
 	struct list_head list;
 
+	struct hci_conn *conn;
+
 	struct socket *ctrl_sock;
 	struct socket *intr_sock;
 
@@ -145,10 +147,16 @@ struct hidp_session {
 
 	struct input_dev *input;
 
+	struct hid_device *hid;
+
 	struct timer_list timer;
 
 	struct sk_buff_head ctrl_transmit;
 	struct sk_buff_head intr_transmit;
+
+	/* Report descriptor */
+	__u8 *rd_data;
+	uint rd_size;
 };
 
 static inline void hidp_schedule(struct hidp_session *session)
@@ -156,8 +164,8 @@ static inline void hidp_schedule(struct hidp_session *session)
 	struct sock *ctrl_sk = session->ctrl_sock->sk;
 	struct sock *intr_sk = session->intr_sock->sk;
 
-	wake_up_interruptible(ctrl_sk->sk_sleep);
-	wake_up_interruptible(intr_sk->sk_sleep);
+	wake_up_interruptible(sk_sleep(ctrl_sk));
+	wake_up_interruptible(sk_sleep(intr_sk));
 }
 
 /* HIDP init defines */

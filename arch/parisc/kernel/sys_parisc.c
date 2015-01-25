@@ -29,21 +29,9 @@
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/shm.h>
-#include <linux/smp_lock.h>
 #include <linux/syscalls.h>
-
-int sys_pipe(int __user *fildes)
-{
-	int fd[2];
-	int error;
-
-	error = do_pipe(fd);
-	if (!error) {
-		if (copy_to_user(fildes, fd, 2*sizeof(int)))
-			error = -EFAULT;
-	}
-	return error;
-}
+#include <linux/utsname.h>
+#include <linux/personality.h>
 
 static unsigned long get_unshared_area(unsigned long addr, unsigned long len)
 {
@@ -104,6 +92,11 @@ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr,
 {
 	if (len > TASK_SIZE)
 		return -ENOMEM;
+	/* Might want to check for cache aliasing issues for MAP_FIXED case
+	 * like ARM or MIPS ??? --BenH.
+	 */
+	if (flags & MAP_FIXED)
+		return addr;
 	if (!addr)
 		addr = TASK_UNMAPPED_BASE;
 
@@ -117,37 +110,14 @@ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr,
 	return addr;
 }
 
-static unsigned long do_mmap2(unsigned long addr, unsigned long len,
-	unsigned long prot, unsigned long flags, unsigned long fd,
-	unsigned long pgoff)
-{
-	struct file * file = NULL;
-	unsigned long error = -EBADF;
-	if (!(flags & MAP_ANONYMOUS)) {
-		file = fget(fd);
-		if (!file)
-			goto out;
-	}
-
-	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
-
-	down_write(&current->mm->mmap_sem);
-	error = do_mmap_pgoff(file, addr, len, prot, flags, pgoff);
-	up_write(&current->mm->mmap_sem);
-
-	if (file != NULL)
-		fput(file);
-out:
-	return error;
-}
-
 asmlinkage unsigned long sys_mmap2(unsigned long addr, unsigned long len,
 	unsigned long prot, unsigned long flags, unsigned long fd,
 	unsigned long pgoff)
 {
 	/* Make sure the shift for mmap2 is constant (12), no matter what PAGE_SIZE
 	   we have. */
-	return do_mmap2(addr, len, prot, flags, fd, pgoff >> (PAGE_SHIFT - 12));
+	return sys_mmap_pgoff(addr, len, prot, flags, fd,
+			      pgoff >> (PAGE_SHIFT - 12));
 }
 
 asmlinkage unsigned long sys_mmap(unsigned long addr, unsigned long len,
@@ -155,21 +125,11 @@ asmlinkage unsigned long sys_mmap(unsigned long addr, unsigned long len,
 		unsigned long offset)
 {
 	if (!(offset & ~PAGE_MASK)) {
-		return do_mmap2(addr, len, prot, flags, fd, offset >> PAGE_SHIFT);
+		return sys_mmap_pgoff(addr, len, prot, flags, fd,
+					offset >> PAGE_SHIFT);
 	} else {
 		return -EINVAL;
 	}
-}
-
-long sys_shmat_wrapper(int shmid, char __user *shmaddr, int shmflag)
-{
-	unsigned long raddr;
-	int r;
-
-	r = do_shmat(shmid, shmaddr, shmflag, &raddr);
-	if (r < 0)
-		return r;
-	return raddr;
 }
 
 /* Fucking broken ABI */
@@ -242,6 +202,14 @@ asmlinkage long parisc_fadvise64_64(int fd,
 			(loff_t)high_len << 32 | low_len, advice);
 }
 
+asmlinkage long parisc_sync_file_range(int fd,
+			u32 hi_off, u32 lo_off, u32 hi_nbytes, u32 lo_nbytes,
+			unsigned int flags)
+{
+	return sys_sync_file_range(fd, (loff_t)hi_off << 32 | lo_off,
+			(loff_t)hi_nbytes << 32 | lo_nbytes, flags);
+}
+
 asmlinkage unsigned long sys_alloc_hugepages(int key, unsigned long addr, unsigned long len, int prot, int flag)
 {
 	return -ENOMEM;
@@ -250,4 +218,19 @@ asmlinkage unsigned long sys_alloc_hugepages(int key, unsigned long addr, unsign
 asmlinkage int sys_free_hugepages(unsigned long addr)
 {
 	return -EINVAL;
+}
+
+long parisc_personality(unsigned long personality)
+{
+	long err;
+
+	if (personality(current->personality) == PER_LINUX32
+	    && personality == PER_LINUX)
+		personality = PER_LINUX32;
+
+	err = sys_personality(personality);
+	if (err == PER_LINUX32)
+		err = PER_LINUX;
+
+	return err;
 }

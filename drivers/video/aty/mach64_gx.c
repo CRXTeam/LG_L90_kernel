@@ -5,7 +5,6 @@
 
 #include <linux/delay.h>
 #include <linux/fb.h>
-#include <linux/sched.h>
 
 #include <asm/io.h>
 
@@ -149,8 +148,7 @@ static int aty_var_to_pll_514(const struct fb_info *info, u32 vclk_per,
 	};
 	int i;
 
-	for (i = 0; i < sizeof(RGB514_clocks) / sizeof(*RGB514_clocks);
-	     i++)
+	for (i = 0; i < ARRAY_SIZE(RGB514_clocks); i++)
 		if (vclk_per <= RGB514_clocks[i].limit) {
 			pll->ibm514.m = RGB514_clocks[i].m;
 			pll->ibm514.n = RGB514_clocks[i].n;

@@ -4,7 +4,7 @@
 /*
  *   ALSA driver for TEA5757/5759 Philips AM/FM tuner chips
  *
- *	Copyright (c) 2004 Jaroslav Kysela <perex@suse.cz>
+ *	Copyright (c) 2004 Jaroslav Kysela <perex@perex.cz>
  *
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -20,34 +20,49 @@
  *   along with this program; if not, write to the Free Software
  *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  *
- */      
+ */
 
-#include <linux/videodev.h>
+#include <linux/videodev2.h>
+#include <media/v4l2-ctrls.h>
+#include <media/v4l2-dev.h>
+#include <media/v4l2-device.h>
 
-typedef struct snd_tea575x tea575x_t;
+#define TEA575X_FMIF	10700
+
+#define TEA575X_DATA	(1 << 0)
+#define TEA575X_CLK	(1 << 1)
+#define TEA575X_WREN	(1 << 2)
+#define TEA575X_MOST	(1 << 3)
+
+struct snd_tea575x;
 
 struct snd_tea575x_ops {
-	void (*write)(tea575x_t *tea, unsigned int val);
-	unsigned int (*read)(tea575x_t *tea);
+	void (*set_pins)(struct snd_tea575x *tea, u8 pins);
+	u8 (*get_pins)(struct snd_tea575x *tea);
+	void (*set_direction)(struct snd_tea575x *tea, bool output);
 };
 
 struct snd_tea575x {
-	snd_card_t *card;
+	struct v4l2_device *v4l2_dev;
 	struct video_device vd;		/* video device */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 5, 0)
-	struct file_operations fops;
-#endif
-	int dev_nr;			/* requested device number + 1 */
-	int vd_registered;		/* video device is registered */
-	int tea5759;			/* 5759 chip is present */
-	unsigned int freq_fixup;	/* crystal onboard */
+	int radio_nr;			/* radio_nr */
+	bool tea5759;			/* 5759 chip is present */
+	bool cannot_read_data;		/* Device cannot read the data pin */
+	bool mute;			/* Device is muted? */
+	bool stereo;			/* receiving stereo */
+	bool tuned;			/* tuned to a station */
 	unsigned int val;		/* hw value */
-	unsigned long freq;		/* frequency */
+	u32 freq;			/* frequency */
+	struct mutex mutex;
 	struct snd_tea575x_ops *ops;
 	void *private_data;
+	u8 card[32];
+	u8 bus_info[32];
+	struct v4l2_ctrl_handler ctrl_handler;
+	int (*ext_init)(struct snd_tea575x *tea);
 };
 
-void snd_tea575x_init(tea575x_t *tea);
-void snd_tea575x_exit(tea575x_t *tea);
+int snd_tea575x_init(struct snd_tea575x *tea);
+void snd_tea575x_exit(struct snd_tea575x *tea);
 
 #endif /* __SOUND_TEA575X_TUNER_H */

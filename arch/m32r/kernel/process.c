@@ -11,7 +11,7 @@
 #undef DEBUG_PROCESS
 #ifdef DEBUG_PROCESS
 #define DPRINTK(fmt, args...)  printk("%s:%d:%s: " fmt, __FILE__, __LINE__, \
-  __FUNCTION__, ##args)
+  __func__, ##args)
 #else
 #define DPRINTK(fmt, args...)
 #endif
@@ -21,11 +21,10 @@
  */
 
 #include <linux/fs.h>
-#include <linux/config.h>
+#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/ptrace.h>
 #include <linux/unistd.h>
-#include <linux/slab.h>
 #include <linux/hardirq.h>
 
 #include <asm/io.h>
@@ -35,8 +34,6 @@
 #include <asm/m32r.h>
 
 #include <linux/err.h>
-
-static int hlt_counter=0;
 
 /*
  * Return saved PC of a blocked thread.
@@ -49,27 +46,16 @@ unsigned long thread_saved_pc(struct task_struct *tsk)
 /*
  * Powermanagement idle function, if any..
  */
-void (*pm_idle)(void) = NULL;
+static void (*pm_idle)(void) = NULL;
 
-void disable_hlt(void)
-{
-	hlt_counter++;
-}
-
-EXPORT_SYMBOL(disable_hlt);
-
-void enable_hlt(void)
-{
-	hlt_counter--;
-}
-
-EXPORT_SYMBOL(enable_hlt);
+void (*pm_power_off)(void) = NULL;
+EXPORT_SYMBOL(pm_power_off);
 
 /*
  * We use this is we don't have any better
  * idle routine..
  */
-void default_idle(void)
+static void default_idle(void)
 {
 	/* M32R_FIXME: Please use "cpu_sleep" mode.  */
 	cpu_relax();
@@ -104,18 +90,20 @@ void cpu_idle (void)
 
 			idle();
 		}
-		schedule();
+		schedule_preempt_disabled();
 	}
 }
 
 void machine_restart(char *__unused)
 {
+#if defined(CONFIG_PLAT_MAPPI3)
+	outw(1, (unsigned long)PLD_REBOOT);
+#endif
+
 	printk("Please push reset button!\n");
 	while (1)
 		cpu_relax();
 }
-
-EXPORT_SYMBOL(machine_restart);
 
 void machine_halt(void)
 {
@@ -124,14 +112,10 @@ void machine_halt(void)
 		cpu_relax();
 }
 
-EXPORT_SYMBOL(machine_halt);
-
 void machine_power_off(void)
 {
 	/* M32R_FIXME */
 }
-
-EXPORT_SYMBOL(machine_power_off);
 
 static int __init idle_setup (char *str)
 {
@@ -171,7 +155,7 @@ void show_regs(struct pt_regs * regs)
 	  regs->acc1h, regs->acc1l);
 #elif defined(CONFIG_ISA_M32R2) || defined(CONFIG_ISA_M32R)
 	printk("ACCH[%08lx]:ACCL[%08lx]\n", \
-	  regs->acch, regs->accl);
+	  regs->acc0h, regs->acc0l);
 #else
 #error unknown isa configuration
 #endif
@@ -239,16 +223,13 @@ int dump_fpu(struct pt_regs *regs, elf_fpregset_t *fpu)
 	return 0; /* Task didn't use the fpu at all. */
 }
 
-int copy_thread(int nr, unsigned long clone_flags, unsigned long spu,
+int copy_thread(unsigned long clone_flags, unsigned long spu,
 	unsigned long unused, struct task_struct *tsk, struct pt_regs *regs)
 {
-	struct pt_regs *childregs;
-	unsigned long sp = (unsigned long)tsk->thread_info + THREAD_SIZE;
+	struct pt_regs *childregs = task_pt_regs(tsk);
 	extern void ret_from_fork(void);
 
 	/* Copy registers */
-	sp -= sizeof (struct pt_regs);
-	childregs = (struct pt_regs *)sp;
 	*childregs = *regs;
 
 	childregs->spu = spu;
@@ -258,23 +239,6 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long spu,
 	tsk->thread.lr = (unsigned long)ret_from_fork;
 
 	return 0;
-}
-
-/*
- * fill in the user structure for a core dump..
- */
-void dump_thread(struct pt_regs * regs, struct user * dump)
-{
-	/* M32R_FIXME */
-}
-
-/*
- * Capture the user space registers if the task is not running (in user space)
- */
-int dump_task_regs(struct task_struct *tsk, elf_gregset_t *regs)
-{
-	/* M32R_FIXME */
-	return 1;
 }
 
 asmlinkage int sys_fork(unsigned long r0, unsigned long r1, unsigned long r2,
@@ -322,8 +286,9 @@ asmlinkage int sys_vfork(unsigned long r0, unsigned long r1, unsigned long r2,
 /*
  * sys_execve() executes a new program.
  */
-asmlinkage int sys_execve(char __user *ufilename, char __user * __user *uargv,
-			  char __user * __user *uenvp,
+asmlinkage int sys_execve(const char __user *ufilename,
+			  const char __user *const __user *uargv,
+			  const char __user *const __user *uenvp,
 			  unsigned long r3, unsigned long r4, unsigned long r5,
 			  unsigned long r6, struct pt_regs regs)
 {
@@ -336,11 +301,6 @@ asmlinkage int sys_execve(char __user *ufilename, char __user * __user *uargv,
 		goto out;
 
 	error = do_execve(filename, uargv, uenvp, &regs);
-	if (error == 0) {
-		task_lock(current);
-		current->ptrace &= ~PT_DTRACE;
-		task_unlock(current);
-	}
 	putname(filename);
 out:
 	return error;

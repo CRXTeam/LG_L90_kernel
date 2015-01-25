@@ -8,7 +8,6 @@
  *	2 as published by the Free Software Foundation.
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/init.h>
@@ -16,45 +15,47 @@
 #include <linux/tty.h>
 #include <linux/module.h>
 #include <linux/usb.h>
-#include "usb-serial.h"
+#include <linux/usb/serial.h>
 
 /* EZ-USB Control and Status Register.  Bit 0 controls 8051 reset */
 #define CPUCS_REG    0x7F92
 
-int ezusb_writememory (struct usb_serial *serial, int address, unsigned char *data, int length, __u8 bRequest)
+int ezusb_writememory(struct usb_serial *serial, int address,
+				unsigned char *data, int length, __u8 request)
 {
 	int result;
 	unsigned char *transfer_buffer;
 
 	/* dbg("ezusb_writememory %x, %d", address, length); */
 	if (!serial->dev) {
-		err("%s - no physical device present, failing.", __FUNCTION__);
+		printk(KERN_ERR "ezusb: %s - no physical device present, "
+		       "failing.\n", __func__);
 		return -ENODEV;
 	}
 
-	transfer_buffer =  kmalloc (length, GFP_KERNEL);
+	transfer_buffer = kmemdup(data, length, GFP_KERNEL);
 	if (!transfer_buffer) {
-		dev_err(&serial->dev->dev, "%s - kmalloc(%d) failed.\n", __FUNCTION__, length);
+		dev_err(&serial->dev->dev, "%s - kmalloc(%d) failed.\n",
+							__func__, length);
 		return -ENOMEM;
 	}
-	memcpy (transfer_buffer, data, length);
-	result = usb_control_msg (serial->dev, usb_sndctrlpipe(serial->dev, 0), bRequest, 0x40, address, 0, transfer_buffer, length, 3000);
-	kfree (transfer_buffer);
+	result = usb_control_msg(serial->dev, usb_sndctrlpipe(serial->dev, 0),
+		     request, 0x40, address, 0, transfer_buffer, length, 3000);
+	kfree(transfer_buffer);
 	return result;
 }
+EXPORT_SYMBOL_GPL(ezusb_writememory);
 
-int ezusb_set_reset (struct usb_serial *serial, unsigned char reset_bit)
+int ezusb_set_reset(struct usb_serial *serial, unsigned char reset_bit)
 {
 	int response;
 
-	/* dbg("%s - %d", __FUNCTION__, reset_bit); */
-	response = ezusb_writememory (serial, CPUCS_REG, &reset_bit, 1, 0xa0);
+	/* dbg("%s - %d", __func__, reset_bit); */
+	response = ezusb_writememory(serial, CPUCS_REG, &reset_bit, 1, 0xa0);
 	if (response < 0)
-		dev_err(&serial->dev->dev, "%s- %d failed\n", __FUNCTION__, reset_bit);
+		dev_err(&serial->dev->dev, "%s- %d failed\n",
+						__func__, reset_bit);
 	return response;
 }
-
-
-EXPORT_SYMBOL(ezusb_writememory);
-EXPORT_SYMBOL(ezusb_set_reset);
+EXPORT_SYMBOL_GPL(ezusb_set_reset);
 

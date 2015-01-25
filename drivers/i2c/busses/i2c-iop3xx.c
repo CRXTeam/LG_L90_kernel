@@ -11,7 +11,7 @@
  *
  * Copyright (C) 1995-1997 Simon G. Vogl, 1998-2000 Hans Berglund
  *  
- * And which acknowledged Kyösti Mälkki <kmalkki@cc.hut.fi>,
+ * And which acknowledged KyÃ¶sti MÃ¤lkki <kmalkki@cc.hut.fi>,
  * Frodo Looijaard <frodol@dds.nl>, Martin Bailey<mbailey@littlefeet-inc.com>
  *
  * Major cleanup by Deepak Saxena <dsaxena@plexity.net>, 01/2005:
@@ -21,12 +21,14 @@
  * - Make it work with IXP46x chips
  * - Cleanup function names, coding style, etc
  *
+ * - writing to slave address causes latchup on iop331.
+ *	fix: driver refuses to address self.
+ *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, version 2.
  */
 
-#include <linux/config.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -34,16 +36,14 @@
 #include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/errno.h>
-#include <linux/sched.h>
-#include <linux/device.h>
+#include <linux/platform_device.h>
 #include <linux/i2c.h>
-
-#include <asm/io.h>
+#include <linux/io.h>
 
 #include "i2c-iop3xx.h"
 
 /* global unit counter */
-static int i2c_id = 0;
+static int i2c_id;
 
 static inline unsigned char 
 iic_cook_addr(struct i2c_msg *msg) 
@@ -54,12 +54,6 @@ iic_cook_addr(struct i2c_msg *msg)
 
 	if (msg->flags & I2C_M_RD)
 		addr |= 1;
-
-	/*
-	 * Read or Write?
-	 */
-	if (msg->flags & I2C_M_REV_DIR_ADDR)
-		addr ^= 1;
 
 	return addr;   
 }
@@ -74,26 +68,22 @@ iop3xx_i2c_reset(struct i2c_algo_iop3xx_data *iop3xx_adap)
 } 
 
 static void 
-iop3xx_i2c_set_slave_addr(struct i2c_algo_iop3xx_data *iop3xx_adap)
-{
-	__raw_writel(MYSAR, iop3xx_adap->ioaddr + SAR_OFFSET);
-}
-
-static void 
 iop3xx_i2c_enable(struct i2c_algo_iop3xx_data *iop3xx_adap)
 {
 	u32 cr = IOP3XX_ICR_GCD | IOP3XX_ICR_SCLEN | IOP3XX_ICR_UE;
 
 	/* 
-	 * Everytime unit enable is asserted, GPOD needs to be cleared
-	 * on IOP321 to avoid data corruption on the bus.
+	 * Every time unit enable is asserted, GPOD needs to be cleared
+	 * on IOP3XX to avoid data corruption on the bus.
 	 */
-#ifdef CONFIG_ARCH_IOP321
-#define IOP321_GPOD_I2C0    0x00c0  /* clear these bits to enable ch0 */
-#define IOP321_GPOD_I2C1    0x0030  /* clear these bits to enable ch1 */
-
-	*IOP321_GPOD &= (iop3xx_adap->id == 0) ? ~IOP321_GPOD_I2C0 : 
-		~IOP321_GPOD_I2C1;
+#if defined(CONFIG_ARCH_IOP32X) || defined(CONFIG_ARCH_IOP33X)
+	if (iop3xx_adap->id == 0) {
+		gpio_line_set(IOP3XX_GPIO_LINE(7), GPIO_LOW);
+		gpio_line_set(IOP3XX_GPIO_LINE(6), GPIO_LOW);
+	} else {
+		gpio_line_set(IOP3XX_GPIO_LINE(5), GPIO_LOW);
+		gpio_line_set(IOP3XX_GPIO_LINE(4), GPIO_LOW);
+	}
 #endif
 	/* NB SR bits not same position as CR IE bits :-( */
 	iop3xx_adap->SR_enabled = 
@@ -122,7 +112,7 @@ iop3xx_i2c_transaction_cleanup(struct i2c_algo_iop3xx_data *iop3xx_adap)
  * Then it passes the SR flags of interest to BH via adap data
  */
 static irqreturn_t 
-iop3xx_i2c_irq_handler(int this_irq, void *dev_id, struct pt_regs *regs) 
+iop3xx_i2c_irq_handler(int this_irq, void *dev_id) 
 {
 	struct i2c_algo_iop3xx_data *iop3xx_adap = dev_id;
 	u32 sr = __raw_readl(iop3xx_adap->ioaddr + SR_OFFSET);
@@ -184,7 +174,7 @@ iop3xx_i2c_wait_event(struct i2c_algo_iop3xx_data *iop3xx_adap,
 	do {
 		interrupted = wait_event_interruptible_timeout (
 			iop3xx_adap->waitq,
-			(done = compare( sr = iop3xx_i2c_get_srstat(iop3xx_adap)					,flags )),
+			(done = compare( sr = iop3xx_i2c_get_srstat(iop3xx_adap) ,flags )),
 			1 * HZ;
 			);
 		if ((rc = iop3xx_i2c_error(sr)) < 0) {
@@ -248,6 +238,13 @@ iop3xx_i2c_send_target_addr(struct i2c_algo_iop3xx_data *iop3xx_adap,
 	unsigned long cr = __raw_readl(iop3xx_adap->ioaddr + CR_OFFSET);
 	int status;
 	int rc;
+
+	/* avoid writing to my slave address (hangs on 80331),
+	 * forbidden in Intel developer manual
+	 */
+	if (msg->addr == MYSAR) {
+		return -EBUSY;
+	}
 
 	__raw_writel(iic_cook_addr(msg), iop3xx_adap->ioaddr + DBR_OFFSET);
 	
@@ -385,32 +382,21 @@ iop3xx_i2c_master_xfer(struct i2c_adapter *i2c_adap, struct i2c_msg *msgs,
 	return im;   
 }
 
-static int 
-iop3xx_i2c_algo_control(struct i2c_adapter *adapter, unsigned int cmd,
-			unsigned long arg)
-{
-	return 0;
-}
-
 static u32 
 iop3xx_i2c_func(struct i2c_adapter *adap)
 {
 	return I2C_FUNC_I2C | I2C_FUNC_SMBUS_EMUL;
 }
 
-static struct i2c_algorithm iop3xx_i2c_algo = {
-	.name		= "IOP3xx I2C algorithm",
-	.id		= I2C_ALGO_IOP3XX,
+static const struct i2c_algorithm iop3xx_i2c_algo = {
 	.master_xfer	= iop3xx_i2c_master_xfer,
-	.algo_control	= iop3xx_i2c_algo_control,
 	.functionality	= iop3xx_i2c_func,
 };
 
 static int 
-iop3xx_i2c_remove(struct device *device)
+iop3xx_i2c_remove(struct platform_device *pdev)
 {
-	struct platform_device *pdev = to_platform_device(device);
-	struct i2c_adapter *padapter = dev_get_drvdata(&pdev->dev);
+	struct i2c_adapter *padapter = platform_get_drvdata(pdev);
 	struct i2c_algo_iop3xx_data *adapter_data = 
 		(struct i2c_algo_iop3xx_data *)padapter->algo_data;
 	struct resource *res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
@@ -423,38 +409,35 @@ iop3xx_i2c_remove(struct device *device)
 		IOP3XX_ICR_RXFULL_IE | IOP3XX_ICR_TXEMPTY_IE);
 	__raw_writel(cr, adapter_data->ioaddr + CR_OFFSET);
 
-	iounmap((void __iomem*)adapter_data->ioaddr);
+	iounmap(adapter_data->ioaddr);
 	release_mem_region(res->start, IOP3XX_I2C_IO_SIZE);
 	kfree(adapter_data);
 	kfree(padapter);
 
-	dev_set_drvdata(&pdev->dev, NULL);
+	platform_set_drvdata(pdev, NULL);
 
 	return 0;
 }
 
 static int 
-iop3xx_i2c_probe(struct device *dev)
+iop3xx_i2c_probe(struct platform_device *pdev)
 {
-	struct platform_device *pdev = to_platform_device(dev);
 	struct resource *res;
-	int ret;
+	int ret, irq;
 	struct i2c_adapter *new_adapter;
 	struct i2c_algo_iop3xx_data *adapter_data;
 
-	new_adapter = kmalloc(sizeof(struct i2c_adapter), GFP_KERNEL);
+	new_adapter = kzalloc(sizeof(struct i2c_adapter), GFP_KERNEL);
 	if (!new_adapter) {
 		ret = -ENOMEM;
 		goto out;
 	}
-	memset((void*)new_adapter, 0, sizeof(*new_adapter));
 
-	adapter_data = kmalloc(sizeof(struct i2c_algo_iop3xx_data), GFP_KERNEL);
+	adapter_data = kzalloc(sizeof(struct i2c_algo_iop3xx_data), GFP_KERNEL);
 	if (!adapter_data) {
 		ret = -ENOMEM;
 		goto free_adapter;
 	}
-	memset((void*)adapter_data, 0, sizeof(*adapter_data));
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res) {
@@ -470,47 +453,52 @@ iop3xx_i2c_probe(struct device *dev)
 	/* set the adapter enumeration # */
 	adapter_data->id = i2c_id++;
 
-	adapter_data->ioaddr = (u32)ioremap(res->start, IOP3XX_I2C_IO_SIZE);
+	adapter_data->ioaddr = ioremap(res->start, IOP3XX_I2C_IO_SIZE);
 	if (!adapter_data->ioaddr) {
 		ret = -ENOMEM;
 		goto release_region;
 	}
 
-	res = request_irq(platform_get_irq(pdev, 0), iop3xx_i2c_irq_handler, 0, 
+	irq = platform_get_irq(pdev, 0);
+	if (irq < 0) {
+		ret = -ENXIO;
+		goto unmap;
+	}
+	ret = request_irq(irq, iop3xx_i2c_irq_handler, 0,
 				pdev->name, adapter_data);
-	if (res) {
+
+	if (ret) {
 		ret = -EIO;
 		goto unmap;
 	}
 
 	memcpy(new_adapter->name, pdev->name, strlen(pdev->name));
-	new_adapter->id = I2C_HW_IOP3XX;
 	new_adapter->owner = THIS_MODULE;
+	new_adapter->class = I2C_CLASS_HWMON | I2C_CLASS_SPD;
 	new_adapter->dev.parent = &pdev->dev;
+	new_adapter->nr = pdev->id;
 
 	/*
 	 * Default values...should these come in from board code?
 	 */
-	new_adapter->timeout = 100;	
-	new_adapter->retries = 3;
+	new_adapter->timeout = HZ;
 	new_adapter->algo = &iop3xx_i2c_algo;
 
 	init_waitqueue_head(&adapter_data->waitq);
 	spin_lock_init(&adapter_data->lock);
 
 	iop3xx_i2c_reset(adapter_data);
-	iop3xx_i2c_set_slave_addr(adapter_data);
 	iop3xx_i2c_enable(adapter_data);
 
-	dev_set_drvdata(&pdev->dev, new_adapter);
+	platform_set_drvdata(pdev, new_adapter);
 	new_adapter->algo_data = adapter_data;
 
-	i2c_add_adapter(new_adapter);
+	i2c_add_numbered_adapter(new_adapter);
 
 	return 0;
 
 unmap:
-	iounmap((void __iomem*)adapter_data->ioaddr);
+	iounmap(adapter_data->ioaddr);
 
 release_region:
 	release_mem_region(res->start, IOP3XX_I2C_IO_SIZE);
@@ -526,29 +514,18 @@ out:
 }
 
 
-static struct device_driver iop3xx_i2c_driver = {
-	.name		= "IOP3xx-I2C",
-	.bus		= &platform_bus_type,
+static struct platform_driver iop3xx_i2c_driver = {
 	.probe		= iop3xx_i2c_probe,
-	.remove		= iop3xx_i2c_remove
+	.remove		= iop3xx_i2c_remove,
+	.driver		= {
+		.owner	= THIS_MODULE,
+		.name	= "IOP3xx-I2C",
+	},
 };
 
-static int __init 
-i2c_iop3xx_init (void)
-{
-	return driver_register(&iop3xx_i2c_driver);
-}
-
-static void __exit 
-i2c_iop3xx_exit (void)
-{
-	driver_unregister(&iop3xx_i2c_driver);
-	return;
-}
-
-module_init (i2c_iop3xx_init);
-module_exit (i2c_iop3xx_exit);
+module_platform_driver(iop3xx_i2c_driver);
 
 MODULE_AUTHOR("D-TACQ Solutions Ltd <www.d-tacq.com>");
 MODULE_DESCRIPTION("IOP3xx iic algorithm and driver");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("platform:IOP3xx-I2C");

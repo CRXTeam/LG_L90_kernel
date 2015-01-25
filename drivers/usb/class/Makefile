@@ -4,7 +4,7 @@
 #
 
 obj-$(CONFIG_USB_ACM)		+= cdc-acm.o
-obj-$(CONFIG_USB_AUDIO)		+= audio.o
-obj-$(CONFIG_USB_BLUETOOTH_TTY)	+= bluetty.o
-obj-$(CONFIG_USB_MIDI)		+= usb-midi.o
 obj-$(CONFIG_USB_PRINTER)	+= usblp.o
+obj-$(CONFIG_USB_WDM)		+= cdc-wdm.o
+obj-$(CONFIG_USB_TMC)		+= usbtmc.o
+obj-$(CONFIG_USB_CCID_BRIDGE)	+= ccid_bridge.o

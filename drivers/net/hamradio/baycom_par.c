@@ -84,9 +84,8 @@
 #include <linux/baycom.h>
 #include <linux/parport.h>
 #include <linux/bitops.h>
+#include <linux/jiffies.h>
 
-#include <asm/bug.h>
-#include <asm/system.h>
 #include <asm/uaccess.h>
 
 /* --------------------------------------------------------------------- */
@@ -102,7 +101,7 @@
 
 static const char bc_drvname[] = "baycom_par";
 static const char bc_drvinfo[] = KERN_INFO "baycom_par: (C) 1996-2000 Thomas Sailer, HB9JNX/AE4WA\n"
-KERN_INFO "baycom_par: version 0.9 compiled " __TIME__ " " __DATE__ "\n";
+"baycom_par: version 0.9\n";
 
 /* --------------------------------------------------------------------- */
 
@@ -165,7 +164,7 @@ static void __inline__ baycom_int_freq(struct baycom_state *bc)
 	 * measure the interrupt frequency
 	 */
 	bc->debug_vals.cur_intcnt++;
-	if ((cur_jiffies - bc->debug_vals.last_jiffies) >= HZ) {
+	if (time_after_eq(cur_jiffies, bc->debug_vals.last_jiffies + HZ)) {
 		bc->debug_vals.last_jiffies = cur_jiffies;
 		bc->debug_vals.last_intcnt = bc->debug_vals.cur_intcnt;
 		bc->debug_vals.cur_intcnt = 0;
@@ -270,9 +269,9 @@ static __inline__ void par96_rx(struct net_device *dev, struct baycom_state *bc)
 
 /* --------------------------------------------------------------------- */
 
-static void par96_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static void par96_interrupt(void *dev_id)
 {
-	struct net_device *dev = (struct net_device *)dev_id;
+	struct net_device *dev = dev_id;
 	struct baycom_state *bc = netdev_priv(dev);
 
 	baycom_int_freq(bc);
@@ -477,7 +476,7 @@ static int baycom_ioctl(struct net_device *dev, struct ifreq *ifr,
 /*
  * command line settable parameters
  */
-static const char *mode[NR_PORTS] = { "picpar", };
+static char *mode[NR_PORTS] = { "picpar", };
 static int iobase[NR_PORTS] = { 0x378, };
 
 module_param_array(mode, charp, NULL, 0);

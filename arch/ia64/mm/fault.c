@@ -7,41 +7,38 @@
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
-#include <linux/smp_lock.h>
 #include <linux/interrupt.h>
+#include <linux/kprobes.h>
+#include <linux/kdebug.h>
+#include <linux/prefetch.h>
 
 #include <asm/pgtable.h>
 #include <asm/processor.h>
-#include <asm/system.h>
 #include <asm/uaccess.h>
 
-extern void die (char *, struct pt_regs *, long);
+extern int die(char *, struct pt_regs *, long);
 
-/*
- * This routine is analogous to expand_stack() but instead grows the
- * register backing store (which grows towards higher addresses).
- * Since the register backing store is access sequentially, we
- * disallow growing the RBS by more than a page at a time.  Note that
- * the VM_GROWSUP flag can be set on any VM area but that's fine
- * because the total process size is still limited by RLIMIT_STACK and
- * RLIMIT_AS.
- */
-static inline long
-expand_backing_store (struct vm_area_struct *vma, unsigned long address)
+#ifdef CONFIG_KPROBES
+static inline int notify_page_fault(struct pt_regs *regs, int trap)
 {
-	unsigned long grow;
+	int ret = 0;
 
-	grow = PAGE_SIZE >> PAGE_SHIFT;
-	if (address - vma->vm_start > current->signal->rlim[RLIMIT_STACK].rlim_cur
-	    || (((vma->vm_mm->total_vm + grow) << PAGE_SHIFT) > current->signal->rlim[RLIMIT_AS].rlim_cur))
-		return -ENOMEM;
-	vma->vm_end += PAGE_SIZE;
-	vma->vm_mm->total_vm += grow;
-	if (vma->vm_flags & VM_LOCKED)
-		vma->vm_mm->locked_vm += grow;
-	__vm_stat_account(vma->vm_mm, vma->vm_flags, vma->vm_file, grow);
+	if (!user_mode(regs)) {
+		/* kprobe_running() needs smp_processor_id() */
+		preempt_disable();
+		if (kprobe_running() && kprobe_fault_handler(regs, trap))
+			ret = 1;
+		preempt_enable();
+	}
+
+	return ret;
+}
+#else
+static inline int notify_page_fault(struct pt_regs *regs, int trap)
+{
 	return 0;
 }
+#endif
 
 /*
  * Return TRUE if ADDRESS points at a page in the kernel's mapped segment
@@ -75,7 +72,7 @@ mapped_kernel_page_is_present (unsigned long address)
 	return pte_present(pte);
 }
 
-void
+void __kprobes
 ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *regs)
 {
 	int signal = SIGSEGV, code = SEGV_MAPERR;
@@ -83,6 +80,10 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 	struct mm_struct *mm = current->mm;
 	struct siginfo si;
 	unsigned long mask;
+	int fault;
+
+	/* mmap_sem is performance critical.... */
+	prefetchw(&mm->mmap_sem);
 
 	/*
 	 * If we're in an interrupt or have no user context, we must not take the fault..
@@ -102,14 +103,26 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 		goto bad_area_no_up;
 #endif
 
+	/*
+	 * This is to handle the kprobes on user space access instructions
+	 */
+	if (notify_page_fault(regs, TRAP_BRKPT))
+		return;
+
 	down_read(&mm->mmap_sem);
 
 	vma = find_vma_prev(mm, address, &prev_vma);
-	if (!vma)
+	if (!vma && !prev_vma )
 		goto bad_area;
 
-	/* find_vma_prev() returns vma such that address < vma->vm_end or NULL */
-	if (address < vma->vm_start)
+        /*
+         * find_vma_prev() returns vma such that address < vma->vm_end or NULL
+         *
+         * May find no vma, but could be that the last vm area is the
+         * register backing store that needs to expand upwards, in
+         * this case vma will be null, but prev_vma will ne non-null
+         */
+        if (( !vma && prev_vma ) || (address < vma->vm_start) )
 		goto check_expansion;
 
   good_area:
@@ -126,44 +139,46 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 #		error File is out of sync with <linux/mm.h>.  Please update.
 #	endif
 
+	if (((isr >> IA64_ISR_R_BIT) & 1UL) && (!(vma->vm_flags & (VM_READ | VM_WRITE))))
+		goto bad_area;
+
 	mask = (  (((isr >> IA64_ISR_X_BIT) & 1UL) << VM_EXEC_BIT)
-		| (((isr >> IA64_ISR_W_BIT) & 1UL) << VM_WRITE_BIT)
-		| (((isr >> IA64_ISR_R_BIT) & 1UL) << VM_READ_BIT));
+		| (((isr >> IA64_ISR_W_BIT) & 1UL) << VM_WRITE_BIT));
 
 	if ((vma->vm_flags & mask) != mask)
 		goto bad_area;
 
-  survive:
 	/*
 	 * If for any reason at all we couldn't handle the fault, make
 	 * sure we exit gracefully rather than endlessly redo the
 	 * fault.
 	 */
-	switch (handle_mm_fault(mm, vma, address, (mask & VM_WRITE) != 0)) {
-	      case VM_FAULT_MINOR:
-		++current->min_flt;
-		break;
-	      case VM_FAULT_MAJOR:
-		++current->maj_flt;
-		break;
-	      case VM_FAULT_SIGBUS:
+	fault = handle_mm_fault(mm, vma, address, (mask & VM_WRITE) ? FAULT_FLAG_WRITE : 0);
+	if (unlikely(fault & VM_FAULT_ERROR)) {
 		/*
 		 * We ran out of memory, or some other thing happened
 		 * to us that made us unable to handle the page fault
 		 * gracefully.
 		 */
-		signal = SIGBUS;
-		goto bad_area;
-	      case VM_FAULT_OOM:
-		goto out_of_memory;
-	      default:
+		if (fault & VM_FAULT_OOM) {
+			goto out_of_memory;
+		} else if (fault & VM_FAULT_SIGBUS) {
+			signal = SIGBUS;
+			goto bad_area;
+		}
 		BUG();
 	}
+	if (fault & VM_FAULT_MAJOR)
+		current->maj_flt++;
+	else
+		current->min_flt++;
 	up_read(&mm->mmap_sem);
 	return;
 
   check_expansion:
 	if (!(prev_vma && (prev_vma->vm_flags & VM_GROWSUP) && (address == prev_vma->vm_end))) {
+		if (!vma)
+			goto bad_area;
 		if (!(vma->vm_flags & VM_GROWSDOWN))
 			goto bad_area;
 		if (REGION_NUMBER(address) != REGION_NUMBER(vma->vm_start)
@@ -176,7 +191,13 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 		if (REGION_NUMBER(address) != REGION_NUMBER(vma->vm_start)
 		    || REGION_OFFSET(address) >= RGN_MAP_LIMIT)
 			goto bad_area;
-		if (expand_backing_store(vma, address))
+		/*
+		 * Since the register backing store is accessed sequentially,
+		 * we disallow growing it by more than a page at a time.
+		 */
+		if (address > vma->vm_end + PAGE_SIZE - sizeof(long))
+			goto bad_area;
+		if (expand_upwards(vma, address))
 			goto bad_area;
 	}
 	goto good_area;
@@ -209,17 +230,17 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 	}
 
   no_context:
-	if (isr & IA64_ISR_SP) {
+	if ((isr & IA64_ISR_SP)
+	    || ((isr & IA64_ISR_NA) && (isr & IA64_ISR_CODE_MASK) == IA64_ISR_CODE_LFETCH))
+	{
 		/*
-		 * This fault was due to a speculative load set the "ed" bit in the psr to
-		 * ensure forward progress (target register will get a NaT).
+		 * This fault was due to a speculative load or lfetch.fault, set the "ed"
+		 * bit in the psr to ensure forward progress.  (Target register will get a
+		 * NaT for ld.s, lfetch will be canceled.)
 		 */
 		ia64_psr(regs)->ed = 1;
 		return;
 	}
-
-	if (ia64_done_with_exception(regs))
-		return;
 
 	/*
 	 * Since we have no vma's for region 5, we might get here even if the address is
@@ -229,6 +250,9 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 	 * valid, and return if it is.
 	 */
 	if (REGION_NUMBER(address) == 5 && mapped_kernel_page_is_present(address))
+		return;
+
+	if (ia64_done_with_exception(regs))
 		return;
 
 	/*
@@ -242,20 +266,16 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 	else
 		printk(KERN_ALERT "Unable to handle kernel paging request at "
 		       "virtual address %016lx\n", address);
-	die("Oops", regs, isr);
+	if (die("Oops", regs, isr))
+		regs = NULL;
 	bust_spinlocks(0);
-	do_exit(SIGKILL);
+	if (regs)
+		do_exit(SIGKILL);
 	return;
 
   out_of_memory:
 	up_read(&mm->mmap_sem);
-	if (current->pid == 1) {
-		yield();
-		down_read(&mm->mmap_sem);
-		goto survive;
-	}
-	printk(KERN_CRIT "VM: killing process %s\n", current->comm);
-	if (user_mode(regs))
-		do_exit(SIGKILL);
-	goto no_context;
+	if (!user_mode(regs))
+		goto no_context;
+	pagefault_out_of_memory();
 }

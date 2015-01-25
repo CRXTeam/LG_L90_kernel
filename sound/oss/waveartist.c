@@ -1,5 +1,5 @@
 /*
- * linux/drivers/sound/waveartist.c
+ * linux/sound/oss/waveartist.c
  *
  * The low level driver for the RWA010 Rockwell Wave Artist
  * codec chip used in the Rebel.com NetWinder.
@@ -35,20 +35,19 @@
 
 #include <linux/module.h>
 #include <linux/init.h>
-#include <linux/config.h>
+#include <linux/slab.h>
 #include <linux/sched.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/spinlock.h>
 #include <linux/bitops.h>
 
-#include <asm/system.h>
 
 #include "sound_config.h"
 #include "waveartist.h"
 
 #ifdef CONFIG_ARM
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/mach-types.h>
 #endif
 
@@ -184,14 +183,8 @@ waveartist_iack(wavnc_info *devc)
 static inline int
 waveartist_sleep(int timeout_ms)
 {
-	unsigned int timeout = timeout_ms * 10 * HZ / 100;
-
-	do {
-		set_current_state(TASK_INTERRUPTIBLE);
-		timeout = schedule_timeout(timeout);
-	} while (timeout);
-
-	return 0;
+	unsigned int timeout = msecs_to_jiffies(timeout_ms*100);
+	return schedule_timeout_interruptible(timeout);
 }
 
 static int
@@ -834,9 +827,9 @@ static struct audio_driver waveartist_audio_driver = {
 
 
 static irqreturn_t
-waveartist_intr(int irq, void *dev_id, struct pt_regs *regs)
+waveartist_intr(int irq, void *dev_id)
 {
-	wavnc_info *devc = (wavnc_info *)dev_id;
+	wavnc_info *devc = dev_id;
 	int	   irqstatus, status;
 
 	spin_lock(&waveartist_lock);
@@ -1268,11 +1261,9 @@ static int __init waveartist_init(wavnc_info *devc)
 	conf_printf2(dev_name, devc->hw.io_base, devc->hw.irq,
 		     devc->hw.dma, devc->hw.dma2);
 
-	portc = (wavnc_port_info *)kmalloc(sizeof(wavnc_port_info), GFP_KERNEL);
+	portc = kzalloc(sizeof(wavnc_port_info), GFP_KERNEL);
 	if (portc == NULL)
 		goto nomem;
-
-	memset(portc, 0, sizeof(wavnc_port_info));
 
 	my_dev = sound_install_audiodrv(AUDIO_DRIVER_VERSION, dev_name,
 			&waveartist_audio_driver, sizeof(struct audio_driver),
@@ -1486,16 +1477,14 @@ static void __exit unload_waveartist(struct address_info *hw)
 #define VNC_HANDSET_DETECT	0x40
 #define VNC_DISABLE_AUTOSWITCH	0x80
 
-extern spinlock_t gpio_lock;
-
 static inline void
 vnc_mute_spkr(wavnc_info *devc)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&gpio_lock, flags);
-	cpld_modify(CPLD_UNMUTE, devc->spkr_mute_state ? 0 : CPLD_UNMUTE);
-	spin_unlock_irqrestore(&gpio_lock, flags);
+	spin_lock_irqsave(&nw_gpio_lock, flags);
+	nw_cpld_modify(CPLD_UNMUTE, devc->spkr_mute_state ? 0 : CPLD_UNMUTE);
+	spin_unlock_irqrestore(&nw_gpio_lock, flags);
 }
 
 static void
@@ -2028,8 +2017,8 @@ __setup("waveartist=", setup_waveartist);
 #endif
 
 MODULE_DESCRIPTION("Rockwell WaveArtist RWA-010 sound driver");
-MODULE_PARM(io, "i");		/* IO base */
-MODULE_PARM(irq, "i");		/* IRQ */
-MODULE_PARM(dma, "i");		/* DMA */
-MODULE_PARM(dma2, "i");		/* DMA2 */
+module_param(io, int, 0);		/* IO base */
+module_param(irq, int, 0);		/* IRQ */
+module_param(dma, int, 0);		/* DMA */
+module_param(dma2, int, 0);		/* DMA2 */
 MODULE_LICENSE("GPL");

@@ -38,7 +38,8 @@
 #include <linux/personality.h>
 #include <linux/tty.h>
 #include <linux/binfmts.h>
-#include <linux/suspend.h>
+#include <linux/freezer.h>
+#include <linux/tracehook.h>
 
 #include <asm/setup.h>
 #include <asm/uaccess.h>
@@ -307,7 +308,7 @@ get_sigframe(struct k_sigaction *ka, struct pt_regs *regs, size_t frame_size)
 
 	/* This is the X/Open sanctioned signal stack switching.  */
 	if (ka->sa.sa_flags & SA_ONSTACK) {
-		if (!on_sig_stack(usp))
+		if (!sas_ss_flags(usp))
 			usp = current->sas_ss_sp + current->sas_ss_size;
 	}
 	return (void *)((usp - frame_size) & -8UL);
@@ -352,7 +353,7 @@ static void setup_frame (int sig, struct k_sigaction *ka,
 		ret = (unsigned char *)(ka->sa.sa_restorer);
 	else {
 		/* sub.l er0,er0; mov.b #__NR_sigreturn,r0l; trapa #0 */
-		err != __put_user(0x1a80f800 + (__NR_sigreturn & 0xff),
+		err |= __put_user(0x1a80f800 + (__NR_sigreturn & 0xff),
 				  (unsigned long *)(frame->retcode + 0));
 		err |= __put_user(0x5700, (unsigned short *)(frame->retcode + 4));
 	}
@@ -428,7 +429,7 @@ static void setup_rt_frame (int sig, struct k_sigaction *ka, siginfo_t *info,
 		ret = (unsigned char *)(ka->sa.sa_restorer);
 	else {
 		/* sub.l er0,er0; mov.b #__NR_sigreturn,r0l; trapa #0 */
-		err != __put_user(0x1a80f800 + (__NR_sigreturn & 0xff),
+		err |= __put_user(0x1a80f800 + (__NR_sigreturn & 0xff),
 				  (unsigned long *)(frame->retcode + 0));
 		err |= __put_user(0x5700, (unsigned short *)(frame->retcode + 4));
 	}
@@ -488,13 +489,12 @@ handle_signal(unsigned long sig, siginfo_t *info, struct k_sigaction *ka,
 	else
 		setup_frame(sig, ka, oldset, regs);
 
-	if (!(ka->sa.sa_flags & SA_NODEFER)) {
-		spin_lock_irq(&current->sighand->siglock);
-		sigorsets(&current->blocked,&current->blocked,&ka->sa.sa_mask);
+	spin_lock_irq(&current->sighand->siglock);
+	sigorsets(&current->blocked,&current->blocked,&ka->sa.sa_mask);
+	if (!(ka->sa.sa_flags & SA_NODEFER))
 		sigaddset(&current->blocked,sig);
-		recalc_sigpending();
-		spin_unlock_irq(&current->sighand->siglock);
-	}
+	recalc_sigpending();
+	spin_unlock_irq(&current->sighand->siglock);
 }
 
 /*
@@ -517,10 +517,8 @@ asmlinkage int do_signal(struct pt_regs *regs, sigset_t *oldset)
 	if ((regs->ccr & 0x10))
 		return 1;
 
-	if (current->flags & PF_FREEZE) {
-		refrigerator(0);
+	if (try_to_freeze())
 		goto no_signal;
-	}
 
 	current->thread.esp0 = (unsigned long) regs;
 
@@ -549,4 +547,17 @@ asmlinkage int do_signal(struct pt_regs *regs, sigset_t *oldset)
 		}
 	}
 	return 0;
+}
+
+asmlinkage void do_notify_resume(struct pt_regs *regs, u32 thread_info_flags)
+{
+	if (thread_info_flags & (_TIF_SIGPENDING | _TIF_RESTORE_SIGMASK))
+		do_signal(regs, NULL);
+
+	if (thread_info_flags & _TIF_NOTIFY_RESUME) {
+		clear_thread_flag(TIF_NOTIFY_RESUME);
+		tracehook_notify_resume(regs);
+		if (current->replacement_session_keyring)
+			key_replace_session_keyring();
+	}
 }

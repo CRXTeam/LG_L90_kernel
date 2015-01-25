@@ -24,7 +24,6 @@ struct sysv_sb_info {
 	char	       s_bytesex;	/* bytesex (le/be/pdp) */
 	char	       s_truncate;	/* if 1: names > SYSV_NAMELEN chars are truncated */
 					/* if 0: they are disallowed (ENAMETOOLONG) */
-	nlink_t        s_link_max;	/* max number of hard links to a file */
 	unsigned int   s_inodes_per_block;	/* number of inodes per block */
 	unsigned int   s_inodes_per_block_1;	/* inodes_per_block - 1 */
 	unsigned int   s_inodes_per_block_bits;	/* log2(inodes_per_block) */
@@ -125,7 +124,7 @@ static inline void dirty_sb(struct super_block *sb)
 /* ialloc.c */
 extern struct sysv_inode *sysv_raw_inode(struct super_block *, unsigned,
 			struct buffer_head **);
-extern struct inode * sysv_new_inode(const struct inode *, mode_t);
+extern struct inode * sysv_new_inode(const struct inode *, umode_t);
 extern void sysv_free_inode(struct inode *);
 extern unsigned long sysv_count_free_inodes(struct super_block *);
 
@@ -136,13 +135,17 @@ extern unsigned long sysv_count_free_blocks(struct super_block *);
 
 /* itree.c */
 extern void sysv_truncate(struct inode *);
+extern int sysv_prepare_chunk(struct page *page, loff_t pos, unsigned len);
 
 /* inode.c */
-extern int sysv_write_inode(struct inode *, int);
+extern struct inode *sysv_iget(struct super_block *, unsigned int);
+extern int sysv_write_inode(struct inode *, struct writeback_control *wbc);
 extern int sysv_sync_inode(struct inode *);
-extern int sysv_sync_file(struct file *, struct dentry *, int);
 extern void sysv_set_inode(struct inode *, dev_t);
 extern int sysv_getattr(struct vfsmount *, struct dentry *, struct kstat *);
+extern int sysv_init_icache(void);
+extern void sysv_destroy_icache(void);
+
 
 /* dir.c */
 extern struct sysv_dir_entry *sysv_find_entry(struct dentry *, struct page **);
@@ -156,14 +159,14 @@ extern struct sysv_dir_entry *sysv_dotdot(struct inode *, struct page **);
 extern ino_t sysv_inode_by_name(struct dentry *);
 
 
-extern struct inode_operations sysv_file_inode_operations;
-extern struct inode_operations sysv_dir_inode_operations;
-extern struct inode_operations sysv_fast_symlink_inode_operations;
-extern struct file_operations sysv_file_operations;
-extern struct file_operations sysv_dir_operations;
-extern struct address_space_operations sysv_aops;
-extern struct super_operations sysv_sops;
-extern struct dentry_operations sysv_dentry_operations;
+extern const struct inode_operations sysv_file_inode_operations;
+extern const struct inode_operations sysv_dir_inode_operations;
+extern const struct inode_operations sysv_fast_symlink_inode_operations;
+extern const struct file_operations sysv_file_operations;
+extern const struct file_operations sysv_dir_operations;
+extern const struct address_space_operations sysv_aops;
+extern const struct super_operations sysv_sops;
+extern const struct dentry_operations sysv_dentry_operations;
 
 
 enum {
@@ -210,9 +213,9 @@ static inline __fs32 fs32_add(struct sysv_sb_info *sbi, __fs32 *n, int d)
 	if (sbi->s_bytesex == BYTESEX_PDP)
 		*(__u32*)n = PDP_swab(PDP_swab(*(__u32*)n)+d);
 	else if (sbi->s_bytesex == BYTESEX_LE)
-		*(__le32*)n = cpu_to_le32(le32_to_cpu(*(__le32*)n)+d);
+		le32_add_cpu((__le32 *)n, d);
 	else
-		*(__be32*)n = cpu_to_be32(be32_to_cpu(*(__be32*)n)+d);
+		be32_add_cpu((__be32 *)n, d);
 	return *n;
 }
 
@@ -235,9 +238,9 @@ static inline __fs16 cpu_to_fs16(struct sysv_sb_info *sbi, __u16 n)
 static inline __fs16 fs16_add(struct sysv_sb_info *sbi, __fs16 *n, int d)
 {
 	if (sbi->s_bytesex != BYTESEX_BE)
-		*(__le16*)n = cpu_to_le16(le16_to_cpu(*(__le16 *)n)+d);
+		le16_add_cpu((__le16 *)n, d);
 	else
-		*(__be16*)n = cpu_to_be16(be16_to_cpu(*(__be16 *)n)+d);
+		be16_add_cpu((__be16 *)n, d);
 	return *n;
 }
 

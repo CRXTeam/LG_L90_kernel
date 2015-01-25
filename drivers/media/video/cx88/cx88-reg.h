@@ -1,12 +1,11 @@
 /*
-    $Id: cx88-reg.h,v 1.6 2004/10/13 10:39:00 kraxel Exp $
 
     cx88x-hw.h - CX2388x register offsets
 
     Copyright (C) 1996,97,98 Ralph Metzler (rjkm@thp.uni-koeln.de)
-                  2001 Michael Eskin
-                  2002 Yurij Sysoev <yurij@naturesoft.net>
-                  2003 Gerd Knorr <kraxel@bytesex.org>
+		  2001 Michael Eskin
+		  2002 Yurij Sysoev <yurij@naturesoft.net>
+		  2003 Gerd Knorr <kraxel@bytesex.org>
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -40,6 +39,29 @@
 #define CX88X_EN_TBFX 0x02
 #define CX88X_EN_VSFX 0x04
 
+/* ---------------------------------------------------------------------- */
+/* PCI controller registers                                               */
+
+/* Command and Status Register */
+#define F0_CMD_STAT_MM      0x2f0004
+#define F1_CMD_STAT_MM      0x2f0104
+#define F2_CMD_STAT_MM      0x2f0204
+#define F3_CMD_STAT_MM      0x2f0304
+#define F4_CMD_STAT_MM      0x2f0404
+
+/* Device Control #1 */
+#define F0_DEV_CNTRL1_MM    0x2f0040
+#define F1_DEV_CNTRL1_MM    0x2f0140
+#define F2_DEV_CNTRL1_MM    0x2f0240
+#define F3_DEV_CNTRL1_MM    0x2f0340
+#define F4_DEV_CNTRL1_MM    0x2f0440
+
+/* Device Control #1 */
+#define F0_BAR0_MM          0x2f0010
+#define F1_BAR0_MM          0x2f0110
+#define F2_BAR0_MM          0x2f0210
+#define F3_BAR0_MM          0x2f0310
+#define F4_BAR0_MM          0x2f0410
 
 /* ---------------------------------------------------------------------- */
 /* DMA Controller registers                                               */
@@ -397,6 +419,7 @@
 #define AUD_RATE_ADJ4            0x3205e4
 #define AUD_RATE_ADJ5            0x3205e8
 #define AUD_APB_IN_RATE_ADJ      0x3205ec
+#define AUD_I2SCNTL              0x3205ec
 #define AUD_PHASE_FIX_CTL        0x3205f0
 #define AUD_PLL_PRESCALE         0x320600
 #define AUD_PLL_DDS              0x320604
@@ -559,6 +582,28 @@
 /* ---------------------------------------------------------------------- */
 /* various constants                                                      */
 
+// DMA
+/* Interrupt mask/status */
+#define PCI_INT_VIDINT		(1 <<  0)
+#define PCI_INT_AUDINT		(1 <<  1)
+#define PCI_INT_TSINT		(1 <<  2)
+#define PCI_INT_VIPINT		(1 <<  3)
+#define PCI_INT_HSTINT		(1 <<  4)
+#define PCI_INT_TM1INT		(1 <<  5)
+#define PCI_INT_SRCDMAINT	(1 <<  6)
+#define PCI_INT_DSTDMAINT	(1 <<  7)
+#define PCI_INT_RISC_RD_BERRINT	(1 << 10)
+#define PCI_INT_RISC_WR_BERRINT	(1 << 11)
+#define PCI_INT_BRDG_BERRINT	(1 << 12)
+#define PCI_INT_SRC_DMA_BERRINT	(1 << 13)
+#define PCI_INT_DST_DMA_BERRINT	(1 << 14)
+#define PCI_INT_IPB_DMA_BERRINT	(1 << 15)
+#define PCI_INT_I2CDONE		(1 << 16)
+#define PCI_INT_I2CRACK		(1 << 17)
+#define PCI_INT_IR_SMPINT	(1 << 18)
+#define PCI_INT_GPIO_INT0	(1 << 19)
+#define PCI_INT_GPIO_INT1	(1 << 20)
+
 #define SEL_BTSC     0x01
 #define SEL_EIAJ     0x02
 #define SEL_A2       0x04
@@ -567,6 +612,19 @@
 #define SEL_FMRADIO  0x20
 
 // AUD_CTL
+#define AUD_INT_DN_RISCI1	(1 <<  0)
+#define AUD_INT_UP_RISCI1	(1 <<  1)
+#define AUD_INT_RDS_DN_RISCI1	(1 <<  2)
+#define AUD_INT_DN_RISCI2	(1 <<  4) /* yes, 3 is skipped */
+#define AUD_INT_UP_RISCI2	(1 <<  5)
+#define AUD_INT_RDS_DN_RISCI2	(1 <<  6)
+#define AUD_INT_DN_SYNC		(1 << 12)
+#define AUD_INT_UP_SYNC		(1 << 13)
+#define AUD_INT_RDS_DN_SYNC	(1 << 14)
+#define AUD_INT_OPC_ERR		(1 << 16)
+#define AUD_INT_BER_IRQ		(1 << 20)
+#define AUD_INT_MCHG_IRQ	(1 << 21)
+
 #define EN_BTSC_FORCE_MONO      0
 #define EN_BTSC_FORCE_STEREO    1
 #define EN_BTSC_FORCE_SAP       2
@@ -603,20 +661,11 @@
 #define EN_I2SIN_STR2DAC        0x00004000
 #define EN_I2SIN_ENABLE         0x00008000
 
-#if 0
-/* old */
-#define EN_DMTRX_SUMDIFF        0x00000800
-#define EN_DMTRX_SUMR           0x00000880
-#define EN_DMTRX_LR             0x00000900
-#define EN_DMTRX_MONO           0x00000980
-#else
-/* dscaler cvs */
 #define EN_DMTRX_SUMDIFF        (0 << 7)
 #define EN_DMTRX_SUMR           (1 << 7)
 #define EN_DMTRX_LR             (2 << 7)
 #define EN_DMTRX_MONO           (3 << 7)
 #define EN_DMTRX_BYPASS         (1 << 11)
-#endif
 
 // Video
 #define VID_CAPTURE_CONTROL		0x310180
@@ -714,13 +763,13 @@
 #define ColorFormatGamma         0x1000
 
 #define Interlaced		 0x1
-#define NonInterlaced	 	 0x0
+#define NonInterlaced		 0x0
 
 #define FieldEven		 0x1
 #define FieldOdd		 0x0
 
-#define TGReadWriteMode	 	 0x0
-#define TGEnableMode	 	 0x1
+#define TGReadWriteMode		 0x0
+#define TGEnableMode		 0x1
 
 #define DV_CbAlign		 0x0
 #define DV_Y0Align		 0x1

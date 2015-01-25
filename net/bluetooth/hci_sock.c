@@ -1,6 +1,6 @@
-/* 
+/*
    BlueZ - Bluetooth protocol stack for Linux
-   Copyright (C) 2000-2001 Qualcomm Incorporated
+   Copyright (c) 2000-2001, 2011, The Linux Foundation. All rights reserved.
 
    Written 2000,2001 by Maxim Krasnyansky <maxk@qualcomm.com>
 
@@ -12,26 +12,24 @@
    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF THIRD PARTY RIGHTS.
    IN NO EVENT SHALL THE COPYRIGHT HOLDER(S) AND AUTHOR(S) BE LIABLE FOR ANY
-   CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES 
-   WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN 
-   ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF 
+   CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES
+   WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+   ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
    OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-   ALL LIABILITY, INCLUDING LIABILITY FOR INFRINGEMENT OF ANY PATENTS, 
-   COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS, RELATING TO USE OF THIS 
+   ALL LIABILITY, INCLUDING LIABILITY FOR INFRINGEMENT OF ANY PATENTS,
+   COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS, RELATING TO USE OF THIS
    SOFTWARE IS DISCLAIMED.
 */
 
 /* Bluetooth HCI sockets. */
 
-#include <linux/config.h>
 #include <linux/module.h>
 
 #include <linux/types.h>
+#include <linux/capability.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
-#include <linux/major.h>
-#include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/poll.h>
 #include <linux/fcntl.h>
@@ -39,21 +37,19 @@
 #include <linux/skbuff.h>
 #include <linux/workqueue.h>
 #include <linux/interrupt.h>
+#include <linux/compat.h>
 #include <linux/socket.h>
 #include <linux/ioctl.h>
 #include <net/sock.h>
 
 #include <asm/system.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/unaligned.h>
 
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
 
-#ifndef CONFIG_BT_HCI_SOCK_DEBUG
-#undef  BT_DBG
-#define BT_DBG(D...)
-#endif
+static bool enable_mgmt = 1;
 
 /* ----- HCI socket interface ----- */
 
@@ -67,29 +63,30 @@ static struct hci_sec_filter hci_sec_filter = {
 	/* Packet types */
 	0x10,
 	/* Events */
-	{ 0x1000d9fe, 0x0000300c },
+	{ 0x1000d9fe, 0x0000b00c },
 	/* Commands */
 	{
 		{ 0x0 },
 		/* OGF_LINK_CTL */
-		{ 0xbe000006, 0x00000001, 0x0000, 0x00 },
+		{ 0xbe000006, 0x00000001, 0x00000000, 0x00 },
 		/* OGF_LINK_POLICY */
-		{ 0x00005200, 0x00000000, 0x0000, 0x00 },
+		{ 0x00005200, 0x00000000, 0x00000000, 0x00 },
 		/* OGF_HOST_CTL */
-		{ 0xaab00200, 0x2b402aaa, 0x0154, 0x00 },
+		{ 0xaab00200, 0x2b402aaa, 0x05220154, 0x00 },
 		/* OGF_INFO_PARAM */
-		{ 0x000002be, 0x00000000, 0x0000, 0x00 },
+		{ 0x000002be, 0x00000000, 0x00000000, 0x00 },
 		/* OGF_STATUS_PARAM */
-		{ 0x000000ea, 0x00000000, 0x0000, 0x00 }
+		{ 0x000000ea, 0x00000000, 0x00000000, 0x00 }
 	}
 };
 
 static struct bt_sock_list hci_sk_list = {
-	.lock = RW_LOCK_UNLOCKED
+	.lock = __RW_LOCK_UNLOCKED(hci_sk_list.lock)
 };
 
 /* Send frame to RAW socket */
-void hci_send_to_sock(struct hci_dev *hdev, struct sk_buff *skb)
+void hci_send_to_sock(struct hci_dev *hdev, struct sk_buff *skb,
+							struct sock *skip_sk)
 {
 	struct sock *sk;
 	struct hlist_node *node;
@@ -101,6 +98,9 @@ void hci_send_to_sock(struct hci_dev *hdev, struct sk_buff *skb)
 		struct hci_filter *flt;
 		struct sk_buff *nskb;
 
+		if (sk == skip_sk)
+			continue;
+
 		if (sk->sk_state != BT_BOUND || hci_pi(sk)->hdev != hdev)
 			continue;
 
@@ -108,31 +108,43 @@ void hci_send_to_sock(struct hci_dev *hdev, struct sk_buff *skb)
 		if (skb->sk == sk)
 			continue;
 
+		if (bt_cb(skb)->channel != hci_pi(sk)->channel)
+			continue;
+
+		if (bt_cb(skb)->channel == HCI_CHANNEL_CONTROL)
+			goto clone;
+
 		/* Apply filter */
 		flt = &hci_pi(sk)->filter;
 
-		if (!test_bit((skb->pkt_type == HCI_VENDOR_PKT) ?
-				0 : (skb->pkt_type & HCI_FLT_TYPE_BITS), &flt->type_mask))
+		if (!test_bit((bt_cb(skb)->pkt_type == HCI_VENDOR_PKT) ?
+				0 : (bt_cb(skb)->pkt_type & HCI_FLT_TYPE_BITS), &flt->type_mask))
 			continue;
 
-		if (skb->pkt_type == HCI_EVENT_PKT) {
+		if (bt_cb(skb)->pkt_type == HCI_EVENT_PKT) {
 			register int evt = (*(__u8 *)skb->data & HCI_FLT_EVENT_BITS);
 
 			if (!hci_test_bit(evt, &flt->event_mask))
 				continue;
 
-			if (flt->opcode && ((evt == HCI_EV_CMD_COMPLETE && 
-					flt->opcode != *(__u16 *)(skb->data + 3)) ||
-					(evt == HCI_EV_CMD_STATUS && 
-					flt->opcode != *(__u16 *)(skb->data + 4))))
+			if (flt->opcode &&
+			    ((evt == HCI_EV_CMD_COMPLETE &&
+			      flt->opcode !=
+			      get_unaligned((__le16 *)(skb->data + 3))) ||
+			     (evt == HCI_EV_CMD_STATUS &&
+			      flt->opcode !=
+			      get_unaligned((__le16 *)(skb->data + 4)))))
 				continue;
 		}
 
-		if (!(nskb = skb_clone(skb, GFP_ATOMIC)))
+clone:
+		nskb = skb_clone(skb, GFP_ATOMIC);
+		if (!nskb)
 			continue;
 
 		/* Put type byte before the data */
-		memcpy(skb_push(nskb, 1), &nskb->pkt_type, 1);
+		if (bt_cb(skb)->channel == HCI_CHANNEL_RAW)
+			memcpy(skb_push(nskb, 1), &bt_cb(nskb)->pkt_type, 1);
 
 		if (sock_queue_rcv_skb(sk, nskb))
 			kfree_skb(nskb);
@@ -143,12 +155,14 @@ void hci_send_to_sock(struct hci_dev *hdev, struct sk_buff *skb)
 static int hci_sock_release(struct socket *sock)
 {
 	struct sock *sk = sock->sk;
-	struct hci_dev *hdev = hci_pi(sk)->hdev;
+	struct hci_dev *hdev;
 
 	BT_DBG("sock %p sk %p", sock, sk);
 
 	if (!sk)
 		return 0;
+
+	hdev = hci_pi(sk)->hdev;
 
 	bt_sock_unlink(&hci_sk_list, sk);
 
@@ -166,7 +180,85 @@ static int hci_sock_release(struct socket *sock)
 	return 0;
 }
 
-/* Ioctls that require bound socket */ 
+struct bdaddr_list *hci_blacklist_lookup(struct hci_dev *hdev, bdaddr_t *bdaddr)
+{
+	struct list_head *p;
+
+	list_for_each(p, &hdev->blacklist) {
+		struct bdaddr_list *b;
+
+		b = list_entry(p, struct bdaddr_list, list);
+
+		if (bacmp(bdaddr, &b->bdaddr) == 0)
+			return b;
+	}
+
+	return NULL;
+}
+
+static int hci_blacklist_add(struct hci_dev *hdev, void __user *arg)
+{
+	bdaddr_t bdaddr;
+	struct bdaddr_list *entry;
+
+	if (copy_from_user(&bdaddr, arg, sizeof(bdaddr)))
+		return -EFAULT;
+
+	if (bacmp(&bdaddr, BDADDR_ANY) == 0)
+		return -EBADF;
+
+	if (hci_blacklist_lookup(hdev, &bdaddr))
+		return -EEXIST;
+
+	entry = kzalloc(sizeof(struct bdaddr_list), GFP_KERNEL);
+	if (!entry)
+		return -ENOMEM;
+
+	bacpy(&entry->bdaddr, &bdaddr);
+
+	list_add(&entry->list, &hdev->blacklist);
+
+	return 0;
+}
+
+int hci_blacklist_clear(struct hci_dev *hdev)
+{
+	struct list_head *p, *n;
+
+	list_for_each_safe(p, n, &hdev->blacklist) {
+		struct bdaddr_list *b;
+
+		b = list_entry(p, struct bdaddr_list, list);
+
+		list_del(p);
+		kfree(b);
+	}
+
+	return 0;
+}
+
+static int hci_blacklist_del(struct hci_dev *hdev, void __user *arg)
+{
+	bdaddr_t bdaddr;
+	struct bdaddr_list *entry;
+
+	if (copy_from_user(&bdaddr, arg, sizeof(bdaddr)))
+		return -EFAULT;
+
+	if (bacmp(&bdaddr, BDADDR_ANY) == 0)
+		return hci_blacklist_clear(hdev);
+
+	entry = hci_blacklist_lookup(hdev, &bdaddr);
+	if (!entry)
+		return -ENOENT;
+
+	list_del(&entry->list);
+	kfree(entry);
+
+	return 0;
+}
+
+/* Ioctls that require bound socket */
 static inline int hci_sock_bound_ioctl(struct sock *sk, unsigned int cmd, unsigned long arg)
 {
 	struct hci_dev *hdev = hci_pi(sk)->hdev;
@@ -189,19 +281,24 @@ static inline int hci_sock_bound_ioctl(struct sock *sk, unsigned int cmd, unsign
 
 		return 0;
 
-	case HCISETSECMGR:
+	case HCIGETCONNINFO:
+		return hci_get_conn_info(hdev, (void __user *) arg);
+
+	case HCIGETAUTHINFO:
+		return hci_get_auth_info(hdev, (void __user *) arg);
+
+	case HCIBLOCKADDR:
 		if (!capable(CAP_NET_ADMIN))
 			return -EACCES;
+		return hci_blacklist_add(hdev, (void __user *) arg);
 
-		if (arg)
-			set_bit(HCI_SECMGR, &hdev->flags);
-		else
-			clear_bit(HCI_SECMGR, &hdev->flags);
+	case HCIUNBLOCKADDR:
+		if (!capable(CAP_NET_ADMIN))
+			return -EACCES;
+		return hci_blacklist_del(hdev, (void __user *) arg);
 
-		return 0;
-
-	case HCIGETCONNINFO:
-		return hci_get_conn_info(hdev, (void __user *)arg);
+	case HCISETAUTHINFO:
+		return hci_set_auth_info(hdev, (void __user *) arg);
 
 	default:
 		if (hdev->ioctl)
@@ -213,7 +310,7 @@ static inline int hci_sock_bound_ioctl(struct sock *sk, unsigned int cmd, unsign
 static int hci_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 {
 	struct sock *sk = sock->sk;
-	void __user *argp = (void __user *)arg;
+	void __user *argp = (void __user *) arg;
 	int err;
 
 	BT_DBG("cmd %x arg %lx", cmd, arg);
@@ -231,7 +328,12 @@ static int hci_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long a
 	case HCIDEVUP:
 		if (!capable(CAP_NET_ADMIN))
 			return -EACCES;
-		return hci_dev_open(arg);
+
+		err =  hci_dev_open(arg);
+		if (!err || err == -EALREADY)
+			return 0;
+		else
+			return err;
 
 	case HCIDEVDOWN:
 		if (!capable(CAP_NET_ADMIN))
@@ -273,25 +375,39 @@ static int hci_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long a
 
 static int hci_sock_bind(struct socket *sock, struct sockaddr *addr, int addr_len)
 {
-	struct sockaddr_hci *haddr = (struct sockaddr_hci *) addr;
+	struct sockaddr_hci haddr;
 	struct sock *sk = sock->sk;
 	struct hci_dev *hdev = NULL;
-	int err = 0;
+	int len, err = 0;
 
 	BT_DBG("sock %p sk %p", sock, sk);
 
-	if (!haddr || haddr->hci_family != AF_BLUETOOTH)
+	if (!addr)
+		return -EINVAL;
+
+	memset(&haddr, 0, sizeof(haddr));
+	len = min_t(unsigned int, sizeof(haddr), addr_len);
+	memcpy(&haddr, addr, len);
+
+	if (haddr.hci_family != AF_BLUETOOTH)
+		return -EINVAL;
+
+	if (haddr.hci_channel > HCI_CHANNEL_CONTROL)
+		return -EINVAL;
+
+	if (haddr.hci_channel == HCI_CHANNEL_CONTROL && !enable_mgmt)
 		return -EINVAL;
 
 	lock_sock(sk);
 
-	if (hci_pi(sk)->hdev) {
+	if (sk->sk_state == BT_BOUND || hci_pi(sk)->hdev) {
 		err = -EALREADY;
 		goto done;
 	}
 
-	if (haddr->hci_dev != HCI_DEV_NONE) {
-		if (!(hdev = hci_dev_get(haddr->hci_dev))) {
+	if (haddr.hci_dev != HCI_DEV_NONE) {
+		hdev = hci_dev_get(haddr.hci_dev);
+		if (!hdev) {
 			err = -ENODEV;
 			goto done;
 		}
@@ -299,6 +415,7 @@ static int hci_sock_bind(struct socket *sock, struct sockaddr *addr, int addr_le
 		atomic_inc(&hdev->promisc);
 	}
 
+	hci_pi(sk)->channel = haddr.hci_channel;
 	hci_pi(sk)->hdev = hdev;
 	sk->sk_state = BT_BOUND;
 
@@ -311,14 +428,18 @@ static int hci_sock_getname(struct socket *sock, struct sockaddr *addr, int *add
 {
 	struct sockaddr_hci *haddr = (struct sockaddr_hci *) addr;
 	struct sock *sk = sock->sk;
+	struct hci_dev *hdev = hci_pi(sk)->hdev;
 
 	BT_DBG("sock %p sk %p", sock, sk);
+
+	if (!hdev)
+		return -EBADFD;
 
 	lock_sock(sk);
 
 	*addr_len = sizeof(*haddr);
 	haddr->hci_family = AF_BLUETOOTH;
-	haddr->hci_dev    = hci_pi(sk)->hdev->id;
+	haddr->hci_dev    = hdev->id;
 
 	release_sock(sk);
 	return 0;
@@ -328,14 +449,37 @@ static inline void hci_sock_cmsg(struct sock *sk, struct msghdr *msg, struct sk_
 {
 	__u32 mask = hci_pi(sk)->cmsg_mask;
 
-	if (mask & HCI_CMSG_DIR)
-		put_cmsg(msg, SOL_HCI, HCI_CMSG_DIR, sizeof(int), &bt_cb(skb)->incoming);
+	if (mask & HCI_CMSG_DIR) {
+		int incoming = bt_cb(skb)->incoming;
+		put_cmsg(msg, SOL_HCI, HCI_CMSG_DIR, sizeof(incoming), &incoming);
+	}
 
-	if (mask & HCI_CMSG_TSTAMP)
-		put_cmsg(msg, SOL_HCI, HCI_CMSG_TSTAMP, sizeof(skb->stamp), &skb->stamp);
+	if (mask & HCI_CMSG_TSTAMP) {
+#ifdef CONFIG_COMPAT
+		struct compat_timeval ctv;
+#endif
+		struct timeval tv;
+		void *data;
+		int len;
+
+		skb_get_timestamp(skb, &tv);
+
+		data = &tv;
+		len = sizeof(tv);
+#ifdef CONFIG_COMPAT
+		if (msg->msg_flags & MSG_CMSG_COMPAT) {
+			ctv.tv_sec = tv.tv_sec;
+			ctv.tv_usec = tv.tv_usec;
+			data = &ctv;
+			len = sizeof(ctv);
+		}
+#endif
+
+		put_cmsg(msg, SOL_HCI, HCI_CMSG_TSTAMP, len, data);
+	}
 }
- 
-static int hci_sock_recvmsg(struct kiocb *iocb, struct socket *sock, 
+
+static int hci_sock_recvmsg(struct kiocb *iocb, struct socket *sock,
 				struct msghdr *msg, size_t len, int flags)
 {
 	int noblock = flags & MSG_DONTWAIT;
@@ -351,7 +495,8 @@ static int hci_sock_recvmsg(struct kiocb *iocb, struct socket *sock,
 	if (sk->sk_state == BT_CLOSED)
 		return 0;
 
-	if (!(skb = skb_recv_datagram(sk, flags, noblock, &err)))
+	skb = skb_recv_datagram(sk, flags, noblock, &err);
+	if (!skb)
 		return err;
 
 	msg->msg_namelen = 0;
@@ -362,7 +507,7 @@ static int hci_sock_recvmsg(struct kiocb *iocb, struct socket *sock,
 		copied = len;
 	}
 
-	skb->h.raw = skb->data;
+	skb_reset_transport_header(skb);
 	err = skb_copy_datagram_iovec(skb, 0, msg->msg_iov, copied);
 
 	hci_sock_cmsg(sk, msg, skb);
@@ -372,12 +517,13 @@ static int hci_sock_recvmsg(struct kiocb *iocb, struct socket *sock,
 	return err ? : copied;
 }
 
-static int hci_sock_sendmsg(struct kiocb *iocb, struct socket *sock, 
+static int hci_sock_sendmsg(struct kiocb *iocb, struct socket *sock,
 			    struct msghdr *msg, size_t len)
 {
 	struct sock *sk = sock->sk;
 	struct hci_dev *hdev;
 	struct sk_buff *skb;
+	int reserve = 0;
 	int err;
 
 	BT_DBG("sock %p sk %p", sock, sk);
@@ -393,25 +539,51 @@ static int hci_sock_sendmsg(struct kiocb *iocb, struct socket *sock,
 
 	lock_sock(sk);
 
-	if (!(hdev = hci_pi(sk)->hdev)) {
+	switch (hci_pi(sk)->channel) {
+	case HCI_CHANNEL_RAW:
+		break;
+	case HCI_CHANNEL_CONTROL:
+		err = mgmt_control(sk, msg, len);
+		goto done;
+	default:
+		err = -EINVAL;
+		goto done;
+	}
+
+	hdev = hci_pi(sk)->hdev;
+	if (!hdev) {
 		err = -EBADFD;
 		goto done;
 	}
 
-	if (!(skb = bt_skb_send_alloc(sk, len, msg->msg_flags & MSG_DONTWAIT, &err)))
+	if (!test_bit(HCI_UP, &hdev->flags)) {
+		err = -ENETDOWN;
 		goto done;
+	}
+
+	/* Allocate extra headroom for Qualcomm PAL */
+	if (hdev->dev_type == HCI_AMP && hdev->manufacturer == 0x001d)
+		reserve = BT_SKB_RESERVE_80211;
+
+	skb = bt_skb_send_alloc(sk, len + reserve,
+					msg->msg_flags & MSG_DONTWAIT, &err);
+	if (!skb)
+		goto done;
+
+	if (reserve)
+		skb_reserve(skb, reserve);
 
 	if (memcpy_fromiovec(skb_put(skb, len), msg->msg_iov, len)) {
 		err = -EFAULT;
 		goto drop;
 	}
 
-	skb->pkt_type = *((unsigned char *) skb->data);
+	bt_cb(skb)->pkt_type = *((unsigned char *) skb->data);
 	skb_pull(skb, 1);
 	skb->dev = (void *) hdev;
 
-	if (skb->pkt_type == HCI_COMMAND_PKT) {
-		u16 opcode = __le16_to_cpu(get_unaligned((u16 *)skb->data));
+	if (bt_cb(skb)->pkt_type == HCI_COMMAND_PKT) {
+		u16 opcode = get_unaligned_le16(skb->data);
 		u16 ogf = hci_opcode_ogf(opcode);
 		u16 ocf = hci_opcode_ocf(opcode);
 
@@ -422,12 +594,12 @@ static int hci_sock_sendmsg(struct kiocb *iocb, struct socket *sock,
 			goto drop;
 		}
 
-		if (test_bit(HCI_RAW, &hdev->flags) || (ogf == OGF_VENDOR_CMD)) {
+		if (test_bit(HCI_RAW, &hdev->flags) || (ogf == 0x3f)) {
 			skb_queue_tail(&hdev->raw_q, skb);
-			hci_sched_tx(hdev);
+			tasklet_schedule(&hdev->tx_task);
 		} else {
 			skb_queue_tail(&hdev->cmd_q, skb);
-			hci_sched_cmd(hdev);
+			tasklet_schedule(&hdev->cmd_task);
 		}
 	} else {
 		if (!capable(CAP_NET_RAW)) {
@@ -436,7 +608,7 @@ static int hci_sock_sendmsg(struct kiocb *iocb, struct socket *sock,
 		}
 
 		skb_queue_tail(&hdev->raw_q, skb);
-		hci_sched_tx(hdev);
+		tasklet_schedule(&hdev->tx_task);
 	}
 
 	err = len;
@@ -450,7 +622,7 @@ drop:
 	goto done;
 }
 
-static int hci_sock_setsockopt(struct socket *sock, int level, int optname, char __user *optval, int len)
+static int hci_sock_setsockopt(struct socket *sock, int level, int optname, char __user *optval, unsigned int len)
 {
 	struct hci_ufilter uf = { .opcode = 0 };
 	struct sock *sk = sock->sk;
@@ -486,6 +658,15 @@ static int hci_sock_setsockopt(struct socket *sock, int level, int optname, char
 		break;
 
 	case HCI_FILTER:
+		{
+			struct hci_filter *f = &hci_pi(sk)->filter;
+
+			uf.type_mask = f->type_mask;
+			uf.opcode    = f->opcode;
+			uf.event_mask[0] = *((u32 *) f->event_mask + 0);
+			uf.event_mask[1] = *((u32 *) f->event_mask + 1);
+		}
+
 		len = min_t(unsigned int, len, sizeof(uf));
 		if (copy_from_user(&uf, optval, len)) {
 			err = -EFAULT;
@@ -506,7 +687,7 @@ static int hci_sock_setsockopt(struct socket *sock, int level, int optname, char
 			*((u32 *) f->event_mask + 0) = uf.event_mask[0];
 			*((u32 *) f->event_mask + 1) = uf.event_mask[1];
 		}
-		break; 
+		break;
 
 	default:
 		err = -ENOPROTOOPT;
@@ -521,7 +702,7 @@ static int hci_sock_getsockopt(struct socket *sock, int level, int optname, char
 {
 	struct hci_ufilter uf;
 	struct sock *sk = sock->sk;
-	int len, opt; 
+	int len, opt;
 
 	if (get_user(len, optlen))
 		return -EFAULT;
@@ -530,7 +711,7 @@ static int hci_sock_getsockopt(struct socket *sock, int level, int optname, char
 	case HCI_DATA_DIR:
 		if (hci_pi(sk)->cmsg_mask & HCI_CMSG_DIR)
 			opt = 1;
-		else 
+		else
 			opt = 0;
 
 		if (put_user(opt, optval))
@@ -540,7 +721,7 @@ static int hci_sock_getsockopt(struct socket *sock, int level, int optname, char
 	case HCI_TIME_STAMP:
 		if (hci_pi(sk)->cmsg_mask & HCI_CMSG_TSTAMP)
 			opt = 1;
-		else 
+		else
 			opt = 0;
 
 		if (put_user(opt, optval))
@@ -570,7 +751,7 @@ static int hci_sock_getsockopt(struct socket *sock, int level, int optname, char
 	return 0;
 }
 
-static struct proto_ops hci_sock_ops = {
+static const struct proto_ops hci_sock_ops = {
 	.family		= PF_BLUETOOTH,
 	.owner		= THIS_MODULE,
 	.release	= hci_sock_release,
@@ -596,7 +777,8 @@ static struct proto hci_sk_proto = {
 	.obj_size	= sizeof(struct hci_pinfo)
 };
 
-static int hci_sock_create(struct socket *sock, int protocol)
+static int hci_sock_create(struct net *net, struct socket *sock, int protocol,
+			   int kern)
 {
 	struct sock *sk;
 
@@ -607,7 +789,7 @@ static int hci_sock_create(struct socket *sock, int protocol)
 
 	sock->ops = &hci_sock_ops;
 
-	sk = sk_alloc(PF_BLUETOOTH, GFP_KERNEL, &hci_sk_proto, 1);
+	sk = sk_alloc(net, PF_BLUETOOTH, GFP_ATOMIC, &hci_sk_proto);
 	if (!sk)
 		return -ENOMEM;
 
@@ -643,7 +825,8 @@ static int hci_sock_dev_event(struct notifier_block *this, unsigned long event, 
 		/* Detach sockets from device */
 		read_lock(&hci_sk_list.lock);
 		sk_for_each(sk, node, &hci_sk_list.head) {
-			bh_lock_sock(sk);
+			local_bh_disable();
+			bh_lock_sock_nested(sk);
 			if (hci_pi(sk)->hdev == hdev) {
 				hci_pi(sk)->hdev = NULL;
 				sk->sk_err = EPIPE;
@@ -653,6 +836,7 @@ static int hci_sock_dev_event(struct notifier_block *this, unsigned long event, 
 				hci_dev_put(hdev);
 			}
 			bh_unlock_sock(sk);
+			local_bh_enable();
 		}
 		read_unlock(&hci_sk_list.lock);
 	}
@@ -660,7 +844,7 @@ static int hci_sock_dev_event(struct notifier_block *this, unsigned long event, 
 	return NOTIFY_DONE;
 }
 
-static struct net_proto_family hci_sock_family_ops = {
+static const struct net_proto_family hci_sock_family_ops = {
 	.family	= PF_BLUETOOTH,
 	.owner	= THIS_MODULE,
 	.create	= hci_sock_create,
@@ -694,7 +878,7 @@ error:
 	return err;
 }
 
-int __exit hci_sock_cleanup(void)
+void hci_sock_cleanup(void)
 {
 	if (bt_sock_unregister(BTPROTO_HCI) < 0)
 		BT_ERR("HCI socket unregistration failed");
@@ -702,6 +886,7 @@ int __exit hci_sock_cleanup(void)
 	hci_unregister_notifier(&hci_sock_nblock);
 
 	proto_unregister(&hci_sk_proto);
-
-	return 0;
 }
+
+module_param(enable_mgmt, bool, 0644);
+MODULE_PARM_DESC(enable_mgmt, "Enable Management interface");

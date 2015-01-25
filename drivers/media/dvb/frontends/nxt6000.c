@@ -33,13 +33,12 @@
 
 struct nxt6000_state {
 	struct i2c_adapter* i2c;
-	struct dvb_frontend_ops ops;
 	/* configuration settings */
 	const struct nxt6000_config* config;
 	struct dvb_frontend frontend;
 };
 
-static int debug = 0;
+static int debug;
 #define dprintk if (debug) printk
 
 static int nxt6000_writereg(struct nxt6000_state* state, u8 reg, u8 data)
@@ -51,7 +50,7 @@ static int nxt6000_writereg(struct nxt6000_state* state, u8 reg, u8 data)
 	if ((ret = i2c_transfer(state->i2c, &msg, 1)) != 1)
 		dprintk("nxt6000: nxt6000_write error (reg: 0x%02X, data: 0x%02X, ret: %d)\n", reg, data, ret);
 
-	return (ret != 1) ? -EFAULT : 0;
+	return (ret != 1) ? -EIO : 0;
 }
 
 static u8 nxt6000_readreg(struct nxt6000_state* state, u8 reg)
@@ -82,22 +81,21 @@ static void nxt6000_reset(struct nxt6000_state* state)
 	nxt6000_writereg(state, OFDM_COR_CTL, val | COREACT);
 }
 
-static int nxt6000_set_bandwidth(struct nxt6000_state* state, fe_bandwidth_t bandwidth)
+static int nxt6000_set_bandwidth(struct nxt6000_state *state, u32 bandwidth)
 {
 	u16 nominal_rate;
 	int result;
 
 	switch (bandwidth) {
-
-	case BANDWIDTH_6_MHZ:
+	case 6000000:
 		nominal_rate = 0x55B7;
 		break;
 
-	case BANDWIDTH_7_MHZ:
+	case 7000000:
 		nominal_rate = 0x6400;
 		break;
 
-	case BANDWIDTH_8_MHZ:
+	case 8000000:
 		nominal_rate = 0x7249;
 		break;
 
@@ -176,11 +174,16 @@ static int nxt6000_set_transmission_mode(struct nxt6000_state* state, fe_transmi
 
 static void nxt6000_setup(struct dvb_frontend* fe)
 {
-	struct nxt6000_state* state = (struct nxt6000_state*) fe->demodulator_priv;
+	struct nxt6000_state* state = fe->demodulator_priv;
 
 	nxt6000_writereg(state, RS_COR_SYNC_PARAM, SYNC_PARAM);
 	nxt6000_writereg(state, BER_CTRL, /*(1 << 2) | */ (0x01 << 1) | 0x01);
-	nxt6000_writereg(state, VIT_COR_CTL, VIT_COR_RESYNC);
+	nxt6000_writereg(state, VIT_BERTIME_2, 0x00);  // BER Timer = 0x000200 * 256 = 131072 bits
+	nxt6000_writereg(state, VIT_BERTIME_1, 0x02);  //
+	nxt6000_writereg(state, VIT_BERTIME_0, 0x00);  //
+	nxt6000_writereg(state, VIT_COR_INTEN, 0x98); // Enable BER interrupts
+	nxt6000_writereg(state, VIT_COR_CTL, 0x82);   // Enable BER measurement
+	nxt6000_writereg(state, VIT_COR_CTL, VIT_COR_RESYNC | 0x02 );
 	nxt6000_writereg(state, OFDM_COR_CTL, (0x01 << 5) | (nxt6000_readreg(state, OFDM_COR_CTL) & 0x0F));
 	nxt6000_writereg(state, OFDM_COR_MODEGUARD, FORCEMODE8K | 0x02);
 	nxt6000_writereg(state, OFDM_AGC_CTL, AGCLAST | INITIAL_AGC_BW);
@@ -202,12 +205,6 @@ static void nxt6000_setup(struct dvb_frontend* fe)
 		nxt6000_writereg(state, SUB_DIAG_MODE_SEL, 0);
 
 	nxt6000_writereg(state, TS_FORMAT, 0);
-
-	if (state->config->pll_init) {
-		nxt6000_writereg(state, ENABLE_TUNER_IIC, 0x01);	/* open i2c bus switch */
-		state->config->pll_init(fe);
-		nxt6000_writereg(state, ENABLE_TUNER_IIC, 0x00);	/* close i2c bus switch */
-	}
 }
 
 static void nxt6000_dump_status(struct nxt6000_state *state)
@@ -422,7 +419,7 @@ static void nxt6000_dump_status(struct nxt6000_state *state)
 static int nxt6000_read_status(struct dvb_frontend* fe, fe_status_t* status)
 {
 	u8 core_status;
-	struct nxt6000_state* state = (struct nxt6000_state*) fe->demodulator_priv;
+	struct nxt6000_state* state = fe->demodulator_priv;
 
 	*status = 0;
 
@@ -451,7 +448,7 @@ static int nxt6000_read_status(struct dvb_frontend* fe, fe_status_t* status)
 
 static int nxt6000_init(struct dvb_frontend* fe)
 {
-	struct nxt6000_state* state = (struct nxt6000_state*) fe->demodulator_priv;
+	struct nxt6000_state* state = fe->demodulator_priv;
 
 	nxt6000_reset(state);
 	nxt6000_setup(fe);
@@ -459,31 +456,92 @@ static int nxt6000_init(struct dvb_frontend* fe)
 	return 0;
 }
 
-static int nxt6000_set_frontend(struct dvb_frontend* fe, struct dvb_frontend_parameters *param)
+static int nxt6000_set_frontend(struct dvb_frontend *fe)
 {
-	struct nxt6000_state* state = (struct nxt6000_state*) fe->demodulator_priv;
+	struct dtv_frontend_properties *p = &fe->dtv_property_cache;
+	struct nxt6000_state* state = fe->demodulator_priv;
 	int result;
 
-	nxt6000_writereg(state, ENABLE_TUNER_IIC, 0x01);	/* open i2c bus switch */
-	state->config->pll_set(fe, param);
-	nxt6000_writereg(state, ENABLE_TUNER_IIC, 0x00);	/* close i2c bus switch */
+	if (fe->ops.tuner_ops.set_params) {
+		fe->ops.tuner_ops.set_params(fe);
+		if (fe->ops.i2c_gate_ctrl) fe->ops.i2c_gate_ctrl(fe, 0);
+	}
 
-	if ((result = nxt6000_set_bandwidth(state, param->u.ofdm.bandwidth)) < 0)
-		return result;
-	if ((result = nxt6000_set_guard_interval(state, param->u.ofdm.guard_interval)) < 0)
-		return result;
-	if ((result = nxt6000_set_transmission_mode(state, param->u.ofdm.transmission_mode)) < 0)
-		return result;
-	if ((result = nxt6000_set_inversion(state, param->inversion)) < 0)
+	result = nxt6000_set_bandwidth(state, p->bandwidth_hz);
+	if (result < 0)
 		return result;
 
+	result = nxt6000_set_guard_interval(state, p->guard_interval);
+	if (result < 0)
+		return result;
+
+	result = nxt6000_set_transmission_mode(state, p->transmission_mode);
+	if (result < 0)
+		return result;
+
+	result = nxt6000_set_inversion(state, p->inversion);
+	if (result < 0)
+		return result;
+
+	msleep(500);
 	return 0;
 }
 
 static void nxt6000_release(struct dvb_frontend* fe)
 {
-	struct nxt6000_state* state = (struct nxt6000_state*) fe->demodulator_priv;
+	struct nxt6000_state* state = fe->demodulator_priv;
 	kfree(state);
+}
+
+static int nxt6000_read_snr(struct dvb_frontend* fe, u16* snr)
+{
+	struct nxt6000_state* state = fe->demodulator_priv;
+
+	*snr = nxt6000_readreg( state, OFDM_CHC_SNR) / 8;
+
+	return 0;
+}
+
+static int nxt6000_read_ber(struct dvb_frontend* fe, u32* ber)
+{
+	struct nxt6000_state* state = fe->demodulator_priv;
+
+	nxt6000_writereg( state, VIT_COR_INTSTAT, 0x18 );
+
+	*ber = (nxt6000_readreg( state, VIT_BER_1 ) << 8 ) |
+		nxt6000_readreg( state, VIT_BER_0 );
+
+	nxt6000_writereg( state, VIT_COR_INTSTAT, 0x18); // Clear BER Done interrupts
+
+	return 0;
+}
+
+static int nxt6000_read_signal_strength(struct dvb_frontend* fe, u16* signal_strength)
+{
+	struct nxt6000_state* state = fe->demodulator_priv;
+
+	*signal_strength = (short) (511 -
+		(nxt6000_readreg(state, AGC_GAIN_1) +
+		((nxt6000_readreg(state, AGC_GAIN_2) & 0x03) << 8)));
+
+	return 0;
+}
+
+static int nxt6000_fe_get_tune_settings(struct dvb_frontend* fe, struct dvb_frontend_tune_settings *tune)
+{
+	tune->min_delay_ms = 500;
+	return 0;
+}
+
+static int nxt6000_i2c_gate_ctrl(struct dvb_frontend* fe, int enable)
+{
+	struct nxt6000_state* state = fe->demodulator_priv;
+
+	if (enable) {
+		return nxt6000_writereg(state, ENABLE_TUNER_IIC, 0x01);
+	} else {
+		return nxt6000_writereg(state, ENABLE_TUNER_IIC, 0x00);
+	}
 }
 
 static struct dvb_frontend_ops nxt6000_ops;
@@ -494,19 +552,18 @@ struct dvb_frontend* nxt6000_attach(const struct nxt6000_config* config,
 	struct nxt6000_state* state = NULL;
 
 	/* allocate memory for the internal state */
-	state = (struct nxt6000_state*) kmalloc(sizeof(struct nxt6000_state), GFP_KERNEL);
+	state = kzalloc(sizeof(struct nxt6000_state), GFP_KERNEL);
 	if (state == NULL) goto error;
 
 	/* setup the state */
 	state->config = config;
 	state->i2c = i2c;
-	memcpy(&state->ops, &nxt6000_ops, sizeof(struct dvb_frontend_ops));
 
 	/* check if the demod is there */
 	if (nxt6000_readreg(state, OFDM_MSC_REV) != NXT6000ASICDEVICE) goto error;
 
 	/* create dvb_frontend */
-	state->frontend.ops = &state->ops;
+	memcpy(&state->frontend.ops, &nxt6000_ops, sizeof(struct dvb_frontend_ops));
 	state->frontend.demodulator_priv = state;
 	return &state->frontend;
 
@@ -516,10 +573,9 @@ error:
 }
 
 static struct dvb_frontend_ops nxt6000_ops = {
-
+	.delsys = { SYS_DVBT },
 	.info = {
 		.name = "NxtWave NXT6000 DVB-T",
-		.type = FE_OFDM,
 		.frequency_min = 0,
 		.frequency_max = 863250000,
 		.frequency_stepsize = 62500,
@@ -528,20 +584,26 @@ static struct dvb_frontend_ops nxt6000_ops = {
 		.symbol_rate_max = 9360000,	/* FIXME */
 		.symbol_rate_tolerance = 4000,
 		.caps = FE_CAN_FEC_1_2 | FE_CAN_FEC_2_3 | FE_CAN_FEC_3_4 |
-	                FE_CAN_FEC_4_5 | FE_CAN_FEC_5_6 | FE_CAN_FEC_6_7 |
-	                FE_CAN_FEC_7_8 | FE_CAN_FEC_8_9 | FE_CAN_FEC_AUTO |
-	                FE_CAN_QAM_16 | FE_CAN_QAM_64 | FE_CAN_QAM_AUTO |
-	                FE_CAN_TRANSMISSION_MODE_AUTO | FE_CAN_GUARD_INTERVAL_AUTO |
-	                FE_CAN_HIERARCHY_AUTO,
+			FE_CAN_FEC_4_5 | FE_CAN_FEC_5_6 | FE_CAN_FEC_6_7 |
+			FE_CAN_FEC_7_8 | FE_CAN_FEC_8_9 | FE_CAN_FEC_AUTO |
+			FE_CAN_QAM_16 | FE_CAN_QAM_64 | FE_CAN_QAM_AUTO |
+			FE_CAN_TRANSMISSION_MODE_AUTO | FE_CAN_GUARD_INTERVAL_AUTO |
+			FE_CAN_HIERARCHY_AUTO,
 	},
 
 	.release = nxt6000_release,
 
 	.init = nxt6000_init,
+	.i2c_gate_ctrl = nxt6000_i2c_gate_ctrl,
+
+	.get_tune_settings = nxt6000_fe_get_tune_settings,
 
 	.set_frontend = nxt6000_set_frontend,
 
 	.read_status = nxt6000_read_status,
+	.read_ber = nxt6000_read_ber,
+	.read_signal_strength = nxt6000_read_signal_strength,
+	.read_snr = nxt6000_read_snr,
 };
 
 module_param(debug, int, 0644);

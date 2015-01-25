@@ -17,6 +17,7 @@
 #include <linux/bio.h>
 #include <linux/blkdev.h>
 #include <linux/spinlock.h>
+#include <linux/mutex.h>
 
 /* Possible states of device */
 enum {
@@ -52,18 +53,17 @@ struct loop_device {
 	unsigned	lo_blocksize;
 	void		*key_data; 
 
-	int		old_gfp_mask;
+	gfp_t		old_gfp_mask;
 
 	spinlock_t		lo_lock;
-	struct bio 		*lo_bio;
-	struct bio		*lo_biotail;
+	struct bio_list		lo_bio_list;
 	int			lo_state;
-	struct semaphore	lo_sem;
-	struct semaphore	lo_ctl_mutex;
-	struct semaphore	lo_bh_mutex;
-	atomic_t		lo_pending;
+	struct mutex		lo_ctl_mutex;
+	struct task_struct	*lo_thread;
+	wait_queue_head_t	lo_event;
 
-	request_queue_t		*lo_queue;
+	struct request_queue	*lo_queue;
+	struct gendisk		*lo_disk;
 };
 
 #endif /* __KERNEL__ */
@@ -73,11 +73,12 @@ struct loop_device {
  */
 enum {
 	LO_FLAGS_READ_ONLY	= 1,
-	LO_FLAGS_USE_AOPS	= 2,
+	LO_FLAGS_AUTOCLEAR	= 4,
+	LO_FLAGS_PARTSCAN	= 8,
 };
 
 #include <asm/posix_types.h>	/* for __kernel_old_dev_t */
-#include <asm/types.h>		/* for __u64 */
+#include <linux/types.h>	/* for __u64 */
 
 /* Backwards compatibility version */
 struct loop_info {
@@ -157,5 +158,10 @@ int loop_unregister_transfer(int number);
 #define LOOP_SET_STATUS64	0x4C04
 #define LOOP_GET_STATUS64	0x4C05
 #define LOOP_CHANGE_FD		0x4C06
+#define LOOP_SET_CAPACITY	0x4C07
 
+/* /dev/loop-control interface */
+#define LOOP_CTL_ADD		0x4C80
+#define LOOP_CTL_REMOVE		0x4C81
+#define LOOP_CTL_GET_FREE	0x4C82
 #endif

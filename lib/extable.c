@@ -1,5 +1,4 @@
 /*
- * lib/extable.c
  * Derived from arch/ppc/mm/extable.c and arch/i386/mm/extable.c.
  *
  * Copyright (C) 2004 Paul Mackerras, IBM Corp.
@@ -10,14 +9,10 @@
  * 2 of the License, or (at your option) any later version.
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/sort.h>
 #include <asm/uaccess.h>
-
-extern struct exception_table_entry __start___ex_table[];
-extern struct exception_table_entry __stop___ex_table[];
 
 #ifndef ARCH_HAS_SORT_EXTABLE
 /*
@@ -44,7 +39,26 @@ void sort_extable(struct exception_table_entry *start,
 	sort(start, finish - start, sizeof(struct exception_table_entry),
 	     cmp_ex, NULL);
 }
-#endif
+
+#ifdef CONFIG_MODULES
+/*
+ * If the exception table is sorted, any referring to the module init
+ * will be at the beginning or the end.
+ */
+void trim_init_extable(struct module *m)
+{
+	/*trim the beginning*/
+	while (m->num_exentries && within_module_init(m->extable[0].insn, m)) {
+		m->extable++;
+		m->num_exentries--;
+	}
+	/*trim the end*/
+	while (m->num_exentries &&
+		within_module_init(m->extable[m->num_exentries-1].insn, m))
+		m->num_exentries--;
+}
+#endif /* CONFIG_MODULES */
+#endif /* !ARCH_HAS_SORT_EXTABLE */
 
 #ifndef ARCH_HAS_SEARCH_EXTABLE
 /*
@@ -62,10 +76,10 @@ search_extable(const struct exception_table_entry *first,
 	while (first <= last) {
 		const struct exception_table_entry *mid;
 
-		mid = (last - first) / 2 + first;
+		mid = ((last - first) >> 1) + first;
 		/*
-		 * careful, the distance between entries can be
-		 * larger than 2GB:
+		 * careful, the distance between value and insn
+		 * can be larger than MAX_LONG:
 		 */
 		if (mid->insn < value)
 			first = mid + 1;

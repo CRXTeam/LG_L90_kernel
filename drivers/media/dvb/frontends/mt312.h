@@ -28,20 +28,24 @@
 
 #include <linux/dvb/frontend.h>
 
-struct mt312_config
-{
+struct mt312_config {
 	/* the demodulator's i2c address */
 	u8 demod_address;
 
-	/* PLL maintenance */
-	int (*pll_init)(struct dvb_frontend* fe);
-	int (*pll_set)(struct dvb_frontend* fe, struct dvb_frontend_parameters* params);
+	/* inverted voltage setting */
+	unsigned int voltage_inverted:1;
 };
 
-extern struct dvb_frontend* mt312_attach(const struct mt312_config* config,
-					 struct i2c_adapter* i2c);
+#if defined(CONFIG_DVB_MT312) || (defined(CONFIG_DVB_MT312_MODULE) && defined(MODULE))
+struct dvb_frontend *mt312_attach(const struct mt312_config *config,
+					struct i2c_adapter *i2c);
+#else
+static inline struct dvb_frontend *mt312_attach(
+	const struct mt312_config *config, struct i2c_adapter *i2c)
+{
+	printk(KERN_WARNING "%s: driver disabled by Kconfig\n", __func__);
+	return NULL;
+}
+#endif /* CONFIG_DVB_MT312 */
 
-extern struct dvb_frontend* vp310_attach(const struct mt312_config* config,
-					 struct i2c_adapter* i2c);
-
-#endif // MT312_H
+#endif /* MT312_H */

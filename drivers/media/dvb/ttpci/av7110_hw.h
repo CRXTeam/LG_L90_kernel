@@ -18,7 +18,7 @@ enum av7110_bootstate
 {
 	BOOTSTATE_BUFFER_EMPTY	= 0,
 	BOOTSTATE_BUFFER_FULL	= 1,
-	BOOTSTATE_BOOT_COMPLETE	= 2
+	BOOTSTATE_AV7110_BOOT_COMPLETE	= 2
 };
 
 enum av7110_type_rec_play_format
@@ -143,7 +143,8 @@ enum av7110_audio_command {
 	MainSwitch,
 	ADSwitch,
 	SendDiSEqC,
-	SetRegister
+	SetRegister,
+	SpdifSwitch
 };
 
 enum av7110_request_command {
@@ -166,7 +167,8 @@ enum av7110_encoder_command {
 	LoadVidCode,
 	SetMonitorType,
 	SetPanScanType,
-	SetFreezeMode
+	SetFreezeMode,
+	SetWSSConfig
 };
 
 enum av7110_rec_play_state {
@@ -214,11 +216,11 @@ enum av7110_command_type {
 #define VID_CENTRE_CUT_PREF	0x05	/* PanScan with zero vector */
 
 /* MPEG video decoder commands */
-#define VIDEO_CMD_STOP		0x000e
-#define VIDEO_CMD_PLAY		0x000d
-#define VIDEO_CMD_FREEZE	0x0102
-#define VIDEO_CMD_FFWD		0x0016
-#define VIDEO_CMD_SLOW		0x0022
+#define AV_VIDEO_CMD_STOP	0x000e
+#define AV_VIDEO_CMD_PLAY	0x000d
+#define AV_VIDEO_CMD_FREEZE	0x0102
+#define AV_VIDEO_CMD_FFWD	0x0016
+#define AV_VIDEO_CMD_SLOW	0x0022
 
 /* MPEG audio decoder commands */
 #define AUDIO_CMD_MUTE		0x0001
@@ -293,17 +295,16 @@ enum av7110_command_type {
 #define	DPRAM_BASE 0x4000
 
 /* boot protocol area */
-#define BOOT_STATE	(DPRAM_BASE + 0x3F8)
-#define BOOT_SIZE	(DPRAM_BASE + 0x3FA)
-#define BOOT_BASE	(DPRAM_BASE + 0x3FC)
-#define BOOT_BLOCK	(DPRAM_BASE + 0x400)
-#define BOOT_MAX_SIZE	0xc00
+#define AV7110_BOOT_STATE	(DPRAM_BASE + 0x3F8)
+#define AV7110_BOOT_SIZE	(DPRAM_BASE + 0x3FA)
+#define AV7110_BOOT_BASE	(DPRAM_BASE + 0x3FC)
+#define AV7110_BOOT_BLOCK	(DPRAM_BASE + 0x400)
+#define AV7110_BOOT_MAX_SIZE	0xc00
 
 /* firmware command protocol area */
 #define IRQ_STATE	(DPRAM_BASE + 0x0F4)
 #define IRQ_STATE_EXT	(DPRAM_BASE + 0x0F6)
 #define MSGSTATE	(DPRAM_BASE + 0x0F8)
-#define FILT_STATE	(DPRAM_BASE + 0x0FA)
 #define COMMAND		(DPRAM_BASE + 0x0FC)
 #define COM_BUFF	(DPRAM_BASE + 0x100)
 #define COM_BUFF_SIZE	0x20
@@ -330,8 +331,6 @@ enum av7110_command_type {
 
 /* firmware status area */
 #define STATUS_BASE	(DPRAM_BASE + 0x1FC0)
-#define STATUS_SCR	(STATUS_BASE + 0x00)
-#define STATUS_MODES	(STATUS_BASE + 0x04)
 #define STATUS_LOOPS	(STATUS_BASE + 0x08)
 
 #define STATUS_MPEG_WIDTH     (STATUS_BASE + 0x0C)
@@ -364,7 +363,6 @@ enum av7110_command_type {
 
 
 
-extern void av7110_reset_arm(struct av7110 *av7110);
 extern int av7110_bootarm(struct av7110 *av7110);
 extern int av7110_firmversion(struct av7110 *av7110);
 #define FW_CI_LL_SUPPORT(arm_app) ((arm_app) & 0x80000000)
@@ -373,12 +371,8 @@ extern int av7110_firmversion(struct av7110 *av7110);
 
 extern int av7110_wait_msgstate(struct av7110 *av7110, u16 flags);
 extern int av7110_fw_cmd(struct av7110 *av7110, int type, int com, int num, ...);
-extern int __av7110_send_fw_cmd(struct av7110 *av7110, u16* buf, int length);
-extern int av7110_send_fw_cmd(struct av7110 *av7110, u16* buf, int length);
-extern int av7110_send_ci_cmd(struct av7110 *av7110, u8 subcom, u8 *buf, u8 len);
 extern int av7110_fw_request(struct av7110 *av7110, u16 *request_buf,
 			     int request_buf_len, u16 *reply_buf, int reply_buf_len);
-extern int av7110_fw_query(struct av7110 *av7110, u16 tag, u16* Buff, s16 length);
 
 
 /* DEBI (saa7146 data extension bus interface) access */
@@ -396,7 +390,8 @@ static inline void iwdebi(struct av7110 *av7110, u32 config, int addr, u32 val, 
 }
 
 /* buffer writes */
-static inline void mwdebi(struct av7110 *av7110, u32 config, int addr, char *val, int count)
+static inline void mwdebi(struct av7110 *av7110, u32 config, int addr,
+			  const u8 *val, int count)
 {
 	memcpy(av7110->debi_virt, val, count);
 	av7110_debiwrite(av7110, config, addr, 0, count);
@@ -463,27 +458,27 @@ static inline int SendDAC(struct av7110 *av7110, u8 addr, u8 data)
 	return av7110_fw_cmd(av7110, COMTYPE_AUDIODAC, AudioDAC, 2, addr, data);
 }
 
-static inline void av7710_set_video_mode(struct av7110 *av7110, int mode)
+static inline int av7710_set_video_mode(struct av7110 *av7110, int mode)
 {
-	av7110_fw_cmd(av7110, COMTYPE_ENCODER, SetVidMode, 1, mode);
+	return av7110_fw_cmd(av7110, COMTYPE_ENCODER, SetVidMode, 1, mode);
 }
 
-static int inline vidcom(struct av7110 *av7110, u32 com, u32 arg)
+static inline int vidcom(struct av7110 *av7110, u32 com, u32 arg)
 {
 	return av7110_fw_cmd(av7110, COMTYPE_MISC, AV7110_FW_VIDEO_COMMAND, 4,
 			     (com>>16), (com&0xffff),
 			     (arg>>16), (arg&0xffff));
 }
 
-static int inline audcom(struct av7110 *av7110, u32 com)
+static inline int audcom(struct av7110 *av7110, u32 com)
 {
 	return av7110_fw_cmd(av7110, COMTYPE_MISC, AV7110_FW_AUDIO_COMMAND, 2,
 			     (com>>16), (com&0xffff));
 }
 
-static inline void Set22K(struct av7110 *av7110, int state)
+static inline int Set22K(struct av7110 *av7110, int state)
 {
-	av7110_fw_cmd(av7110, COMTYPE_AUDIODAC, (state ? ON22K : OFF22K), 0);
+	return av7110_fw_cmd(av7110, COMTYPE_AUDIODAC, (state ? ON22K : OFF22K), 0);
 }
 
 

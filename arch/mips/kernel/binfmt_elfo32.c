@@ -53,10 +53,27 @@ typedef elf_fpreg_t elf_fpregset_t[ELF_NFPREG];
 #define ELF_ET_DYN_BASE         (TASK32_SIZE / 3 * 2)
 
 #include <asm/processor.h>
+
+/*
+ * When this file is selected, we are definitely running a 64bit kernel.
+ * So using the right regs define in asm/reg.h
+ */
+#define WANT_COMPAT_REG_H
+
+/* These MUST be defined before elf.h gets included */
+extern void elf32_core_copy_regs(elf_gregset_t grp, struct pt_regs *regs);
+#define ELF_CORE_COPY_REGS(_dest, _regs) elf32_core_copy_regs(_dest, _regs);
+#define ELF_CORE_COPY_TASK_REGS(_tsk, _dest)				\
+({									\
+	int __res = 1;							\
+	elf32_core_copy_regs(*(_dest), task_pt_regs(_tsk));		\
+	__res;								\
+})
+
 #include <linux/module.h>
-#include <linux/config.h>
 #include <linux/elfcore.h>
 #include <linux/compat.h>
+#include <linux/math64.h>
 
 #define elf_prstatus elf_prstatus32
 struct elf_prstatus32
@@ -93,41 +110,43 @@ struct elf_prpsinfo32
 	char	pr_psargs[ELF_PRARGSZ];	/* initial part of arg list */
 };
 
-#define elf_addr_t	u32
 #define elf_caddr_t	u32
 #define init_elf_binfmt init_elf32_binfmt
 
 #define jiffies_to_timeval jiffies_to_compat_timeval
-static __inline__ void
+static inline void
 jiffies_to_compat_timeval(unsigned long jiffies, struct compat_timeval *value)
 {
 	/*
-	 * Convert jiffies to nanoseconds and seperate with
+	 * Convert jiffies to nanoseconds and separate with
 	 * one divide.
 	 */
-	u64 nsec = (u64)jiffies * TICK_NSEC; 
-	value->tv_sec = div_long_long_rem(nsec, NSEC_PER_SEC, &value->tv_usec);
-	value->tv_usec /= NSEC_PER_USEC;
+	u64 nsec = (u64)jiffies * TICK_NSEC;
+	u32 rem;
+	value->tv_sec = div_u64_rem(nsec, NSEC_PER_SEC, &rem);
+	value->tv_usec = rem / NSEC_PER_USEC;
 }
 
-#undef ELF_CORE_COPY_REGS
-#define ELF_CORE_COPY_REGS(_dest,_regs) elf32_core_copy_regs(_dest,_regs);
-
-void elf32_core_copy_regs(elf_gregset_t _dest, struct pt_regs *_regs)
+void elf32_core_copy_regs(elf_gregset_t grp, struct pt_regs *regs)
 {
 	int i;
 
-	memset(_dest, 0, sizeof(elf_gregset_t));
-
-	/* XXXKW the 6 is from EF_REG0 in gdb/gdb/mips-linux-tdep.c, include/asm-mips/reg.h */
-	for (i=6; i<38; i++)
-		_dest[i] = (elf_greg_t) _regs->regs[i-6];
-	_dest[i++] = (elf_greg_t) _regs->lo;
-	_dest[i++] = (elf_greg_t) _regs->hi;
-	_dest[i++] = (elf_greg_t) _regs->cp0_epc;
-	_dest[i++] = (elf_greg_t) _regs->cp0_badvaddr;
-	_dest[i++] = (elf_greg_t) _regs->cp0_status;
-	_dest[i++] = (elf_greg_t) _regs->cp0_cause;
+	for (i = 0; i < EF_R0; i++)
+		grp[i] = 0;
+	grp[EF_R0] = 0;
+	for (i = 1; i <= 31; i++)
+		grp[EF_R0 + i] = (elf_greg_t) regs->regs[i];
+	grp[EF_R26] = 0;
+	grp[EF_R27] = 0;
+	grp[EF_LO] = (elf_greg_t) regs->lo;
+	grp[EF_HI] = (elf_greg_t) regs->hi;
+	grp[EF_CP0_EPC] = (elf_greg_t) regs->cp0_epc;
+	grp[EF_CP0_BADVADDR] = (elf_greg_t) regs->cp0_badvaddr;
+	grp[EF_CP0_STATUS] = (elf_greg_t) regs->cp0_status;
+	grp[EF_CP0_CAUSE] = (elf_greg_t) regs->cp0_cause;
+#ifdef EF_UNUSED0
+	grp[EF_UNUSED0] = 0;
+#endif
 }
 
 MODULE_DESCRIPTION("Binary format loader for compatibility with o32 Linux/MIPS binaries");
@@ -135,5 +154,8 @@ MODULE_AUTHOR("Ralf Baechle (ralf@linux-mips.org)");
 
 #undef MODULE_DESCRIPTION
 #undef MODULE_AUTHOR
+
+#undef TASK_SIZE
+#define TASK_SIZE TASK_SIZE32
 
 #include "../../../fs/binfmt_elf.c"

@@ -17,9 +17,9 @@
 #include <linux/interrupt.h>
 #include <linux/module.h>
 #include <asm/types.h>
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/irq.h>
-#include <asm/arch/irqs.h>
+#include <mach/irqs.h>
 #include <asm/mach/irq.h>
 #include <asm/mach/time.h>
 #include "common.h"
@@ -27,22 +27,18 @@
  * Timer interrupt handler
  */
 static irqreturn_t
-h7201_timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+h7201_timer_interrupt(int irq, void *dev_id)
 {
-	write_seqlock(&xtime_lock);
-
 	CPU_REG (TIMER_VIRT, TIMER_TOPSTAT);
-	timer_tick(regs);
-
-	write_sequnlock(&xtime_lock);
+	timer_tick();
 
 	return IRQ_HANDLED;
 }
 
 static struct irqaction h7201_timer_irq = {
 	.name		= "h7201 Timer Tick",
-	.flags		= SA_INTERRUPT,
-	.handler	= h7201_timer_interrupt
+	.flags		= IRQF_DISABLED | IRQF_TIMER | IRQF_IRQPOLL,
+	.handler	= h7201_timer_interrupt,
 };
 
 /*

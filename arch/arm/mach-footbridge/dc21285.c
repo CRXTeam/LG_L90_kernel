@@ -10,16 +10,17 @@
  */
 #include <linux/kernel.h>
 #include <linux/pci.h>
-#include <linux/ptrace.h>
 #include <linux/interrupt.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
+#include <linux/irq.h>
+#include <linux/io.h>
+#include <linux/spinlock.h>
+#include <video/vga.h>
 
-#include <asm/io.h>
 #include <asm/irq.h>
-#include <asm/system.h>
 #include <asm/mach/pci.h>
 #include <asm/hardware/dec21285.h>
 
@@ -35,7 +36,6 @@
 
 extern int setup_arm_irq(int, struct irqaction *);
 extern void pcibios_report_status(u_int status_mask, int warn);
-extern void register_isa_ports(unsigned int, unsigned int, unsigned int);
 
 static unsigned long
 dc21285_base_address(struct pci_bus *bus, unsigned int devfn)
@@ -70,16 +70,16 @@ dc21285_read_config(struct pci_bus *bus, unsigned int devfn, int where,
 	if (addr)
 		switch (size) {
 		case 1:
-			asm("ldr%?b	%0, [%1, %2]"
-				: "=r" (v) : "r" (addr), "r" (where));
+			asm("ldrb	%0, [%1, %2]"
+				: "=r" (v) : "r" (addr), "r" (where) : "cc");
 			break;
 		case 2:
-			asm("ldr%?h	%0, [%1, %2]"
-				: "=r" (v) : "r" (addr), "r" (where));
+			asm("ldrh	%0, [%1, %2]"
+				: "=r" (v) : "r" (addr), "r" (where) : "cc");
 			break;
 		case 4:
-			asm("ldr%?	%0, [%1, %2]"
-				: "=r" (v) : "r" (addr), "r" (where));
+			asm("ldr	%0, [%1, %2]"
+				: "=r" (v) : "r" (addr), "r" (where) : "cc");
 			break;
 		}
 
@@ -104,16 +104,19 @@ dc21285_write_config(struct pci_bus *bus, unsigned int devfn, int where,
 	if (addr)
 		switch (size) {
 		case 1:
-			asm("str%?b	%0, [%1, %2]"
-				: : "r" (value), "r" (addr), "r" (where));
+			asm("strb	%0, [%1, %2]"
+				: : "r" (value), "r" (addr), "r" (where)
+				: "cc");
 			break;
 		case 2:
-			asm("str%?h	%0, [%1, %2]"
-				: : "r" (value), "r" (addr), "r" (where));
+			asm("strh	%0, [%1, %2]"
+				: : "r" (value), "r" (addr), "r" (where)
+				: "cc");
 			break;
 		case 4:
-			asm("str%?	%0, [%1, %2]"
-				: : "r" (value), "r" (addr), "r" (where));
+			asm("str	%0, [%1, %2]"
+				: : "r" (value), "r" (addr), "r" (where)
+				: "cc");
 			break;
 		}
 
@@ -152,7 +155,7 @@ static void dc21285_enable_error(unsigned long __data)
 /*
  * Warn on PCI errors.
  */
-static irqreturn_t dc21285_abort_irq(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t dc21285_abort_irq(int irq, void *dev_id)
 {
 	unsigned int cmd;
 	unsigned int status;
@@ -163,7 +166,7 @@ static irqreturn_t dc21285_abort_irq(int irq, void *dev_id, struct pt_regs *regs
 
 	if (status & PCI_STATUS_REC_MASTER_ABORT) {
 		printk(KERN_DEBUG "PCI: master abort, pc=0x%08lx\n",
-			instruction_pointer(regs));
+			instruction_pointer(get_irq_regs()));
 		cmd |= PCI_STATUS_REC_MASTER_ABORT << 16;
 	}
 
@@ -182,7 +185,7 @@ static irqreturn_t dc21285_abort_irq(int irq, void *dev_id, struct pt_regs *regs
 	return IRQ_HANDLED;
 }
 
-static irqreturn_t dc21285_serr_irq(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t dc21285_serr_irq(int irq, void *dev_id)
 {
 	struct timer_list *timer = dev_id;
 	unsigned int cntl;
@@ -204,7 +207,7 @@ static irqreturn_t dc21285_serr_irq(int irq, void *dev_id, struct pt_regs *regs)
 	return IRQ_HANDLED;
 }
 
-static irqreturn_t dc21285_discard_irq(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t dc21285_discard_irq(int irq, void *dev_id)
 {
 	printk(KERN_DEBUG "PCI: discard timer expired\n");
 	*CSR_SA110_CNTL &= 0xffffde07;
@@ -212,7 +215,7 @@ static irqreturn_t dc21285_discard_irq(int irq, void *dev_id, struct pt_regs *re
 	return IRQ_HANDLED;
 }
 
-static irqreturn_t dc21285_dparity_irq(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t dc21285_dparity_irq(int irq, void *dev_id)
 {
 	unsigned int cmd;
 
@@ -226,7 +229,7 @@ static irqreturn_t dc21285_dparity_irq(int irq, void *dev_id, struct pt_regs *re
 	return IRQ_HANDLED;
 }
 
-static irqreturn_t dc21285_parity_irq(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t dc21285_parity_irq(int irq, void *dev_id)
 {
 	struct timer_list *timer = dev_id;
 	unsigned int cmd;
@@ -255,13 +258,11 @@ int __init dc21285_setup(int nr, struct pci_sys_data *sys)
 	if (nr || !footbridge_cfn_mode())
 		return 0;
 
-	res = kmalloc(sizeof(struct resource) * 2, GFP_KERNEL);
+	res = kzalloc(sizeof(struct resource) * 2, GFP_KERNEL);
 	if (!res) {
 		printk("out of memory for root bus resources");
 		return 0;
 	}
-
-	memset(res, 0, sizeof(struct resource) * 2);
 
 	res[0].flags = IORESOURCE_MEM;
 	res[0].name  = "Footbridge non-prefetch";
@@ -273,23 +274,31 @@ int __init dc21285_setup(int nr, struct pci_sys_data *sys)
 	allocate_resource(&iomem_resource, &res[0], 0x40000000,
 			  0x80000000, 0xffffffff, 0x40000000, NULL, NULL);
 
-	sys->resource[0] = &ioport_resource;
-	sys->resource[1] = &res[0];
-	sys->resource[2] = &res[1];
 	sys->mem_offset  = DC21285_PCI_MEM;
+
+	pci_add_resource_offset(&sys->resources,
+				&ioport_resource, sys->io_offset);
+	pci_add_resource_offset(&sys->resources, &res[0], sys->mem_offset);
+	pci_add_resource_offset(&sys->resources, &res[1], sys->mem_offset);
 
 	return 1;
 }
 
 struct pci_bus * __init dc21285_scan_bus(int nr, struct pci_sys_data *sys)
 {
-	return pci_scan_bus(0, &dc21285_ops, sys);
+	return pci_scan_root_bus(NULL, 0, &dc21285_ops, sys, &sys->resources);
 }
+
+#define dc21285_request_irq(_a, _b, _c, _d, _e) \
+	WARN_ON(request_irq(_a, _b, _c, _d, _e) < 0)
 
 void __init dc21285_preinit(void)
 {
 	unsigned int mem_size, mem_mask;
 	int cfn_mode;
+
+	pcibios_min_mem = 0x81000000;
+	vga_base = PCIMEM_BASE;
 
 	mem_size = (unsigned int)high_memory - PAGE_OFFSET;
 	for (mem_mask = 0x00100000; mem_mask < 0x10000000; mem_mask <<= 1)
@@ -334,16 +343,16 @@ void __init dc21285_preinit(void)
 	/*
 	 * We don't care if these fail.
 	 */
-	request_irq(IRQ_PCI_SERR, dc21285_serr_irq, SA_INTERRUPT,
-		    "PCI system error", &serr_timer);
-	request_irq(IRQ_PCI_PERR, dc21285_parity_irq, SA_INTERRUPT,
-		    "PCI parity error", &perr_timer);
-	request_irq(IRQ_PCI_ABORT, dc21285_abort_irq, SA_INTERRUPT,
-		    "PCI abort", NULL);
-	request_irq(IRQ_DISCARD_TIMER, dc21285_discard_irq, SA_INTERRUPT,
-		    "Discard timer", NULL);
-	request_irq(IRQ_PCI_DPERR, dc21285_dparity_irq, SA_INTERRUPT,
-		    "PCI data parity", NULL);
+	dc21285_request_irq(IRQ_PCI_SERR, dc21285_serr_irq, IRQF_DISABLED,
+			    "PCI system error", &serr_timer);
+	dc21285_request_irq(IRQ_PCI_PERR, dc21285_parity_irq, IRQF_DISABLED,
+			    "PCI parity error", &perr_timer);
+	dc21285_request_irq(IRQ_PCI_ABORT, dc21285_abort_irq, IRQF_DISABLED,
+			    "PCI abort", NULL);
+	dc21285_request_irq(IRQ_DISCARD_TIMER, dc21285_discard_irq, IRQF_DISABLED,
+			    "Discard timer", NULL);
+	dc21285_request_irq(IRQ_PCI_DPERR, dc21285_dparity_irq, IRQF_DISABLED,
+			    "PCI data parity", NULL);
 
 	if (cfn_mode) {
 		static struct resource csrio;

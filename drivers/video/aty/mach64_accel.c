@@ -3,7 +3,6 @@
  *  ATI Mach64 Hardware Acceleration
  */
 
-#include <linux/sched.h>
 #include <linux/delay.h>
 #include <linux/fb.h>
 #include <video/mach64.h>
@@ -40,7 +39,8 @@ void aty_reset_engine(const struct atyfb_par *par)
 {
 	/* reset engine */
 	aty_st_le32(GEN_TEST_CNTL,
-		aty_ld_le32(GEN_TEST_CNTL, par) & ~GUI_ENGINE_ENABLE, par);
+		aty_ld_le32(GEN_TEST_CNTL, par) &
+		~(GUI_ENGINE_ENABLE | HWCURSOR_ENABLE), par);
 	/* enable engine */
 	aty_st_le32(GEN_TEST_CNTL,
 		aty_ld_le32(GEN_TEST_CNTL, par) | GUI_ENGINE_ENABLE, par);
@@ -63,14 +63,17 @@ static void reset_GTC_3D_engine(const struct atyfb_par *par)
 void aty_init_engine(struct atyfb_par *par, struct fb_info *info)
 {
 	u32 pitch_value;
+	u32 vxres;
 
 	/* determine modal information from global mode structure */
-	pitch_value = info->var.xres_virtual;
+	pitch_value = info->fix.line_length / (info->var.bits_per_pixel / 8);
+	vxres = info->var.xres_virtual;
 
 	if (info->var.bits_per_pixel == 24) {
 		/* In 24 bpp, the engine is in 8 bpp - this requires that all */
 		/* horizontal coordinates and widths must be adjusted */
 		pitch_value *= 3;
+		vxres *= 3;
 	}
 
 	/* On GTC (RagePro), we need to reset the 3D engine before */
@@ -133,7 +136,7 @@ void aty_init_engine(struct atyfb_par *par, struct fb_info *info)
 	aty_st_le32(SC_LEFT, 0, par);
 	aty_st_le32(SC_TOP, 0, par);
 	aty_st_le32(SC_BOTTOM, par->crtc.vyres - 1, par);
-	aty_st_le32(SC_RIGHT, pitch_value - 1, par);
+	aty_st_le32(SC_RIGHT, vxres - 1, par);
 
 	/* set background color to minimum value (usually BLACK) */
 	aty_st_le32(DP_BKGD_CLR, 0, par);
@@ -200,8 +203,6 @@ void atyfb_copyarea(struct fb_info *info, const struct fb_copyarea *area)
 	if (!area->width || !area->height)
 		return;
 	if (!par->accel_flags) {
-		if (par->blitter_may_be_busy)
-			wait_for_idle(par);
 		cfb_copyarea(info, area);
 		return;
 	}
@@ -241,21 +242,22 @@ void atyfb_copyarea(struct fb_info *info, const struct fb_copyarea *area)
 void atyfb_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
 {
 	struct atyfb_par *par = (struct atyfb_par *) info->par;
-	u32 color = rect->color, dx = rect->dx, width = rect->width, rotation = 0;
+	u32 color, dx = rect->dx, width = rect->width, rotation = 0;
 
 	if (par->asleep)
 		return;
 	if (!rect->width || !rect->height)
 		return;
 	if (!par->accel_flags) {
-		if (par->blitter_may_be_busy)
-			wait_for_idle(par);
 		cfb_fillrect(info, rect);
 		return;
 	}
 
-	color |= (rect->color << 8);
-	color |= (rect->color << 16);
+	if (info->fix.visual == FB_VISUAL_TRUECOLOR ||
+	    info->fix.visual == FB_VISUAL_DIRECTCOLOR)
+		color = ((u32 *)(info->pseudo_palette))[rect->color];
+	else
+		color = rect->color;
 
 	if (info->var.bits_per_pixel == 24) {
 		/* In 24 bpp, the engine is in 8 bpp - this requires that all */
@@ -288,14 +290,10 @@ void atyfb_imageblit(struct fb_info *info, const struct fb_image *image)
 		return;
 	if (!par->accel_flags ||
 	    (image->depth != 1 && info->var.bits_per_pixel != image->depth)) {
-		if (par->blitter_may_be_busy)
-			wait_for_idle(par);
-
 		cfb_imageblit(info, image);
 		return;
 	}
 
-	wait_for_idle(par);
 	pix_width = pix_width_save = aty_ld_le32(DP_PIX_WIDTH, par);
 	host_cntl = aty_ld_le32(HOST_CNTL, par) | HOST_BYTE_ALIGN;
 
@@ -424,8 +422,6 @@ void atyfb_imageblit(struct fb_info *info, const struct fb_image *image)
 			aty_st_le32(HOST_DATA0, le32_to_cpup(pbitmap), par);
 		}
 	}
-
-	wait_for_idle(par);
 
 	/* restore pix_width */
 	wait_for_fifo(1, par);

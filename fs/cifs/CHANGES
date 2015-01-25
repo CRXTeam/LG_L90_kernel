@@ -1,7 +1,401 @@
-Version 1.31
+Version 1.62
+------------
+Add sockopt=TCP_NODELAY mount option. EA (xattr) routines hardened
+to more strictly handle corrupt frames.
+
+Version 1.61
+------------
+Fix append problem to Samba servers (files opened with O_APPEND could
+have duplicated data). Fix oops in cifs_lookup. Workaround problem
+mounting to OS/400 Netserve. Fix oops in cifs_get_tcp_session.
+Disable use of server inode numbers when server only
+partially supports them (e.g. for one server querying inode numbers on
+FindFirst fails but QPathInfo queries works). Fix oops with dfs in 
+cifs_put_smb_ses. Fix mmap to work on directio mounts (needed
+for OpenOffice when on forcedirectio mount e.g.)
+
+Version 1.60
+-------------
+Fix memory leak in reconnect.  Fix oops in DFS mount error path.
+Set s_maxbytes to smaller (the max that vfs can handle) so that
+sendfile will now work over cifs mounts again.  Add noforcegid
+and noforceuid mount parameters. Fix small mem leak when using
+ntlmv2. Fix 2nd mount to same server but with different port to
+be allowed (rather than reusing the 1st port) - only when the
+user explicitly overrides the port on the 2nd mount.
+
+Version 1.59
+------------
+Client uses server inode numbers (which are persistent) rather than
+client generated ones by default (mount option "serverino" turned
+on by default if server supports it).  Add forceuid and forcegid
+mount options (so that when negotiating unix extensions specifying
+which uid mounted does not immediately force the server's reported
+uids to be overridden).  Add support for scope mount parm. Improve
+hard link detection to use same inode for both.  Do not set
+read-only dos attribute on directories (for chmod) since Windows
+explorer special cases this attribute bit for directories for
+a different purpose.
+
+Version 1.58
+------------
+Guard against buffer overruns in various UCS-2 to UTF-8 string conversions
+when the UTF-8 string is composed of unusually long (more than 4 byte) converted
+characters. Add support for mounting root of a share which redirects immediately
+to DFS target. Convert string conversion functions from Unicode to more
+accurately mark string length before allocating memory (which may help the
+rare cases where a UTF-8 string is much larger than the UCS2 string that
+we converted from).  Fix endianness of the vcnum field used during
+session setup to distinguish multiple mounts to same server from different
+userids. Raw NTLMSSP fixed (it requires /proc/fs/cifs/experimental
+flag to be set to 2, and mount must enable krb5 to turn on extended security).
+Performance of file create to Samba improved (posix create on lookup
+removes 1 of 2 network requests sent on file create)
+ 
+Version 1.57
+------------
+Improve support for multiple security contexts to the same server. We
+used to use the same "vcnumber" for all connections which could cause
+the server to treat subsequent connections, especially those that
+are authenticated as guest, as reconnections, invalidating the earlier
+user's smb session.  This fix allows cifs to mount multiple times to the
+same server with different userids without risking invalidating earlier
+established security contexts.  fsync now sends SMB Flush operation
+to better ensure that we wait for server to write all of the data to
+server disk (not just write it over the network).  Add new mount
+parameter to allow user to disable sending the (slow) SMB flush on
+fsync if desired (fsync still flushes all cached write data to the server).
+Posix file open support added (turned off after one attempt if server
+fails to support it properly, as with Samba server versions prior to 3.3.2)
+Fix "redzone overwritten" bug in cifs_put_tcon (CIFSTcon may allocate too
+little memory for the "nativeFileSystem" field returned by the server
+during mount).  Endian convert inode numbers if necessary (makes it easier
+to compare inode numbers on network files from big endian systems). 
+
+Version 1.56
+------------
+Add "forcemandatorylock" mount option to allow user to use mandatory
+rather than posix (advisory) byte range locks, even though server would
+support posix byte range locks.  Fix query of root inode when prefixpath
+specified and user does not have access to query information about the
+top of the share.  Fix problem in 2.6.28 resolving DFS paths to
+Samba servers (worked to Windows).  Fix rmdir so that pending search
+(readdir) requests do not get invalid results which include the now
+removed directory.  Fix oops in cifs_dfs_ref.c when prefixpath is not reachable
+when using DFS.  Add better file create support to servers which support
+the CIFS POSIX protocol extensions (this adds support for new flags
+on create, and improves semantics for write of locked ranges).
+
+Version 1.55
+------------
+Various fixes to make delete of open files behavior more predictable
+(when delete of an open file fails we mark the file as "delete-on-close"
+in a way that more servers accept, but only if we can first rename the
+file to a temporary name).  Add experimental support for more safely
+handling fcntl(F_SETLEASE).  Convert cifs to using blocking tcp
+sends, and also let tcp autotune the socket send and receive buffers.
+This reduces the number of EAGAIN errors returned by TCP/IP in
+high stress workloads (and the number of retries on socket writes
+when sending large SMBWriteX requests).  Fix case in which a portion of
+data can in some cases not get written to the file on the server before the
+file is closed.  Fix DFS parsing to properly handle path consumed field,
+and to handle certain codepage conversions better.  Fix mount and
+umount race that can cause oops in mount or umount or reconnect.
+
+Version 1.54
+------------
+Fix premature write failure on congested networks (we would give up
+on EAGAIN from the socket too quickly on large writes).
+Cifs_mkdir and cifs_create now respect the setgid bit on parent dir.
+Fix endian problems in acl (mode from/to cifs acl) on bigendian
+architectures.  Fix problems with preserving timestamps on copying open
+files (e.g. "cp -a") to Windows servers.  For mkdir and create honor setgid bit
+on parent directory when server supports Unix Extensions but not POSIX
+create. Update cifs.upcall version to handle new Kerberos sec flags
+(this requires update of cifs.upcall program from Samba).  Fix memory leak
+on dns_upcall (resolving DFS referralls).  Fix plain text password
+authentication (requires setting SecurityFlags to 0x30030 to enable
+lanman and plain text though).  Fix writes to be at correct offset when
+file is open with O_APPEND and file is on a directio (forcediretio) mount.
+Fix bug in rewinding readdir directory searches.  Add nodfs mount option.
+
+Version 1.53
+------------
+DFS support added (Microsoft Distributed File System client support needed
+for referrals which enable a hierarchical name space among servers).
+Disable temporary caching of mode bits to servers which do not support
+storing of mode (e.g. Windows servers, when client mounts without cifsacl
+mount option) and add new "dynperm" mount option to enable temporary caching
+of mode (enable old behavior).  Fix hang on mount caused when server crashes
+tcp session during negotiate protocol.
+
+Version 1.52
+------------
+Fix oops on second mount to server when null auth is used.
+Enable experimental Kerberos support.  Return writebehind errors on flush
+and sync so that events like out of disk space get reported properly on
+cached files. Fix setxattr failure to certain Samba versions. Fix mount
+of second share to disconnected server session (autoreconnect on this).
+Add ability to modify cifs acls for handling chmod (when mounted with
+cifsacl flag). Fix prefixpath path separator so we can handle mounts
+with prefixpaths longer than one directory (one path component) when
+mounted to Windows servers.  Fix slow file open when cifsacl
+enabled. Fix memory leak in FindNext when the SMB call returns -EBADF.
+
+
+Version 1.51
+------------
+Fix memory leak in statfs when mounted to very old servers (e.g.
+Windows 9x).  Add new feature "POSIX open" which allows servers
+which support the current POSIX Extensions to provide better semantics
+(e.g. delete for open files opened with posix open).  Take into
+account umask on posix mkdir not just older style mkdir.  Add
+ability to mount to IPC$ share (which allows CIFS named pipes to be
+opened, read and written as if they were files).  When 1st tree
+connect fails (e.g. due to signing negotiation failure) fix
+leak that causes cifsd not to stop and rmmod to fail to cleanup
+cifs_request_buffers pool. Fix problem with POSIX Open/Mkdir on
+bigendian architectures. Fix possible memory corruption when
+EAGAIN returned on kern_recvmsg. Return better error if server
+requires packet signing but client has disabled it. When mounted
+with cifsacl mount option - mode bits are approximated based
+on the contents of the ACL of the file or directory. When cifs
+mount helper is missing convert make sure that UNC name 
+has backslash (not forward slash) between ip address of server
+and the share name.
+
+Version 1.50
+------------
+Fix NTLMv2 signing. NFS server mounted over cifs works (if cifs mount is
+done with "serverino" mount option).  Add support for POSIX Unlink
+(helps with certain sharing violation cases when server such as
+Samba supports newer POSIX CIFS Protocol Extensions). Add "nounix"
+mount option to allow disabling the CIFS Unix Extensions for just
+that mount. Fix hang on spinlock in find_writable_file (race when
+reopening file after session crash).  Byte range unlock request to
+windows server could unlock more bytes (on server copy of file)
+than intended if start of unlock request is well before start of
+a previous byte range lock that we issued.
+
+Version 1.49
+------------
+IPv6 support.  Enable ipv6 addresses to be passed on mount (put the ipv6
+address after the "ip=" mount option, at least until mount.cifs is fixed to
+handle DNS host to ipv6 name translation).  Accept override of uid or gid
+on mount even when Unix Extensions are negotiated (it used to be ignored
+when Unix Extensions were ignored).  This allows users to override the
+default uid and gid for files when they are certain that the uids or
+gids on the server do not match those of the client.  Make "sec=none"
+mount override username (so that null user connection is attempted)
+to match what documentation said. Support for very large reads, over 127K,
+available to some newer servers (such as Samba 3.0.26 and later but
+note that it also requires setting CIFSMaxBufSize at module install
+time to a larger value which may hurt performance in some cases).
+Make sign option force signing (or fail if server does not support it).
+
+Version 1.48
+------------
+Fix mtime bouncing around from local idea of last write times to remote time.
+Fix hang (in i_size_read) when simultaneous size update of same remote file
+on smp system corrupts sequence number. Do not reread unnecessarily partial page
+(which we are about to overwrite anyway) when writing out file opened rw.
+When DOS attribute of file on non-Unix server's file changes on the server side
+from read-only back to read-write, reflect this change in default file mode
+(we had been leaving a file's mode read-only until the inode were reloaded).
+Allow setting of attribute back to ATTR_NORMAL (removing readonly dos attribute
+when archive dos attribute not set and we are changing mode back to writeable
+on server which does not support the Unix Extensions).  Remove read only dos
+attribute on chmod when adding any write permission (ie on any of
+user/group/other (not all of user/group/other ie  0222) when
+mounted to windows.  Add support for POSIX MkDir (slight performance
+enhancement and eliminates the network race between the mkdir and set 
+path info of the mode).
+
+
+Version 1.47
+------------
+Fix oops in list_del during mount caused by unaligned string.
+Fix file corruption which could occur on some large file
+copies caused by writepages page i/o completion bug.
+Seek to SEEK_END forces check for update of file size for non-cached
+files. Allow file size to be updated on remote extend of locally open,
+non-cached file.  Fix reconnect to newer Samba servers (or other servers
+which support the CIFS Unix/POSIX extensions) so that we again tell the
+server the Unix/POSIX cifs capabilities which we support (SetFSInfo).
+Add experimental support for new POSIX Open/Mkdir (which returns
+stat information on the open, and allows setting the mode).
+
+Version 1.46
+------------
+Support deep tree mounts.  Better support OS/2, Win9x (DOS) time stamps.
+Allow null user to be specified on mount ("username="). Do not return
+EINVAL on readdir when filldir fails due to overwritten blocksize
+(fixes FC problem).  Return error in rename 2nd attempt retry (ie report
+if rename by handle also fails, after rename by path fails, we were
+not reporting whether the retry worked or not). Fix NTLMv2 to
+work to Windows servers (mount with option "sec=ntlmv2").
+
+Version 1.45
+------------
+Do not time out lockw calls when using posix extensions. Do not
+time out requests if server still responding reasonably fast
+on requests on other threads.  Improve POSIX locking emulation,
+(lock cancel now works, and unlock of merged range works even
+to Windows servers now).  Fix oops on mount to lanman servers
+(win9x, os/2 etc.) when null password.  Do not send listxattr
+(SMB to query all EAs) if nouser_xattr specified.  Fix SE Linux
+problem (instantiate inodes/dentries in right order for readdir).
+
+Version 1.44
+------------
+Rewritten sessionsetup support, including support for legacy SMB
+session setup needed for OS/2 and older servers such as Windows 95 and 98.
+Fix oops on ls to OS/2 servers.  Add support for level 1 FindFirst
+so we can do search (ls etc.) to OS/2.  Do not send NTCreateX
+or recent levels of FindFirst unless server says it supports NT SMBs
+(instead use legacy equivalents from LANMAN dialect). Fix to allow
+NTLMv2 authentication support (now can use stronger password hashing
+on mount if corresponding /proc/fs/cifs/SecurityFlags is set (0x4004).
+Allow override of global cifs security flags on mount via "sec=" option(s).
+
+Version 1.43
+------------
+POSIX locking to servers which support CIFS POSIX Extensions
+(disabled by default controlled by proc/fs/cifs/Experimental).
+Handle conversion of long share names (especially Asian languages)
+to Unicode during mount. Fix memory leak in sess struct on reconnect.
+Fix rare oops after acpi suspend.  Fix O_TRUNC opens to overwrite on
+cifs open which helps rare case when setpathinfo fails or server does
+not support it. 
+
+Version 1.42
+------------
+Fix slow oplock break when mounted to different servers at the same time and
+the tids match and we try to find matching fid on wrong server. Fix read
+looping when signing required by server (2.6.16 kernel only). Fix readdir
+vs. rename race which could cause each to hang. Return . and .. even
+if server does not.  Allow searches to skip first three entries and
+begin at any location. Fix oops in find_writeable_file.
+
+Version 1.41
+------------
+Fix NTLMv2 security (can be enabled in /proc/fs/cifs) so customers can
+configure stronger authentication.  Fix sfu symlinks so they can
+be followed (not just recognized).  Fix wraparound of bcc on
+read responses when buffer size over 64K and also fix wrap of
+max smb buffer size when CIFSMaxBufSize over 64K.  Fix oops in
+cifs_user_read and cifs_readpages (when EAGAIN on send of smb
+on socket is returned over and over).  Add POSIX (advisory) byte range
+locking support (requires server with newest CIFS UNIX Extensions
+to the protocol implemented). Slow down negprot slightly in port 139
+RFC1001 case to give session_init time on buggy servers.
+
+Version 1.40
+------------
+Use fsuid (fsgid) more consistently instead of uid (gid). Improve performance
+of readpages by eliminating one extra memcpy. Allow update of file size
+from remote server even if file is open for write as long as mount is
+directio.  Recognize share mode security and send NTLM encrypted password
+on tree connect if share mode negotiated.
+
+Version 1.39
+------------
+Defer close of a file handle slightly if pending writes depend on that handle
+(this reduces the EBADF bad file handle errors that can be logged under heavy
+stress on writes). Modify cifs Kconfig options to expose CONFIG_CIFS_STATS2 
+Fix SFU style symlinks and mknod needed for servers which do not support the
+CIFS Unix Extensions.  Fix setfacl/getfacl on bigendian. Timeout negative
+dentries so files that the client sees as deleted but that later get created
+on the server will be recognized.  Add client side permission check on setattr.
+Timeout stuck requests better (where server has never responded or sent corrupt
+responses)
+
+Version 1.38
+------------
+Fix tcp socket retransmission timeouts (e.g. on ENOSPACE from the socket)
+to be smaller at first (but increasing) so large write performance performance
+over GigE is better.  Do not hang thread on illegal byte range lock response
+from Windows (Windows can send an RFC1001 size which does not match smb size) by
+allowing an SMBs TCP length to be up to a few bytes longer than it should be.
+wsize and rsize can now be larger than negotiated buffer size if server
+supports large readx/writex, even when directio mount flag not specified.
+Write size will in many cases now be 16K instead of 4K which greatly helps
+file copy performance on lightly loaded networks.  Fix oops in dnotify
+when experimental config flag enabled. Make cifsFYI more granular.
+
+Version 1.37
+------------
+Fix readdir caching when unlink removes file in current search buffer,
+and this is followed by a rewind search to just before the deleted entry.
+Do not attempt to set ctime unless atime and/or mtime change requested
+(most servers throw it away anyway). Fix length check of received smbs
+to be more accurate. Fix big endian problem with mapchars mount option,
+and with a field returned by statfs.
+
+Version 1.36
+------------
+Add support for mounting to older pre-CIFS servers such as Windows9x and ME.
+For these older servers, add option for passing netbios name of server in
+on mount (servernetbiosname).  Add suspend support for power management, to
+avoid cifsd thread preventing software suspend from working.
+Add mount option for disabling the default behavior of sending byte range lock
+requests to the server (necessary for certain applications which break with
+mandatory lock behavior such as Evolution), and also mount option for
+requesting case insensitive matching for path based requests (requesting
+case sensitive is the default).
+
+Version 1.35
+------------
+Add writepage performance improvements.  Fix path name conversions
+for long filenames on mounts which were done with "mapchars" mount option
+specified.  Ensure multiplex ids do not collide.  Fix case in which 
+rmmod can oops if done soon after last unmount.  Fix truncated
+search (readdir) output when resume filename was a long filename.
+Fix filename conversion when mapchars mount option was specified and
+filename was a long filename.
+
+Version 1.34
+------------
+Fix error mapping of the TOO_MANY_LINKS (hardlinks) case.
+Do not oops if root user kills cifs oplock kernel thread or
+kills the cifsd thread (NB: killing the cifs kernel threads is not
+recommended, unmount and rmmod cifs will kill them when they are
+no longer needed).  Fix readdir to ASCII servers (ie older servers
+which do not support Unicode) and also require asterisk.
+Fix out of memory case in which data could be written one page
+off in the page cache.
+
+Version 1.33
+------------
+Fix caching problem, in which readdir of directory containing a file
+which was cached could cause the file's time stamp to be updated
+without invalidating the readahead data (so we could get stale
+file data on the client for that file even as the server copy changed).
+Cleanup response processing so cifsd can not loop when abnormally
+terminated.
+
+
+Version 1.32
 ------------
 Fix oops in ls when Transact2 FindFirst (or FindNext) returns more than one
 transact response for an SMB request and search entry split across two frames.
+Add support for lsattr (getting ext2/ext3/reiserfs attr flags from the server)
+as new protocol extensions. Do not send Get/Set calls for POSIX ACLs
+unless server explicitly claims to support them in CIFS Unix extensions
+POSIX ACL capability bit. Fix packet signing when multiuser mounting with
+different users from the same client to the same server. Fix oops in
+cifs_close. Add mount option for remapping reserved characters in
+filenames (also allow recognizing files with created by SFU which have any
+of these seven reserved characters, except backslash, to be recognized).
+Fix invalid transact2 message (we were sometimes trying to interpret
+oplock breaks as SMB responses). Add ioctl for checking that the
+current uid matches the uid of the mounter (needed by umount.cifs).
+Reduce the number of large buffer allocations in cifs response processing
+(significantly reduces memory pressure under heavy stress with multiple
+processes accessing the same server at the same time).
+
+Version 1.31
+------------
 Fix updates of DOS attributes and time fields so that files on NT4 servers
 do not get marked delete on close. Display sizes of cifs buffer pools in
 cifs stats. Fix oops in unmount when cifsd thread being killed by 
@@ -57,8 +451,8 @@ improperly zeroed buffer in CIFS Unix extensions set times call.
 
 Version 1.25
 ------------
-Fix internationlization problem in cifs readdir with filenames that map to 
-longer UTF8 strings than the string on the wire was in Unicode.  Add workaround
+Fix internationalization problem in cifs readdir with filenames that map to 
+longer UTF-8 strings than the string on the wire was in Unicode.  Add workaround
 for readdir to netapp servers. Fix search rewind (seek into readdir to return 
 non-consecutive entries).  Do not do readdir when server negotiates 
 buffer size to small to fit filename. Add support for reading POSIX ACLs from
@@ -232,7 +626,7 @@ Fix caching problem when files opened by multiple clients in which
 page cache could contain stale data, and write through did
 not occur often enough while file was still open when read ahead
 (read oplock) not allowed.  Treat "sep=" when first mount option
-as an overrride of comma as the default separator between mount
+as an override of comma as the default separator between mount
 options. 
 
 Version 1.01
@@ -242,7 +636,7 @@ Allow passwords longer than 16 bytes. Allow null password string.
 Version 1.00
 ------------
 Gracefully clean up failed mounts when attempting to mount to servers such as
-Windows 98 that terminate tcp sessions during prototocol negotiation.  Handle
+Windows 98 that terminate tcp sessions during protocol negotiation.  Handle
 embedded commas in mount parsing of passwords.
 
 Version 0.99
@@ -251,7 +645,7 @@ Invalidate local inode cached pages on oplock break and when last file
 instance is closed so that the client does not continue using stale local
 copy rather than later modified server copy of file.  Do not reconnect
 when server drops the tcp session prematurely before negotiate
-protocol response.  Fix oops in roepen_file when dentry freed.  Allow
+protocol response.  Fix oops in reopen_file when dentry freed.  Allow
 the support for CIFS Unix Extensions to be disabled via proc interface.
 
 Version 0.98
@@ -593,7 +987,7 @@ versions of 2.4 kernel (now builds and works again on kernels at least as early 
 Version 0.41
 ------------
 Various minor fixes for Connectathon Posix "basic" file i/o test suite.  Directory caching fixed so hardlinked
-files now return the correct rumber of links on fstat as they are repeatedly linked and unlinked.
+files now return the correct number of links on fstat as they are repeatedly linked and unlinked.
 
 Version 0.40
 ------------
@@ -660,7 +1054,7 @@ session)
 and cleaned them up and made them more consistent with other cifs functions. 
 
 7) Server support for Unix extensions is now fully detected and FindFirst is implemented both ways 
-(with or without Unix exentions) but FindNext and QueryPathInfo with the Unix extensions are not completed,
+(with or without Unix extensions) but FindNext and QueryPathInfo with the Unix extensions are not completed,
 nor is the symlink support using the Unix extensions
 
 8) Started adding the readlink and follow_link code 

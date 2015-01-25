@@ -1,12 +1,16 @@
 #ifndef S390_CIO_IOASM_H
 #define S390_CIO_IOASM_H
 
+#include <asm/chpid.h>
+#include <asm/schid.h>
+#include "orb.h"
+#include "cio.h"
+
 /*
  * TPI info structure
  */
 struct tpi_info {
-	__u32 reserved1	 : 16;	 /* reserved 0x00000001 */
-	__u32 irq	 : 16;	 /* aka. subchannel number */
+	struct subchannel_id schid;
 	__u32 intparm;		 /* interruption parameter */
 	__u32 adapter_IO : 1;
 	__u32 reserved2	 : 1;
@@ -21,207 +25,142 @@ struct tpi_info {
  * Some S390 specific IO instructions as inline
  */
 
-extern __inline__ int stsch(int irq, volatile struct schib *addr)
+static inline int stsch_err(struct subchannel_id schid, struct schib *addr)
 {
-	int ccode;
+	register struct subchannel_id reg1 asm ("1") = schid;
+	int ccode = -EIO;
 
-	__asm__ __volatile__(
-		"   lr	  1,%1\n"
-		"   stsch 0(%2)\n"
-		"   ipm	  %0\n"
-		"   srl	  %0,28"
-		: "=d" (ccode)
-		: "d" (irq | 0x10000), "a" (addr)
-		: "cc", "1" );
-	return ccode;
-}
-
-extern __inline__ int msch(int irq, volatile struct schib *addr)
-{
-	int ccode;
-
-	__asm__ __volatile__(
-		"   lr	  1,%1\n"
-		"   msch  0(%2)\n"
-		"   ipm	  %0\n"
-		"   srl	  %0,28"
-		: "=d" (ccode)
-		: "d" (irq | 0x10000L), "a" (addr)
-		: "cc", "1" );
-	return ccode;
-}
-
-extern __inline__ int msch_err(int irq, volatile struct schib *addr)
-{
-	int ccode;
-
-	__asm__ __volatile__(
-		"    lhi  %0,%3\n"
-		"    lr	  1,%1\n"
-		"    msch 0(%2)\n"
-		"0:  ipm  %0\n"
-		"    srl  %0,28\n"
+	asm volatile(
+		"	stsch	0(%3)\n"
+		"0:	ipm	%0\n"
+		"	srl	%0,28\n"
 		"1:\n"
-#ifdef CONFIG_ARCH_S390X
-		".section __ex_table,\"a\"\n"
-		"   .align 8\n"
-		"   .quad 0b,1b\n"
-		".previous"
-#else
-		".section __ex_table,\"a\"\n"
-		"   .align 4\n"
-		"   .long 0b,1b\n"
-		".previous"
-#endif
-		: "=&d" (ccode)
-		: "d" (irq | 0x10000L), "a" (addr), "K" (-EIO)
-		: "cc", "1" );
+		EX_TABLE(0b,1b)
+		: "+d" (ccode), "=m" (*addr)
+		: "d" (reg1), "a" (addr)
+		: "cc");
 	return ccode;
 }
 
-extern __inline__ int tsch(int irq, volatile struct irb *addr)
+static inline int msch(struct subchannel_id schid, struct schib *addr)
 {
+	register struct subchannel_id reg1 asm ("1") = schid;
 	int ccode;
 
-	__asm__ __volatile__(
-		"   lr	  1,%1\n"
-		"   tsch  0(%2)\n"
-		"   ipm	  %0\n"
-		"   srl	  %0,28"
+	asm volatile(
+		"	msch	0(%2)\n"
+		"	ipm	%0\n"
+		"	srl	%0,28"
 		: "=d" (ccode)
-		: "d" (irq | 0x10000L), "a" (addr)
-		: "cc", "1" );
+		: "d" (reg1), "a" (addr), "m" (*addr)
+		: "cc");
 	return ccode;
 }
 
-extern __inline__ int tpi( volatile struct tpi_info *addr)
+static inline int msch_err(struct subchannel_id schid, struct schib *addr)
+{
+	register struct subchannel_id reg1 asm ("1") = schid;
+	int ccode = -EIO;
+
+	asm volatile(
+		"	msch	0(%2)\n"
+		"0:	ipm	%0\n"
+		"	srl	%0,28\n"
+		"1:\n"
+		EX_TABLE(0b,1b)
+		: "+d" (ccode)
+		: "d" (reg1), "a" (addr), "m" (*addr)
+		: "cc");
+	return ccode;
+}
+
+static inline int tsch(struct subchannel_id schid, struct irb *addr)
+{
+	register struct subchannel_id reg1 asm ("1") = schid;
+	int ccode;
+
+	asm volatile(
+		"	tsch	0(%3)\n"
+		"	ipm	%0\n"
+		"	srl	%0,28"
+		: "=d" (ccode), "=m" (*addr)
+		: "d" (reg1), "a" (addr)
+		: "cc");
+	return ccode;
+}
+
+static inline int ssch(struct subchannel_id schid, union orb *addr)
+{
+	register struct subchannel_id reg1 asm("1") = schid;
+	int ccode = -EIO;
+
+	asm volatile(
+		"	ssch	0(%2)\n"
+		"0:	ipm	%0\n"
+		"	srl	%0,28\n"
+		"1:\n"
+		EX_TABLE(0b, 1b)
+		: "+d" (ccode)
+		: "d" (reg1), "a" (addr), "m" (*addr)
+		: "cc", "memory");
+	return ccode;
+}
+
+static inline int csch(struct subchannel_id schid)
+{
+	register struct subchannel_id reg1 asm("1") = schid;
+	int ccode;
+
+	asm volatile(
+		"	csch\n"
+		"	ipm	%0\n"
+		"	srl	%0,28"
+		: "=d" (ccode)
+		: "d" (reg1)
+		: "cc");
+	return ccode;
+}
+
+static inline int tpi(struct tpi_info *addr)
 {
 	int ccode;
 
-	__asm__ __volatile__(
-		"   tpi	  0(%1)\n"
-		"   ipm	  %0\n"
-		"   srl	  %0,28"
-		: "=d" (ccode)
+	asm volatile(
+		"	tpi	0(%2)\n"
+		"	ipm	%0\n"
+		"	srl	%0,28"
+		: "=d" (ccode), "=m" (*addr)
 		: "a" (addr)
-		: "cc", "1" );
+		: "cc");
 	return ccode;
 }
 
-extern __inline__ int ssch(int irq, volatile struct orb *addr)
+static inline int chsc(void *chsc_area)
 {
-	int ccode;
-
-	__asm__ __volatile__(
-		"   lr	  1,%1\n"
-		"   ssch  0(%2)\n"
-		"   ipm	  %0\n"
-		"   srl	  %0,28"
-		: "=d" (ccode)
-		: "d" (irq | 0x10000L), "a" (addr)
-		: "cc", "1" );
-	return ccode;
-}
-
-extern __inline__ int rsch(int irq)
-{
-	int ccode;
-
-	__asm__ __volatile__(
-		"   lr	  1,%1\n"
-		"   rsch\n"
-		"   ipm	  %0\n"
-		"   srl	  %0,28"
-		: "=d" (ccode)
-		: "d" (irq | 0x10000L)
-		: "cc", "1" );
-	return ccode;
-}
-
-extern __inline__ int csch(int irq)
-{
-	int ccode;
-
-	__asm__ __volatile__(
-		"   lr	  1,%1\n"
-		"   csch\n"
-		"   ipm	  %0\n"
-		"   srl	  %0,28"
-		: "=d" (ccode)
-		: "d" (irq | 0x10000L)
-		: "cc", "1" );
-	return ccode;
-}
-
-extern __inline__ int hsch(int irq)
-{
-	int ccode;
-
-	__asm__ __volatile__(
-		"   lr	  1,%1\n"
-		"   hsch\n"
-		"   ipm	  %0\n"
-		"   srl	  %0,28"
-		: "=d" (ccode)
-		: "d" (irq | 0x10000L)
-		: "cc", "1" );
-	return ccode;
-}
-
-extern __inline__ int xsch(int irq)
-{
-	int ccode;
-
-	__asm__ __volatile__(
-		"   lr	  1,%1\n"
-		"   .insn rre,0xb2760000,%1,0\n"
-		"   ipm	  %0\n"
-		"   srl	  %0,28"
-		: "=d" (ccode)
-		: "d" (irq | 0x10000L)
-		: "cc", "1" );
-	return ccode;
-}
-
-extern __inline__ int chsc(void *chsc_area)
-{
+	typedef struct { char _[4096]; } addr_type;
 	int cc;
 
-	__asm__ __volatile__ (
-		".insn	rre,0xb25f0000,%1,0	\n\t"
-		"ipm	%0	\n\t"
-		"srl	%0,28	\n\t"
-		: "=d" (cc)
-		: "d" (chsc_area)
-		: "cc" );
-
+	asm volatile(
+		"	.insn	rre,0xb25f0000,%2,0\n"
+		"	ipm	%0\n"
+		"	srl	%0,28\n"
+		: "=d" (cc), "=m" (*(addr_type *) chsc_area)
+		: "d" (chsc_area), "m" (*(addr_type *) chsc_area)
+		: "cc");
 	return cc;
 }
 
-extern __inline__ int iac( void)
+static inline int rchp(struct chp_id chpid)
 {
+	register struct chp_id reg1 asm ("1") = chpid;
 	int ccode;
 
-	__asm__ __volatile__(
-		"   iac	  1\n"
-		"   ipm	  %0\n"
-		"   srl	  %0,28"
-		: "=d" (ccode) : : "cc", "1" );
-	return ccode;
-}
-
-extern __inline__ int rchp(int chpid)
-{
-	int ccode;
-
-	__asm__ __volatile__(
-		"   lr	  1,%1\n"
-		"   rchp\n"
-		"   ipm	  %0\n"
-		"   srl	  %0,28"
-		: "=d" (ccode)
-		: "d" (chpid)
-		: "cc", "1" );
+	asm volatile(
+		"	lr	1,%1\n"
+		"	rchp\n"
+		"	ipm	%0\n"
+		"	srl	%0,28"
+		: "=d" (ccode) : "d" (reg1) : "cc");
 	return ccode;
 }
 

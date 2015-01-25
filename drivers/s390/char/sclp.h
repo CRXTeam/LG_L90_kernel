@@ -1,10 +1,8 @@
 /*
- *  drivers/s390/char/sclp.h
+ * Copyright IBM Corp. 1999, 2009
  *
- *  S390 version
- *    Copyright (C) 1999 IBM Deutschland Entwicklung GmbH, IBM Corporation
- *    Author(s): Martin Peschke <mpeschke@de.ibm.com>
- *		 Martin Schwidefsky <schwidefsky@de.ibm.com>
+ * Author(s): Martin Peschke <mpeschke@de.ibm.com>
+ *	      Martin Schwidefsky <schwidefsky@de.ibm.com>
  */
 
 #ifndef __SCLP_H__
@@ -12,57 +10,74 @@
 
 #include <linux/types.h>
 #include <linux/list.h>
-
+#include <asm/sclp.h>
 #include <asm/ebcdic.h>
 
 /* maximum number of pages concerning our own memory management */
 #define MAX_KMEM_PAGES (sizeof(unsigned long) << 3)
-#define MAX_CONSOLE_PAGES	4
+#define MAX_CONSOLE_PAGES	6
 
-#define EvTyp_OpCmd		0x01
-#define EvTyp_Msg		0x02
-#define EvTyp_StateChange	0x08
-#define EvTyp_PMsgCmd		0x09
-#define EvTyp_CntlProgOpCmd	0x20
-#define EvTyp_CntlProgIdent	0x0B
-#define EvTyp_SigQuiesce	0x1D
-#define EvTyp_VT220Msg		0x1A
+#define EVTYP_OPCMD		0x01
+#define EVTYP_MSG		0x02
+#define EVTYP_STATECHANGE	0x08
+#define EVTYP_PMSGCMD		0x09
+#define EVTYP_CNTLPROGOPCMD	0x20
+#define EVTYP_CNTLPROGIDENT	0x0B
+#define EVTYP_SIGQUIESCE	0x1D
+#define EVTYP_VT220MSG		0x1A
+#define EVTYP_CONFMGMDATA	0x04
+#define EVTYP_SDIAS		0x1C
+#define EVTYP_ASYNC		0x0A
+#define EVTYP_OCF		0x1E
 
-#define EvTyp_OpCmd_Mask	0x80000000
-#define EvTyp_Msg_Mask		0x40000000
-#define EvTyp_StateChange_Mask	0x01000000
-#define EvTyp_PMsgCmd_Mask	0x00800000
-#define EvTyp_CtlProgOpCmd_Mask	0x00000001
-#define EvTyp_CtlProgIdent_Mask	0x00200000
-#define EvTyp_SigQuiesce_Mask	0x00000008
-#define EvTyp_VT220Msg_Mask	0x00000040
+#define EVTYP_OPCMD_MASK	0x80000000
+#define EVTYP_MSG_MASK		0x40000000
+#define EVTYP_STATECHANGE_MASK	0x01000000
+#define EVTYP_PMSGCMD_MASK	0x00800000
+#define EVTYP_CTLPROGOPCMD_MASK	0x00000001
+#define EVTYP_CTLPROGIDENT_MASK	0x00200000
+#define EVTYP_SIGQUIESCE_MASK	0x00000008
+#define EVTYP_VT220MSG_MASK	0x00000040
+#define EVTYP_CONFMGMDATA_MASK	0x10000000
+#define EVTYP_SDIAS_MASK	0x00000010
+#define EVTYP_ASYNC_MASK	0x00400000
+#define EVTYP_OCF_MASK		0x00000004
 
-#define GnrlMsgFlgs_DOM		0x8000
-#define GnrlMsgFlgs_SndAlrm	0x4000
-#define GnrlMsgFlgs_HoldMsg	0x2000
+#define GNRLMSGFLGS_DOM		0x8000
+#define GNRLMSGFLGS_SNDALRM	0x4000
+#define GNRLMSGFLGS_HOLDMSG	0x2000
 
-#define LnTpFlgs_CntlText	0x8000
-#define LnTpFlgs_LabelText	0x4000
-#define LnTpFlgs_DataText	0x2000
-#define LnTpFlgs_EndText	0x1000
-#define LnTpFlgs_PromptText	0x0800
+#define LNTPFLGS_CNTLTEXT	0x8000
+#define LNTPFLGS_LABELTEXT	0x4000
+#define LNTPFLGS_DATATEXT	0x2000
+#define LNTPFLGS_ENDTEXT	0x1000
+#define LNTPFLGS_PROMPTTEXT	0x0800
 
 typedef unsigned int sclp_cmdw_t;
 
-#define SCLP_CMDW_READDATA	0x00770005
-#define SCLP_CMDW_WRITEDATA	0x00760005
-#define SCLP_CMDW_WRITEMASK	0x00780005
+#define SCLP_CMDW_READ_EVENT_DATA	0x00770005
+#define SCLP_CMDW_WRITE_EVENT_DATA	0x00760005
+#define SCLP_CMDW_WRITE_EVENT_MASK	0x00780005
 
 #define GDS_ID_MDSMU		0x1310
-#define GDS_ID_MDSRouteInfo	0x1311
-#define GDS_ID_AgUnWrkCorr	0x1549
-#define GDS_ID_SNACondReport	0x1532
+#define GDS_ID_MDSROUTEINFO	0x1311
+#define GDS_ID_AGUNWRKCORR	0x1549
+#define GDS_ID_SNACONDREPORT	0x1532
 #define GDS_ID_CPMSU		0x1212
-#define GDS_ID_RoutTargInstr	0x154D
-#define GDS_ID_OpReq		0x8070
-#define GDS_ID_TextCmd		0x1320
+#define GDS_ID_ROUTTARGINSTR	0x154D
+#define GDS_ID_OPREQ		0x8070
+#define GDS_ID_TEXTCMD		0x1320
 
-#define GDS_KEY_SelfDefTextMsg	0x31
+#define GDS_KEY_SELFDEFTEXTMSG	0x31
+
+enum sclp_pm_event {
+	SCLP_PM_EVENT_FREEZE,
+	SCLP_PM_EVENT_THAW,
+	SCLP_PM_EVENT_RESTORE,
+};
+
+#define SCLP_PANIC_PRIO		1
+#define SCLP_PANIC_PRIO_CLIENT	0
 
 typedef u32 sccb_mask_t;	/* ATTENTION: assumes 32bit mask !!! */
 
@@ -72,6 +87,13 @@ struct sccb_header {
 	u8	control_mask[3];
 	u16	response_code;
 } __attribute__((packed));
+
+extern u64 sclp_facilities;
+#define SCLP_HAS_CHP_INFO	(sclp_facilities & 0x8000000000000000ULL)
+#define SCLP_HAS_CHP_RECONFIG	(sclp_facilities & 0x2000000000000000ULL)
+#define SCLP_HAS_CPU_INFO	(sclp_facilities & 0x0800000000000000ULL)
+#define SCLP_HAS_CPU_RECONFIG	(sclp_facilities & 0x0400000000000000ULL)
+
 
 struct gds_subvector {
 	u8	length;
@@ -111,16 +133,22 @@ struct sclp_req {
 /* of some routines it wants to be called from the low level driver */
 struct sclp_register {
 	struct list_head list;
-	/* event masks this user is registered for */
+	/* User wants to receive: */
 	sccb_mask_t receive_mask;
+	/* User wants to send: */
 	sccb_mask_t send_mask;
-	/* actually present events */
+	/* H/W can receive: */
 	sccb_mask_t sclp_receive_mask;
+	/* H/W can send: */
 	sccb_mask_t sclp_send_mask;
 	/* called if event type availability changes */
 	void (*state_change_fn)(struct sclp_register *);
 	/* called for events in cp_receive_mask/sclp_receive_mask */
 	void (*receiver_fn)(struct evbuf_header *);
+	/* called for power management events */
+	void (*pm_event_fn)(struct sclp_register *, enum sclp_pm_event);
+	/* pm event posted flag */
+	int pm_event_posted;
 };
 
 /* externals from sclp.c */
@@ -131,6 +159,10 @@ void sclp_unregister(struct sclp_register *reg);
 int sclp_remove_processed(struct sccb_header *sccb);
 int sclp_deactivate(void);
 int sclp_reactivate(void);
+int sclp_service_call(sclp_cmdw_t command, void *sccb);
+
+int sclp_sdias_init(void);
+void sclp_sdias_exit(void);
 
 /* useful inlines */
 
@@ -154,6 +186,28 @@ static inline void
 sclp_ascebc_str(unsigned char *str, int nr)
 {
 	(MACHINE_IS_VM) ? ASCEBC(str, nr) : ASCEBC_500(str, nr);
+}
+
+static inline struct gds_vector *
+sclp_find_gds_vector(void *start, void *end, u16 id)
+{
+	struct gds_vector *v;
+
+	for (v = start; (void *) v < end; v = (void *) v + v->length)
+		if (v->gds_id == id)
+			return v;
+	return NULL;
+}
+
+static inline struct gds_subvector *
+sclp_find_gds_subvector(void *start, void *end, u8 key)
+{
+	struct gds_subvector *sv;
+
+	for (sv = start; (void *) sv < end; sv = (void *) sv + sv->length)
+		if (sv->key == key)
+			return sv;
+	return NULL;
 }
 
 #endif	 /* __SCLP_H__ */

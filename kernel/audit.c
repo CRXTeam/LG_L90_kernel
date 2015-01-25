@@ -1,8 +1,8 @@
-/* audit.c -- Auditing support -*- linux-c -*-
+/* audit.c -- Auditing support
  * Gateway between the kernel (e.g., selinux) and the user-space audit daemon.
  * System-call specific features have moved to auditsc.c
  *
- * Copyright 2003-2004 Red Hat Inc., Durham, North Carolina.
+ * Copyright 2003-2007 Red Hat Inc., Durham, North Carolina.
  * All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify
@@ -21,7 +21,7 @@
  *
  * Written by Rickard E. (Rik) Faith <faith@redhat.com>
  *
- * Goals: 1) Integrate fully with SELinux.
+ * Goals: 1) Integrate fully with Security Modules.
  *	  2) Minimal run-time overhead:
  *	     a) Minimal when syscall auditing is disabled (audit_enable=0).
  *	     b) Small when syscall auditing is enabled and no audit record
@@ -38,27 +38,46 @@
  *	  6) Support low-overhead kernel-based filtering to minimize the
  *	     information that must be passed to user-space.
  *
- * Example user-space utilities: http://people.redhat.com/faith/audit/
+ * Example user-space utilities: http://people.redhat.com/sgrubb/audit/
  */
 
 #include <linux/init.h>
-#include <asm/atomic.h>
 #include <asm/types.h>
+#include <linux/atomic.h>
 #include <linux/mm.h>
-#include <linux/module.h>
+#include <linux/export.h>
+#include <linux/slab.h>
+#include <linux/err.h>
+#include <linux/kthread.h>
 
 #include <linux/audit.h>
 
 #include <net/sock.h>
+#include <net/netlink.h>
 #include <linux/skbuff.h>
+#ifdef CONFIG_SECURITY
+#include <linux/security.h>
+#endif
 #include <linux/netlink.h>
+#include <linux/freezer.h>
+#include <linux/tty.h>
 
-/* No auditing will take place until audit_initialized != 0.
+#include "audit.h"
+
+/* No auditing will take place until audit_initialized == AUDIT_INITIALIZED.
  * (Initialization happens after skb_init is called.) */
+#define AUDIT_DISABLED		-1
+#define AUDIT_UNINITIALIZED	0
+#define AUDIT_INITIALIZED	1
 static int	audit_initialized;
 
-/* No syscall auditing will take place unless audit_enabled != 0. */
+#define AUDIT_OFF	0
+#define AUDIT_ON	1
+#define AUDIT_LOCKED	2
 int		audit_enabled;
+int		audit_ever_enabled;
+
+EXPORT_SYMBOL_GPL(audit_enabled);
 
 /* Default state when kernel boots without any parameters. */
 static int	audit_default;
@@ -66,18 +85,28 @@ static int	audit_default;
 /* If auditing cannot proceed, audit_failure selects what happens. */
 static int	audit_failure = AUDIT_FAIL_PRINTK;
 
-/* If audit records are to be written to the netlink socket, audit_pid
- * contains the (non-zero) pid. */
-static int	audit_pid;
+/*
+ * If audit records are to be written to the netlink socket, audit_pid
+ * contains the pid of the auditd process and audit_nlk_pid contains
+ * the pid to use to send netlink messages to that process.
+ */
+int		audit_pid;
+static int	audit_nlk_pid;
 
-/* If audit_limit is non-zero, limit the rate of sending audit records
+/* If audit_rate_limit is non-zero, limit the rate of sending audit records
  * to that number per second.  This prevents DoS attacks, but results in
  * audit records being dropped. */
 static int	audit_rate_limit;
 
 /* Number of outstanding audit_buffers allowed. */
 static int	audit_backlog_limit = 64;
-static atomic_t	audit_backlog	    = ATOMIC_INIT(0);
+static int	audit_backlog_wait_time = 60 * HZ;
+static int	audit_backlog_wait_overflow = 0;
+
+/* The identity of the user shutting down the audit system. */
+uid_t		audit_sig_uid = -1;
+pid_t		audit_sig_pid = -1;
+u32		audit_sig_sid = 0;
 
 /* Records can be lost in several ways:
    0) [suppressed in audit_alloc]
@@ -91,30 +120,25 @@ static atomic_t    audit_lost = ATOMIC_INIT(0);
 /* The netlink socket. */
 static struct sock *audit_sock;
 
-/* There are two lists of audit buffers.  The txlist contains audit
- * buffers that cannot be sent immediately to the netlink device because
- * we are in an irq context (these are sent later in a tasklet).
- *
- * The second list is a list of pre-allocated audit buffers (if more
+/* Hash for inode-based rules */
+struct list_head audit_inode_hash[AUDIT_INODE_BUCKETS];
+
+/* The audit_freelist is a list of pre-allocated audit buffers (if more
  * than AUDIT_MAXFREE are in use, the audit buffer is freed instead of
  * being placed on the freelist). */
-static DEFINE_SPINLOCK(audit_txlist_lock);
 static DEFINE_SPINLOCK(audit_freelist_lock);
-static int	   audit_freelist_count = 0;
-static LIST_HEAD(audit_txlist);
+static int	   audit_freelist_count;
 static LIST_HEAD(audit_freelist);
 
-/* There are three lists of rules -- one to search at task creation
- * time, one to search at syscall entry time, and another to search at
- * syscall exit time. */
-static LIST_HEAD(audit_tsklist);
-static LIST_HEAD(audit_entlist);
-static LIST_HEAD(audit_extlist);
+static struct sk_buff_head audit_skb_queue;
+/* queue of skbs to send to auditd when/if it comes back */
+static struct sk_buff_head audit_skb_hold_queue;
+static struct task_struct *kauditd_task;
+static DECLARE_WAIT_QUEUE_HEAD(kauditd_wait);
+static DECLARE_WAIT_QUEUE_HEAD(audit_backlog_wait);
 
-/* The netlink socket is only to be read by 1 CPU, which lets us assume
- * that list additions and deletions never happen simultaneiously in
- * auditsc.c */
-static DECLARE_MUTEX(audit_netlink_sem);
+/* Serialize requests from userspace. */
+DEFINE_MUTEX(audit_cmd_mutex);
 
 /* AUDIT_BUFSIZ is the size of the temporary buffer used for formatting
  * audit records.  Since printk uses a 1024 byte buffer, this buffer
@@ -132,43 +156,38 @@ static DECLARE_MUTEX(audit_netlink_sem);
  * use simultaneously. */
 struct audit_buffer {
 	struct list_head     list;
-	struct sk_buff_head  sklist;	/* formatted skbs ready to send */
+	struct sk_buff       *skb;	/* formatted skb ready to send */
 	struct audit_context *ctx;	/* NULL or associated context */
-	int		     len;	/* used area of tmp */
-	char		     tmp[AUDIT_BUFSIZ];
-
-				/* Pointer to header and contents */
-	struct nlmsghdr      *nlh;
-	int		     total;
-	int		     type;
-	int		     pid;
-	int		     count; /* Times requeued */
+	gfp_t		     gfp_mask;
 };
 
-void audit_set_type(struct audit_buffer *ab, int type)
+struct audit_reply {
+	int pid;
+	struct sk_buff *skb;
+};
+
+static void audit_set_pid(struct audit_buffer *ab, pid_t pid)
 {
-	ab->type = type;
+	if (ab) {
+		struct nlmsghdr *nlh = nlmsg_hdr(ab->skb);
+		nlh->nlmsg_pid = pid;
+	}
 }
 
-struct audit_entry {
-	struct list_head  list;
-	struct audit_rule rule;
-};
-
-static void audit_log_end_irq(struct audit_buffer *ab);
-static void audit_log_end_fast(struct audit_buffer *ab);
-
-static void audit_panic(const char *message)
+void audit_panic(const char *message)
 {
 	switch (audit_failure)
 	{
 	case AUDIT_FAIL_SILENT:
 		break;
 	case AUDIT_FAIL_PRINTK:
-		printk(KERN_ERR "audit: %s\n", message);
+		if (printk_ratelimit())
+			printk(KERN_ERR "audit: %s\n", message);
 		break;
 	case AUDIT_FAIL_PANIC:
-		panic("audit: %s\n", message);
+		/* test audit_pid since printk is always losey, why bother? */
+		if (audit_pid)
+			panic("audit: %s\n", message);
 		break;
 	}
 }
@@ -202,8 +221,14 @@ static inline int audit_rate_check(void)
 	return retval;
 }
 
-/* Emit at least 1 message per second, even if audit_rate_check is
- * throttling. */
+/**
+ * audit_log_lost - conditionally log lost audit message event
+ * @message: the message stating reason for lost audit message
+ *
+ * Emit at least 1 message per second, even if audit_rate_check is
+ * throttling.
+ * Always increment the lost messages counter.
+*/
 void audit_log_lost(const char *message)
 {
 	static unsigned long	last_msg = 0;
@@ -227,106 +252,377 @@ void audit_log_lost(const char *message)
 	}
 
 	if (print) {
-		printk(KERN_WARNING
-		       "audit: audit_lost=%d audit_backlog=%d"
-		       " audit_rate_limit=%d audit_backlog_limit=%d\n",
-		       atomic_read(&audit_lost),
-		       atomic_read(&audit_backlog),
-		       audit_rate_limit,
-		       audit_backlog_limit);
+		if (printk_ratelimit())
+			printk(KERN_WARNING
+				"audit: audit_lost=%d audit_rate_limit=%d "
+				"audit_backlog_limit=%d\n",
+				atomic_read(&audit_lost),
+				audit_rate_limit,
+				audit_backlog_limit);
 		audit_panic(message);
 	}
-
 }
 
-static int audit_set_rate_limit(int limit)
+static int audit_log_config_change(char *function_name, int new, int old,
+				   uid_t loginuid, u32 sessionid, u32 sid,
+				   int allow_changes)
 {
-	int old		 = audit_rate_limit;
-	audit_rate_limit = limit;
-	audit_log(current->audit_context, "audit_rate_limit=%d old=%d",
-		  audit_rate_limit, old);
-	return old;
+	struct audit_buffer *ab;
+	int rc = 0;
+
+	ab = audit_log_start(NULL, GFP_KERNEL, AUDIT_CONFIG_CHANGE);
+	audit_log_format(ab, "%s=%d old=%d auid=%u ses=%u", function_name, new,
+			 old, loginuid, sessionid);
+	if (sid) {
+		char *ctx = NULL;
+		u32 len;
+
+		rc = security_secid_to_secctx(sid, &ctx, &len);
+		if (rc) {
+			audit_log_format(ab, " sid=%u", sid);
+			allow_changes = 0; /* Something weird, deny request */
+		} else {
+			audit_log_format(ab, " subj=%s", ctx);
+			security_release_secctx(ctx, len);
+		}
+	}
+	audit_log_format(ab, " res=%d", allow_changes);
+	audit_log_end(ab);
+	return rc;
 }
 
-static int audit_set_backlog_limit(int limit)
+static int audit_do_config_change(char *function_name, int *to_change,
+				  int new, uid_t loginuid, u32 sessionid,
+				  u32 sid)
 {
-	int old		 = audit_backlog_limit;
-	audit_backlog_limit = limit;
-	audit_log(current->audit_context, "audit_backlog_limit=%d old=%d",
-		  audit_backlog_limit, old);
-	return old;
+	int allow_changes, rc = 0, old = *to_change;
+
+	/* check if we are locked */
+	if (audit_enabled == AUDIT_LOCKED)
+		allow_changes = 0;
+	else
+		allow_changes = 1;
+
+	if (audit_enabled != AUDIT_OFF) {
+		rc = audit_log_config_change(function_name, new, old, loginuid,
+					     sessionid, sid, allow_changes);
+		if (rc)
+			allow_changes = 0;
+	}
+
+	/* If we are allowed, make the change */
+	if (allow_changes == 1)
+		*to_change = new;
+	/* Not allowed, update reason */
+	else if (rc == 0)
+		rc = -EPERM;
+	return rc;
 }
 
-static int audit_set_enabled(int state)
+static int audit_set_rate_limit(int limit, uid_t loginuid, u32 sessionid,
+				u32 sid)
 {
-	int old		 = audit_enabled;
-	if (state != 0 && state != 1)
+	return audit_do_config_change("audit_rate_limit", &audit_rate_limit,
+				      limit, loginuid, sessionid, sid);
+}
+
+static int audit_set_backlog_limit(int limit, uid_t loginuid, u32 sessionid,
+				   u32 sid)
+{
+	return audit_do_config_change("audit_backlog_limit", &audit_backlog_limit,
+				      limit, loginuid, sessionid, sid);
+}
+
+static int audit_set_enabled(int state, uid_t loginuid, u32 sessionid, u32 sid)
+{
+	int rc;
+	if (state < AUDIT_OFF || state > AUDIT_LOCKED)
 		return -EINVAL;
-	audit_enabled = state;
-	audit_log(current->audit_context, "audit_enabled=%d old=%d",
-		  audit_enabled, old);
-	return old;
+
+	rc =  audit_do_config_change("audit_enabled", &audit_enabled, state,
+				     loginuid, sessionid, sid);
+
+	if (!rc)
+		audit_ever_enabled |= !!state;
+
+	return rc;
 }
 
-static int audit_set_failure(int state)
+static int audit_set_failure(int state, uid_t loginuid, u32 sessionid, u32 sid)
 {
-	int old		 = audit_failure;
 	if (state != AUDIT_FAIL_SILENT
 	    && state != AUDIT_FAIL_PRINTK
 	    && state != AUDIT_FAIL_PANIC)
 		return -EINVAL;
-	audit_failure = state;
-	audit_log(current->audit_context, "audit_failure=%d old=%d",
-		  audit_failure, old);
-	return old;
+
+	return audit_do_config_change("audit_failure", &audit_failure, state,
+				      loginuid, sessionid, sid);
 }
 
-#ifdef CONFIG_NET
-void audit_send_reply(int pid, int seq, int type, int done, int multi,
-		      void *payload, int size)
+/*
+ * Queue skbs to be sent to auditd when/if it comes back.  These skbs should
+ * already have been sent via prink/syslog and so if these messages are dropped
+ * it is not a huge concern since we already passed the audit_log_lost()
+ * notification and stuff.  This is just nice to get audit messages during
+ * boot before auditd is running or messages generated while auditd is stopped.
+ * This only holds messages is audit_default is set, aka booting with audit=1
+ * or building your kernel that way.
+ */
+static void audit_hold_skb(struct sk_buff *skb)
+{
+	if (audit_default &&
+	    skb_queue_len(&audit_skb_hold_queue) < audit_backlog_limit)
+		skb_queue_tail(&audit_skb_hold_queue, skb);
+	else
+		kfree_skb(skb);
+}
+
+/*
+ * For one reason or another this nlh isn't getting delivered to the userspace
+ * audit daemon, just send it to printk.
+ */
+static void audit_printk_skb(struct sk_buff *skb)
+{
+	struct nlmsghdr *nlh = nlmsg_hdr(skb);
+	char *data = NLMSG_DATA(nlh);
+
+	if (nlh->nlmsg_type != AUDIT_EOE) {
+		if (printk_ratelimit())
+			printk(KERN_NOTICE "type=%d %s\n", nlh->nlmsg_type, data);
+		else
+			audit_log_lost("printk limit exceeded\n");
+	}
+
+	audit_hold_skb(skb);
+}
+
+//                   
+static void audit_printk_skb_without_drop(struct sk_buff *skb)
+{
+	struct nlmsghdr *nlh = nlmsg_hdr(skb);
+	char *data = NLMSG_DATA(nlh);
+	if (nlh->nlmsg_type != AUDIT_EOE) {
+		if (printk_ratelimit())
+			printk(KERN_NOTICE "type=%d %s\n", nlh->nlmsg_type, data);
+		else
+			audit_log_lost("printk limit exceeded\n");
+	}
+}
+
+static void kauditd_send_skb(struct sk_buff *skb)
+{
+	int err;
+	/* take a reference in case we can't send it and we want to hold it */
+	skb_get(skb);
+	err = netlink_unicast(audit_sock, skb, audit_nlk_pid, 0);
+	if (err < 0) {
+		BUG_ON(err != -ECONNREFUSED); /* Shouldn't happen */
+		printk(KERN_ERR "audit: *NO* daemon at audit_pid=%d\n", audit_pid);
+		audit_log_lost("auditd disappeared\n");
+		audit_pid = 0;
+		/* we might get lucky and get this in the next auditd */
+		audit_hold_skb(skb);
+	} else{
+		audit_printk_skb_without_drop(skb); //                   
+		/* drop the extra reference if sent ok */
+		consume_skb(skb);
+	}
+}
+
+static int kauditd_thread(void *dummy)
+{
+	struct sk_buff *skb;
+
+	set_freezable();
+	while (!kthread_should_stop()) {
+		/*
+		 * if auditd just started drain the queue of messages already
+		 * sent to syslog/printk.  remember loss here is ok.  we already
+		 * called audit_log_lost() if it didn't go out normally.  so the
+		 * race between the skb_dequeue and the next check for audit_pid
+		 * doesn't matter.
+		 *
+		 * if you ever find kauditd to be too slow we can get a perf win
+		 * by doing our own locking and keeping better track if there
+		 * are messages in this queue.  I don't see the need now, but
+		 * in 5 years when I want to play with this again I'll see this
+		 * note and still have no friggin idea what i'm thinking today.
+		 */
+		if (audit_default && audit_pid) {
+			skb = skb_dequeue(&audit_skb_hold_queue);
+			if (unlikely(skb)) {
+				while (skb && audit_pid) {
+					kauditd_send_skb(skb);
+					skb = skb_dequeue(&audit_skb_hold_queue);
+				}
+			}
+		}
+
+		skb = skb_dequeue(&audit_skb_queue);
+		wake_up(&audit_backlog_wait);
+		if (skb) {
+			if (audit_pid)
+				kauditd_send_skb(skb);
+			else
+				audit_printk_skb(skb);
+		} else {
+			DECLARE_WAITQUEUE(wait, current);
+			set_current_state(TASK_INTERRUPTIBLE);
+			add_wait_queue(&kauditd_wait, &wait);
+
+			if (!skb_queue_len(&audit_skb_queue)) {
+				try_to_freeze();
+				schedule();
+			}
+
+			__set_current_state(TASK_RUNNING);
+			remove_wait_queue(&kauditd_wait, &wait);
+		}
+	}
+	return 0;
+}
+
+static int audit_prepare_user_tty(pid_t pid, uid_t loginuid, u32 sessionid)
+{
+	struct task_struct *tsk;
+	int err;
+
+	rcu_read_lock();
+	tsk = find_task_by_vpid(pid);
+	if (!tsk) {
+		rcu_read_unlock();
+		return -ESRCH;
+	}
+	get_task_struct(tsk);
+	rcu_read_unlock();
+	err = tty_audit_push_task(tsk, loginuid, sessionid);
+	put_task_struct(tsk);
+	return err;
+}
+
+int audit_send_list(void *_dest)
+{
+	struct audit_netlink_list *dest = _dest;
+	int pid = dest->pid;
+	struct sk_buff *skb;
+
+	/* wait for parent to finish and send an ACK */
+	mutex_lock(&audit_cmd_mutex);
+	mutex_unlock(&audit_cmd_mutex);
+
+	while ((skb = __skb_dequeue(&dest->q)) != NULL)
+		netlink_unicast(audit_sock, skb, pid, 0);
+
+	kfree(dest);
+
+	return 0;
+}
+
+struct sk_buff *audit_make_reply(int pid, int seq, int type, int done,
+				 int multi, const void *payload, int size)
 {
 	struct sk_buff	*skb;
 	struct nlmsghdr	*nlh;
-	int		len = NLMSG_SPACE(size);
 	void		*data;
 	int		flags = multi ? NLM_F_MULTI : 0;
 	int		t     = done  ? NLMSG_DONE  : type;
 
-	skb = alloc_skb(len, GFP_KERNEL);
+	skb = nlmsg_new(size, GFP_KERNEL);
 	if (!skb)
-		goto nlmsg_failure;
+		return NULL;
 
-	nlh		 = NLMSG_PUT(skb, pid, seq, t, len - sizeof(*nlh));
-	nlh->nlmsg_flags = flags;
-	data		 = NLMSG_DATA(nlh);
+	nlh	= NLMSG_NEW(skb, pid, seq, t, size, flags);
+	data	= NLMSG_DATA(nlh);
 	memcpy(data, payload, size);
-	netlink_unicast(audit_sock, skb, pid, MSG_DONTWAIT);
-	return;
+	return skb;
 
-nlmsg_failure:			/* Used by NLMSG_PUT */
+nlmsg_failure:			/* Used by NLMSG_NEW */
 	if (skb)
 		kfree_skb(skb);
+	return NULL;
+}
+
+static int audit_send_reply_thread(void *arg)
+{
+	struct audit_reply *reply = (struct audit_reply *)arg;
+
+	mutex_lock(&audit_cmd_mutex);
+	mutex_unlock(&audit_cmd_mutex);
+
+	/* Ignore failure. It'll only happen if the sender goes away,
+	   because our timeout is set to infinite. */
+	netlink_unicast(audit_sock, reply->skb, reply->pid, 0);
+	kfree(reply);
+	return 0;
+}
+/**
+ * audit_send_reply - send an audit reply message via netlink
+ * @pid: process id to send reply to
+ * @seq: sequence number
+ * @type: audit message type
+ * @done: done (last) flag
+ * @multi: multi-part message flag
+ * @payload: payload data
+ * @size: payload size
+ *
+ * Allocates an skb, builds the netlink message, and sends it to the pid.
+ * No failure notifications.
+ */
+static void audit_send_reply(int pid, int seq, int type, int done, int multi,
+			     const void *payload, int size)
+{
+	struct sk_buff *skb;
+	struct task_struct *tsk;
+	struct audit_reply *reply = kmalloc(sizeof(struct audit_reply),
+					    GFP_KERNEL);
+
+	if (!reply)
+		return;
+
+	skb = audit_make_reply(pid, seq, type, done, multi, payload, size);
+	if (!skb)
+		goto out;
+
+	reply->pid = pid;
+	reply->skb = skb;
+
+	tsk = kthread_run(audit_send_reply_thread, reply, "audit_send_reply");
+	if (!IS_ERR(tsk))
+		return;
+	kfree_skb(skb);
+out:
+	kfree(reply);
 }
 
 /*
  * Check for appropriate CAP_AUDIT_ capabilities on incoming audit
  * control messages.
  */
-static int audit_netlink_ok(kernel_cap_t eff_cap, u16 msg_type)
+static int audit_netlink_ok(struct sk_buff *skb, u16 msg_type)
 {
 	int err = 0;
 
 	switch (msg_type) {
 	case AUDIT_GET:
 	case AUDIT_LIST:
+	case AUDIT_LIST_RULES:
 	case AUDIT_SET:
 	case AUDIT_ADD:
+	case AUDIT_ADD_RULE:
 	case AUDIT_DEL:
-		if (!cap_raised(eff_cap, CAP_AUDIT_CONTROL))
+	case AUDIT_DEL_RULE:
+	case AUDIT_SIGNAL_INFO:
+	case AUDIT_TTY_GET:
+	case AUDIT_TTY_SET:
+	case AUDIT_TRIM:
+	case AUDIT_MAKE_EQUIV:
+		if (!capable(CAP_AUDIT_CONTROL))
 			err = -EPERM;
 		break;
 	case AUDIT_USER:
-		if (!cap_raised(eff_cap, CAP_AUDIT_WRITE))
+	case AUDIT_FIRST_USER_MSG ... AUDIT_LAST_USER_MSG:
+	case AUDIT_FIRST_USER_MSG2 ... AUDIT_LAST_USER_MSG2:
+		if (!capable(CAP_AUDIT_WRITE))
 			err = -EPERM;
 		break;
 	default:  /* bad msg */
@@ -336,21 +632,68 @@ static int audit_netlink_ok(kernel_cap_t eff_cap, u16 msg_type)
 	return err;
 }
 
+static int audit_log_common_recv_msg(struct audit_buffer **ab, u16 msg_type,
+				     u32 pid, u32 uid, uid_t auid, u32 ses,
+				     u32 sid)
+{
+	int rc = 0;
+	char *ctx = NULL;
+	u32 len;
+
+	if (!audit_enabled) {
+		*ab = NULL;
+		return rc;
+	}
+
+	*ab = audit_log_start(NULL, GFP_KERNEL, msg_type);
+	audit_log_format(*ab, "pid=%d uid=%u auid=%u ses=%u",
+			 pid, uid, auid, ses);
+	if (sid) {
+		rc = security_secid_to_secctx(sid, &ctx, &len);
+		if (rc)
+			audit_log_format(*ab, " ssid=%u", sid);
+		else {
+			audit_log_format(*ab, " subj=%s", ctx);
+			security_release_secctx(ctx, len);
+		}
+	}
+
+	return rc;
+}
+
 static int audit_receive_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
 {
-	u32			uid, pid, seq;
+	u32			uid, pid, seq, sid;
 	void			*data;
 	struct audit_status	*status_get, status_set;
 	int			err;
 	struct audit_buffer	*ab;
 	u16			msg_type = nlh->nlmsg_type;
+	uid_t			loginuid; /* loginuid of sender */
+	u32			sessionid;
+	struct audit_sig_info   *sig_data;
+	char			*ctx = NULL;
+	u32			len;
 
-	err = audit_netlink_ok(NETLINK_CB(skb).eff_cap, msg_type);
+	err = audit_netlink_ok(skb, msg_type);
 	if (err)
 		return err;
 
+	/* As soon as there's any sign of userspace auditd,
+	 * start kauditd to talk to it */
+	if (!kauditd_task)
+		kauditd_task = kthread_run(kauditd_thread, NULL, "kauditd");
+	if (IS_ERR(kauditd_task)) {
+		err = PTR_ERR(kauditd_task);
+		kauditd_task = NULL;
+		return err;
+	}
+
 	pid  = NETLINK_CREDS(skb)->pid;
 	uid  = NETLINK_CREDS(skb)->uid;
+	loginuid = audit_get_loginuid(current);
+	sessionid = audit_get_sessionid(current);
+	security_task_getsecid(current, &sid);
 	seq  = nlh->nlmsg_seq;
 	data = NLMSG_DATA(nlh);
 
@@ -362,7 +705,7 @@ static int audit_receive_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
 		status_set.rate_limit	 = audit_rate_limit;
 		status_set.backlog_limit = audit_backlog_limit;
 		status_set.lost		 = atomic_read(&audit_lost);
-		status_set.backlog	 = atomic_read(&audit_backlog);
+		status_set.backlog	 = skb_queue_len(&audit_skb_queue);
 		audit_send_reply(NETLINK_CB(skb).pid, seq, AUDIT_GET, 0, 0,
 				 &status_set, sizeof(status_set));
 		break;
@@ -371,51 +714,221 @@ static int audit_receive_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
 			return -EINVAL;
 		status_get   = (struct audit_status *)data;
 		if (status_get->mask & AUDIT_STATUS_ENABLED) {
-			err = audit_set_enabled(status_get->enabled);
-			if (err < 0) return err;
+			err = audit_set_enabled(status_get->enabled,
+						loginuid, sessionid, sid);
+			if (err < 0)
+				return err;
 		}
 		if (status_get->mask & AUDIT_STATUS_FAILURE) {
-			err = audit_set_failure(status_get->failure);
-			if (err < 0) return err;
+			err = audit_set_failure(status_get->failure,
+						loginuid, sessionid, sid);
+			if (err < 0)
+				return err;
 		}
 		if (status_get->mask & AUDIT_STATUS_PID) {
-			int old   = audit_pid;
-			audit_pid = status_get->pid;
-			audit_log(current->audit_context,
-				  "audit_pid=%d old=%d", audit_pid, old);
+			int new_pid = status_get->pid;
+
+			if (audit_enabled != AUDIT_OFF)
+				audit_log_config_change("audit_pid", new_pid,
+							audit_pid, loginuid,
+							sessionid, sid, 1);
+
+			audit_pid = new_pid;
+			audit_nlk_pid = NETLINK_CB(skb).pid;
 		}
-		if (status_get->mask & AUDIT_STATUS_RATE_LIMIT)
-			audit_set_rate_limit(status_get->rate_limit);
+		if (status_get->mask & AUDIT_STATUS_RATE_LIMIT) {
+			err = audit_set_rate_limit(status_get->rate_limit,
+						   loginuid, sessionid, sid);
+			if (err < 0)
+				return err;
+		}
 		if (status_get->mask & AUDIT_STATUS_BACKLOG_LIMIT)
-			audit_set_backlog_limit(status_get->backlog_limit);
+			err = audit_set_backlog_limit(status_get->backlog_limit,
+						      loginuid, sessionid, sid);
 		break;
 	case AUDIT_USER:
-		ab = audit_log_start(NULL);
-		if (!ab)
-			break;	/* audit_panic has been called */
-		audit_log_format(ab,
-				 "user pid=%d uid=%d length=%d msg='%.1024s'",
-				 pid, uid,
-				 (int)(nlh->nlmsg_len
-				       - ((char *)data - (char *)nlh)),
-				 (char *)data);
-		ab->type = AUDIT_USER;
-		ab->pid  = pid;
-		audit_log_end(ab);
+	case AUDIT_FIRST_USER_MSG ... AUDIT_LAST_USER_MSG:
+	case AUDIT_FIRST_USER_MSG2 ... AUDIT_LAST_USER_MSG2:
+		if (!audit_enabled && msg_type != AUDIT_USER_AVC)
+			return 0;
+
+		err = audit_filter_user(&NETLINK_CB(skb));
+		if (err == 1) {
+			err = 0;
+			if (msg_type == AUDIT_USER_TTY) {
+				err = audit_prepare_user_tty(pid, loginuid,
+							     sessionid);
+				if (err)
+					break;
+			}
+			audit_log_common_recv_msg(&ab, msg_type, pid, uid,
+						  loginuid, sessionid, sid);
+
+			if (msg_type != AUDIT_USER_TTY)
+				audit_log_format(ab, " msg='%.1024s'",
+						 (char *)data);
+			else {
+				int size;
+
+				audit_log_format(ab, " msg=");
+				size = nlmsg_len(nlh);
+				if (size > 0 &&
+				    ((unsigned char *)data)[size - 1] == '\0')
+					size--;
+				audit_log_n_untrustedstring(ab, data, size);
+			}
+			audit_set_pid(ab, pid);
+			audit_log_end(ab);
+		}
 		break;
 	case AUDIT_ADD:
 	case AUDIT_DEL:
-		if (nlh->nlmsg_len < sizeof(struct audit_rule))
+		if (nlmsg_len(nlh) < sizeof(struct audit_rule))
 			return -EINVAL;
+		if (audit_enabled == AUDIT_LOCKED) {
+			audit_log_common_recv_msg(&ab, AUDIT_CONFIG_CHANGE, pid,
+						  uid, loginuid, sessionid, sid);
+
+			audit_log_format(ab, " audit_enabled=%d res=0",
+					 audit_enabled);
+			audit_log_end(ab);
+			return -EPERM;
+		}
 		/* fallthrough */
 	case AUDIT_LIST:
-#ifdef CONFIG_AUDITSYSCALL
-		err = audit_receive_filter(nlh->nlmsg_type, NETLINK_CB(skb).pid,
-					   uid, seq, data);
-#else
-		err = -EOPNOTSUPP;
-#endif
+		err = audit_receive_filter(msg_type, NETLINK_CB(skb).pid,
+					   uid, seq, data, nlmsg_len(nlh),
+					   loginuid, sessionid, sid);
 		break;
+	case AUDIT_ADD_RULE:
+	case AUDIT_DEL_RULE:
+		if (nlmsg_len(nlh) < sizeof(struct audit_rule_data))
+			return -EINVAL;
+		if (audit_enabled == AUDIT_LOCKED) {
+			audit_log_common_recv_msg(&ab, AUDIT_CONFIG_CHANGE, pid,
+						  uid, loginuid, sessionid, sid);
+
+			audit_log_format(ab, " audit_enabled=%d res=0",
+					 audit_enabled);
+			audit_log_end(ab);
+			return -EPERM;
+		}
+		/* fallthrough */
+	case AUDIT_LIST_RULES:
+		err = audit_receive_filter(msg_type, NETLINK_CB(skb).pid,
+					   uid, seq, data, nlmsg_len(nlh),
+					   loginuid, sessionid, sid);
+		break;
+	case AUDIT_TRIM:
+		audit_trim_trees();
+
+		audit_log_common_recv_msg(&ab, AUDIT_CONFIG_CHANGE, pid,
+					  uid, loginuid, sessionid, sid);
+
+		audit_log_format(ab, " op=trim res=1");
+		audit_log_end(ab);
+		break;
+	case AUDIT_MAKE_EQUIV: {
+		void *bufp = data;
+		u32 sizes[2];
+		size_t msglen = nlmsg_len(nlh);
+		char *old, *new;
+
+		err = -EINVAL;
+		if (msglen < 2 * sizeof(u32))
+			break;
+		memcpy(sizes, bufp, 2 * sizeof(u32));
+		bufp += 2 * sizeof(u32);
+		msglen -= 2 * sizeof(u32);
+		old = audit_unpack_string(&bufp, &msglen, sizes[0]);
+		if (IS_ERR(old)) {
+			err = PTR_ERR(old);
+			break;
+		}
+		new = audit_unpack_string(&bufp, &msglen, sizes[1]);
+		if (IS_ERR(new)) {
+			err = PTR_ERR(new);
+			kfree(old);
+			break;
+		}
+		/* OK, here comes... */
+		err = audit_tag_tree(old, new);
+
+		audit_log_common_recv_msg(&ab, AUDIT_CONFIG_CHANGE, pid,
+					  uid, loginuid, sessionid, sid);
+
+		audit_log_format(ab, " op=make_equiv old=");
+		audit_log_untrustedstring(ab, old);
+		audit_log_format(ab, " new=");
+		audit_log_untrustedstring(ab, new);
+		audit_log_format(ab, " res=%d", !err);
+		audit_log_end(ab);
+		kfree(old);
+		kfree(new);
+		break;
+	}
+	case AUDIT_SIGNAL_INFO:
+		len = 0;
+		if (audit_sig_sid) {
+			err = security_secid_to_secctx(audit_sig_sid, &ctx, &len);
+			if (err)
+				return err;
+		}
+		sig_data = kmalloc(sizeof(*sig_data) + len, GFP_KERNEL);
+		if (!sig_data) {
+			if (audit_sig_sid)
+				security_release_secctx(ctx, len);
+			return -ENOMEM;
+		}
+		sig_data->uid = audit_sig_uid;
+		sig_data->pid = audit_sig_pid;
+		if (audit_sig_sid) {
+			memcpy(sig_data->ctx, ctx, len);
+			security_release_secctx(ctx, len);
+		}
+		audit_send_reply(NETLINK_CB(skb).pid, seq, AUDIT_SIGNAL_INFO,
+				0, 0, sig_data, sizeof(*sig_data) + len);
+		kfree(sig_data);
+		break;
+	case AUDIT_TTY_GET: {
+		struct audit_tty_status s;
+		struct task_struct *tsk;
+		unsigned long flags;
+
+		rcu_read_lock();
+		tsk = find_task_by_vpid(pid);
+		if (tsk && lock_task_sighand(tsk, &flags)) {
+			s.enabled = tsk->signal->audit_tty != 0;
+			unlock_task_sighand(tsk, &flags);
+		} else
+			err = -ESRCH;
+		rcu_read_unlock();
+
+		if (!err)
+			audit_send_reply(NETLINK_CB(skb).pid, seq,
+					 AUDIT_TTY_GET, 0, 0, &s, sizeof(s));
+		break;
+	}
+	case AUDIT_TTY_SET: {
+		struct audit_tty_status *s;
+		struct task_struct *tsk;
+		unsigned long flags;
+
+		if (nlh->nlmsg_len < sizeof(struct audit_tty_status))
+			return -EINVAL;
+		s = data;
+		if (s->enabled != 0 && s->enabled != 1)
+			return -EINVAL;
+		rcu_read_lock();
+		tsk = find_task_by_vpid(pid);
+		if (tsk && lock_task_sighand(tsk, &flags)) {
+			tsk->signal->audit_tty = s->enabled != 0;
+			unlock_task_sighand(tsk, &flags);
+		} else
+			err = -ESRCH;
+		rcu_read_unlock();
+		break;
+	}
 	default:
 		err = -EINVAL;
 		break;
@@ -424,218 +937,123 @@ static int audit_receive_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
 	return err < 0 ? err : 0;
 }
 
-/* Get message from skb (based on rtnetlink_rcv_skb).  Each message is
- * processed by audit_receive_msg.  Malformed skbs with wrong length are
- * discarded silently.  */
-static int audit_receive_skb(struct sk_buff *skb)
+/*
+ * Get message from skb.  Each message is processed by audit_receive_msg.
+ * Malformed skbs with wrong length are discarded silently.
+ */
+static void audit_receive_skb(struct sk_buff *skb)
 {
-	int		err;
-	struct nlmsghdr	*nlh;
-	u32		rlen;
+	struct nlmsghdr *nlh;
+	/*
+	 * len MUST be signed for NLMSG_NEXT to be able to dec it below 0
+	 * if the nlmsg_len was not aligned
+	 */
+	int len;
+	int err;
 
-	while (skb->len >= NLMSG_SPACE(0)) {
-		nlh = (struct nlmsghdr *)skb->data;
-		if (nlh->nlmsg_len < sizeof(*nlh) || skb->len < nlh->nlmsg_len)
-			return 0;
-		rlen = NLMSG_ALIGN(nlh->nlmsg_len);
-		if (rlen > skb->len)
-			rlen = skb->len;
-		if ((err = audit_receive_msg(skb, nlh))) {
+	nlh = nlmsg_hdr(skb);
+	len = skb->len;
+
+	while (NLMSG_OK(nlh, len)) {
+		err = audit_receive_msg(skb, nlh);
+		/* if err or if this message says it wants a response */
+		if (err || (nlh->nlmsg_flags & NLM_F_ACK))
 			netlink_ack(skb, nlh, err);
-		} else if (nlh->nlmsg_flags & NLM_F_ACK)
-			netlink_ack(skb, nlh, 0);
-		skb_pull(skb, rlen);
+
+		nlh = NLMSG_NEXT(nlh, len);
 	}
-	return 0;
 }
 
 /* Receive messages from netlink socket. */
-static void audit_receive(struct sock *sk, int length)
+static void audit_receive(struct sk_buff  *skb)
 {
-	struct sk_buff  *skb;
-
-	if (down_trylock(&audit_netlink_sem))
-		return;
-
-				/* FIXME: this must not cause starvation */
-	while ((skb = skb_dequeue(&sk->sk_receive_queue))) {
-		if (audit_receive_skb(skb) && skb->len)
-			skb_queue_head(&sk->sk_receive_queue, skb);
-		else
-			kfree_skb(skb);
-	}
-	up(&audit_netlink_sem);
-}
-
-/* Move data from tmp buffer into an skb.  This is an extra copy, and
- * that is unfortunate.  However, the copy will only occur when a record
- * is being written to user space, which is already a high-overhead
- * operation.  (Elimination of the copy is possible, for example, by
- * writing directly into a pre-allocated skb, at the cost of wasting
- * memory. */
-static void audit_log_move(struct audit_buffer *ab)
-{
-	struct sk_buff	*skb;
-	char		*start;
-	int		extra = ab->nlh ? 0 : NLMSG_SPACE(0);
-
-	/* possible resubmission */
-	if (ab->len == 0)
-		return;
-
-	skb = skb_peek(&ab->sklist);
-	if (!skb || skb_tailroom(skb) <= ab->len + extra) {
-		skb = alloc_skb(2 * ab->len + extra, GFP_ATOMIC);
-		if (!skb) {
-			ab->len = 0; /* Lose information in ab->tmp */
-			audit_log_lost("out of memory in audit_log_move");
-			return;
-		}
-		__skb_queue_tail(&ab->sklist, skb);
-		if (!ab->nlh)
-			ab->nlh = (struct nlmsghdr *)skb_put(skb,
-							     NLMSG_SPACE(0));
-	}
-	start = skb_put(skb, ab->len);
-	memcpy(start, ab->tmp, ab->len);
-	ab->len = 0;
-}
-
-/* Iterate over the skbuff in the audit_buffer, sending their contents
- * to user space. */
-static inline int audit_log_drain(struct audit_buffer *ab)
-{
-	struct sk_buff *skb;
-
-	while ((skb = skb_dequeue(&ab->sklist))) {
-		int retval = 0;
-
-		if (audit_pid) {
-			if (ab->nlh) {
-				ab->nlh->nlmsg_len   = ab->total;
-				ab->nlh->nlmsg_type  = ab->type;
-				ab->nlh->nlmsg_flags = 0;
-				ab->nlh->nlmsg_seq   = 0;
-				ab->nlh->nlmsg_pid   = ab->pid;
-			}
-			skb_get(skb); /* because netlink_* frees */
-			retval = netlink_unicast(audit_sock, skb, audit_pid,
-						 MSG_DONTWAIT);
-		}
-		if (retval == -EAGAIN && ab->count < 5) {
-			++ab->count;
-			skb_queue_tail(&ab->sklist, skb);
-			audit_log_end_irq(ab);
-			return 1;
-		}
-		if (retval < 0) {
-			if (retval == -ECONNREFUSED) {
-				printk(KERN_ERR
-				       "audit: *NO* daemon at audit_pid=%d\n",
-				       audit_pid);
-				audit_pid = 0;
-			} else
-				audit_log_lost("netlink socket too busy");
-		}
-		if (!audit_pid) { /* No daemon */
-			int offset = ab->nlh ? NLMSG_SPACE(0) : 0;
-			int len    = skb->len - offset;
-			printk(KERN_ERR "%*.*s\n",
-			       len, len, skb->data + offset);
-		}
-		kfree_skb(skb);
-		ab->nlh = NULL;
-	}
-	return 0;
+	mutex_lock(&audit_cmd_mutex);
+	audit_receive_skb(skb);
+	mutex_unlock(&audit_cmd_mutex);
 }
 
 /* Initialize audit support at boot time. */
 static int __init audit_init(void)
 {
+	int i;
+
+	if (audit_initialized == AUDIT_DISABLED)
+		return 0;
+
 	printk(KERN_INFO "audit: initializing netlink socket (%s)\n",
 	       audit_default ? "enabled" : "disabled");
-	audit_sock = netlink_kernel_create(NETLINK_AUDIT, audit_receive);
+	audit_sock = netlink_kernel_create(&init_net, NETLINK_AUDIT, 0,
+					   audit_receive, NULL, THIS_MODULE);
 	if (!audit_sock)
 		audit_panic("cannot initialize netlink socket");
+	else
+		audit_sock->sk_sndtimeo = MAX_SCHEDULE_TIMEOUT;
 
-	audit_initialized = 1;
+	skb_queue_head_init(&audit_skb_queue);
+	skb_queue_head_init(&audit_skb_hold_queue);
+	audit_initialized = AUDIT_INITIALIZED;
 	audit_enabled = audit_default;
-	audit_log(NULL, "initialized");
+	audit_ever_enabled |= !!audit_default;
+
+	audit_log(NULL, GFP_KERNEL, AUDIT_KERNEL, "initialized");
+
+	for (i = 0; i < AUDIT_INODE_BUCKETS; i++)
+		INIT_LIST_HEAD(&audit_inode_hash[i]);
+
 	return 0;
 }
-
-#else
-/* Without CONFIG_NET, we have no skbuffs.  For now, print what we have
- * in the buffer. */
-static void audit_log_move(struct audit_buffer *ab)
-{
-	printk(KERN_ERR "%*.*s\n", ab->len, ab->len, ab->tmp);
-	ab->len = 0;
-}
-
-static inline int audit_log_drain(struct audit_buffer *ab)
-{
-	return 0;
-}
-
-/* Initialize audit support at boot time. */
-int __init audit_init(void)
-{
-	printk(KERN_INFO "audit: initializing WITHOUT netlink support\n");
-	audit_sock = NULL;
-	audit_pid  = 0;
-
-	audit_initialized = 1;
-	audit_enabled = audit_default;
-	audit_log(NULL, "initialized");
-	return 0;
-}
-#endif
-
 __initcall(audit_init);
 
 /* Process kernel command-line parameter at boot time.  audit=0 or audit=1. */
 static int __init audit_enable(char *str)
 {
 	audit_default = !!simple_strtol(str, NULL, 0);
-	printk(KERN_INFO "audit: %s%s\n",
-	       audit_default ? "enabled" : "disabled",
-	       audit_initialized ? "" : " (after initialization)");
-	if (audit_initialized)
+	if (!audit_default)
+		audit_initialized = AUDIT_DISABLED;
+
+	printk(KERN_INFO "audit: %s", audit_default ? "enabled" : "disabled");
+
+	if (audit_initialized == AUDIT_INITIALIZED) {
 		audit_enabled = audit_default;
-	return 0;
+		audit_ever_enabled |= !!audit_default;
+	} else if (audit_initialized == AUDIT_UNINITIALIZED) {
+		printk(" (after initialization)");
+	} else {
+		printk(" (until reboot)");
+	}
+	printk("\n");
+
+	return 1;
 }
 
 __setup("audit=", audit_enable);
 
-
-/* Obtain an audit buffer.  This routine does locking to obtain the
- * audit buffer, but then no locking is required for calls to
- * audit_log_*format.  If the tsk is a task that is currently in a
- * syscall, then the syscall is marked as auditable and an audit record
- * will be written at syscall exit.  If there is no associated task, tsk
- * should be NULL. */
-struct audit_buffer *audit_log_start(struct audit_context *ctx)
+static void audit_buffer_free(struct audit_buffer *ab)
 {
-	struct audit_buffer	*ab	= NULL;
-	unsigned long		flags;
-	struct timespec		t;
-	int			serial	= 0;
+	unsigned long flags;
 
-	if (!audit_initialized)
-		return NULL;
+	if (!ab)
+		return;
 
-	if (audit_backlog_limit
-	    && atomic_read(&audit_backlog) > audit_backlog_limit) {
-		if (audit_rate_check())
-			printk(KERN_WARNING
-			       "audit: audit_backlog=%d > "
-			       "audit_backlog_limit=%d\n",
-			       atomic_read(&audit_backlog),
-			       audit_backlog_limit);
-		audit_log_lost("backlog limit exceeded");
-		return NULL;
+	if (ab->skb)
+		kfree_skb(ab->skb);
+
+	spin_lock_irqsave(&audit_freelist_lock, flags);
+	if (audit_freelist_count > AUDIT_MAXFREE)
+		kfree(ab);
+	else {
+		audit_freelist_count++;
+		list_add(&ab->list, &audit_freelist);
 	}
+	spin_unlock_irqrestore(&audit_freelist_lock, flags);
+}
+
+static struct audit_buffer * audit_buffer_alloc(struct audit_context *ctx,
+						gfp_t gfp_mask, int type)
+{
+	unsigned long flags;
+	struct audit_buffer *ab = NULL;
+	struct nlmsghdr *nlh;
 
 	spin_lock_irqsave(&audit_freelist_lock, flags);
 	if (!list_empty(&audit_freelist)) {
@@ -646,69 +1064,236 @@ struct audit_buffer *audit_log_start(struct audit_context *ctx)
 	}
 	spin_unlock_irqrestore(&audit_freelist_lock, flags);
 
-	if (!ab)
-		ab = kmalloc(sizeof(*ab), GFP_ATOMIC);
+	if (!ab) {
+		ab = kmalloc(sizeof(*ab), gfp_mask);
+		if (!ab)
+			goto err;
+	}
+
+	ab->ctx = ctx;
+	ab->gfp_mask = gfp_mask;
+
+	ab->skb = nlmsg_new(AUDIT_BUFSIZ, gfp_mask);
+	if (!ab->skb)
+		goto nlmsg_failure;
+
+	nlh = NLMSG_NEW(ab->skb, 0, 0, type, 0, 0);
+
+	return ab;
+
+nlmsg_failure:                  /* Used by NLMSG_NEW */
+	kfree_skb(ab->skb);
+	ab->skb = NULL;
+err:
+	audit_buffer_free(ab);
+	return NULL;
+}
+
+/**
+ * audit_serial - compute a serial number for the audit record
+ *
+ * Compute a serial number for the audit record.  Audit records are
+ * written to user-space as soon as they are generated, so a complete
+ * audit record may be written in several pieces.  The timestamp of the
+ * record and this serial number are used by the user-space tools to
+ * determine which pieces belong to the same audit record.  The
+ * (timestamp,serial) tuple is unique for each syscall and is live from
+ * syscall entry to syscall exit.
+ *
+ * NOTE: Another possibility is to store the formatted records off the
+ * audit context (for those records that have a context), and emit them
+ * all at syscall exit.  However, this could delay the reporting of
+ * significant errors until syscall exit (or never, if the system
+ * halts).
+ */
+unsigned int audit_serial(void)
+{
+	static DEFINE_SPINLOCK(serial_lock);
+	static unsigned int serial = 0;
+
+	unsigned long flags;
+	unsigned int ret;
+
+	spin_lock_irqsave(&serial_lock, flags);
+	do {
+		ret = ++serial;
+	} while (unlikely(!ret));
+	spin_unlock_irqrestore(&serial_lock, flags);
+
+	return ret;
+}
+
+static inline void audit_get_stamp(struct audit_context *ctx,
+				   struct timespec *t, unsigned int *serial)
+{
+	if (!ctx || !auditsc_get_stamp(ctx, t, serial)) {
+		*t = CURRENT_TIME;
+		*serial = audit_serial();
+	}
+}
+
+/* Obtain an audit buffer.  This routine does locking to obtain the
+ * audit buffer, but then no locking is required for calls to
+ * audit_log_*format.  If the tsk is a task that is currently in a
+ * syscall, then the syscall is marked as auditable and an audit record
+ * will be written at syscall exit.  If there is no associated task, tsk
+ * should be NULL. */
+
+/**
+ * audit_log_start - obtain an audit buffer
+ * @ctx: audit_context (may be NULL)
+ * @gfp_mask: type of allocation
+ * @type: audit message type
+ *
+ * Returns audit_buffer pointer on success or NULL on error.
+ *
+ * Obtain an audit buffer.  This routine does locking to obtain the
+ * audit buffer, but then no locking is required for calls to
+ * audit_log_*format.  If the task (ctx) is a task that is currently in a
+ * syscall, then the syscall is marked as auditable and an audit record
+ * will be written at syscall exit.  If there is no associated task, then
+ * task context (ctx) should be NULL.
+ */
+struct audit_buffer *audit_log_start(struct audit_context *ctx, gfp_t gfp_mask,
+				     int type)
+{
+	struct audit_buffer	*ab	= NULL;
+	struct timespec		t;
+	unsigned int		uninitialized_var(serial);
+	int reserve;
+	unsigned long timeout_start = jiffies;
+
+	if (audit_initialized != AUDIT_INITIALIZED)
+		return NULL;
+
+	if (unlikely(audit_filter_type(type)))
+		return NULL;
+
+	if (gfp_mask & __GFP_WAIT)
+		reserve = 0;
+	else
+		reserve = 5; /* Allow atomic callers to go up to five
+				entries over the normal backlog limit */
+
+	while (audit_backlog_limit
+	       && skb_queue_len(&audit_skb_queue) > audit_backlog_limit + reserve) {
+		if (gfp_mask & __GFP_WAIT && audit_backlog_wait_time
+		    && time_before(jiffies, timeout_start + audit_backlog_wait_time)) {
+
+			/* Wait for auditd to drain the queue a little */
+			DECLARE_WAITQUEUE(wait, current);
+			set_current_state(TASK_INTERRUPTIBLE);
+			add_wait_queue(&audit_backlog_wait, &wait);
+
+			if (audit_backlog_limit &&
+			    skb_queue_len(&audit_skb_queue) > audit_backlog_limit)
+				schedule_timeout(timeout_start + audit_backlog_wait_time - jiffies);
+
+			__set_current_state(TASK_RUNNING);
+			remove_wait_queue(&audit_backlog_wait, &wait);
+			continue;
+		}
+		if (audit_rate_check() && printk_ratelimit())
+			printk(KERN_WARNING
+			       "audit: audit_backlog=%d > "
+			       "audit_backlog_limit=%d\n",
+			       skb_queue_len(&audit_skb_queue),
+			       audit_backlog_limit);
+		audit_log_lost("backlog limit exceeded");
+		audit_backlog_wait_time = audit_backlog_wait_overflow;
+		wake_up(&audit_backlog_wait);
+		return NULL;
+	}
+
+	ab = audit_buffer_alloc(ctx, gfp_mask, type);
 	if (!ab) {
 		audit_log_lost("out of memory in audit_log_start");
 		return NULL;
 	}
 
-	atomic_inc(&audit_backlog);
-	skb_queue_head_init(&ab->sklist);
-
-	ab->ctx   = ctx;
-	ab->len   = 0;
-	ab->nlh   = NULL;
-	ab->total = 0;
-	ab->type  = AUDIT_KERNEL;
-	ab->pid   = 0;
-	ab->count = 0;
-
-#ifdef CONFIG_AUDITSYSCALL
-	if (ab->ctx)
-		audit_get_stamp(ab->ctx, &t, &serial);
-	else
-#endif
-		t = CURRENT_TIME;
+	audit_get_stamp(ab->ctx, &t, &serial);
 
 	audit_log_format(ab, "audit(%lu.%03lu:%u): ",
 			 t.tv_sec, t.tv_nsec/1000000, serial);
 	return ab;
 }
 
+/**
+ * audit_expand - expand skb in the audit buffer
+ * @ab: audit_buffer
+ * @extra: space to add at tail of the skb
+ *
+ * Returns 0 (no space) on failed expansion, or available space if
+ * successful.
+ */
+static inline int audit_expand(struct audit_buffer *ab, int extra)
+{
+	struct sk_buff *skb = ab->skb;
+	int oldtail = skb_tailroom(skb);
+	int ret = pskb_expand_head(skb, 0, extra, ab->gfp_mask);
+	int newtail = skb_tailroom(skb);
 
-/* Format an audit message into the audit buffer.  If there isn't enough
+	if (ret < 0) {
+		audit_log_lost("out of memory in audit_expand");
+		return 0;
+	}
+
+	skb->truesize += newtail - oldtail;
+	return newtail;
+}
+
+/*
+ * Format an audit message into the audit buffer.  If there isn't enough
  * room in the audit buffer, more room will be allocated and vsnprint
  * will be called a second time.  Currently, we assume that a printk
- * can't format message larger than 1024 bytes, so we don't either. */
+ * can't format message larger than 1024 bytes, so we don't either.
+ */
 static void audit_log_vformat(struct audit_buffer *ab, const char *fmt,
 			      va_list args)
 {
 	int len, avail;
+	struct sk_buff *skb;
+	va_list args2;
 
 	if (!ab)
 		return;
 
-	avail = sizeof(ab->tmp) - ab->len;
-	if (avail <= 0) {
-		audit_log_move(ab);
-		avail = sizeof(ab->tmp) - ab->len;
+	BUG_ON(!ab->skb);
+	skb = ab->skb;
+	avail = skb_tailroom(skb);
+	if (avail == 0) {
+		avail = audit_expand(ab, AUDIT_BUFSIZ);
+		if (!avail)
+			goto out;
 	}
-	len   = vsnprintf(ab->tmp + ab->len, avail, fmt, args);
+	va_copy(args2, args);
+	len = vsnprintf(skb_tail_pointer(skb), avail, fmt, args);
 	if (len >= avail) {
 		/* The printk buffer is 1024 bytes long, so if we get
 		 * here and AUDIT_BUFSIZ is at least 1024, then we can
 		 * log everything that printk could have logged. */
-		audit_log_move(ab);
-		avail = sizeof(ab->tmp) - ab->len;
-		len   = vsnprintf(ab->tmp + ab->len, avail, fmt, args);
+		avail = audit_expand(ab,
+			max_t(unsigned, AUDIT_BUFSIZ, 1+len-avail));
+		if (!avail)
+			goto out_va_end;
+		len = vsnprintf(skb_tail_pointer(skb), avail, fmt, args2);
 	}
-	ab->len   += (len < avail) ? len : avail;
-	ab->total += (len < avail) ? len : avail;
+	if (len > 0)
+		skb_put(skb, len);
+out_va_end:
+	va_end(args2);
+out:
+	return;
 }
 
-/* Format a message into the audit buffer.  All the work is done in
- * audit_log_vformat. */
+/**
+ * audit_log_format - format a message into the audit buffer.
+ * @ab: audit_buffer
+ * @fmt: format string
+ * @...: optional parameters matching @fmt string
+ *
+ * All the work is done in audit_log_vformat.
+ */
 void audit_log_format(struct audit_buffer *ab, const char *fmt, ...)
 {
 	va_list args;
@@ -720,116 +1305,214 @@ void audit_log_format(struct audit_buffer *ab, const char *fmt, ...)
 	va_end(args);
 }
 
-/* This is a helper-function to print the d_path without using a static
- * buffer or allocating another buffer in addition to the one in
- * audit_buffer. */
-void audit_log_d_path(struct audit_buffer *ab, const char *prefix,
-		      struct dentry *dentry, struct vfsmount *vfsmnt)
+/**
+ * audit_log_hex - convert a buffer to hex and append it to the audit skb
+ * @ab: the audit_buffer
+ * @buf: buffer to convert to hex
+ * @len: length of @buf to be converted
+ *
+ * No return value; failure to expand is silently ignored.
+ *
+ * This function will take the passed buf and convert it into a string of
+ * ascii hex digits. The new string is placed onto the skb.
+ */
+void audit_log_n_hex(struct audit_buffer *ab, const unsigned char *buf,
+		size_t len)
 {
-	char *p;
-	int  len, avail;
-
-	if (prefix) audit_log_format(ab, " %s", prefix);
-
-	if (ab->len > 128)
-		audit_log_move(ab);
-	avail = sizeof(ab->tmp) - ab->len;
-	p = d_path(dentry, vfsmnt, ab->tmp + ab->len, avail);
-	if (IS_ERR(p)) {
-		/* FIXME: can we save some information here? */
-		audit_log_format(ab, "<toolong>");
-	} else {
-				/* path isn't at start of buffer */
-		len	   = (ab->tmp + sizeof(ab->tmp) - 1) - p;
-		memmove(ab->tmp + ab->len, p, len);
-		ab->len   += len;
-		ab->total += len;
-	}
-}
-
-/* Remove queued messages from the audit_txlist and send them to userspace. */
-static void audit_tasklet_handler(unsigned long arg)
-{
-	LIST_HEAD(list);
-	struct audit_buffer *ab;
-	unsigned long	    flags;
-
-	spin_lock_irqsave(&audit_txlist_lock, flags);
-	list_splice_init(&audit_txlist, &list);
-	spin_unlock_irqrestore(&audit_txlist_lock, flags);
-
-	while (!list_empty(&list)) {
-		ab = list_entry(list.next, struct audit_buffer, list);
-		list_del(&ab->list);
-		audit_log_end_fast(ab);
-	}
-}
-
-static DECLARE_TASKLET(audit_tasklet, audit_tasklet_handler, 0);
-
-/* The netlink_* functions cannot be called inside an irq context, so
- * the audit buffer is places on a queue and a tasklet is scheduled to
- * remove them from the queue outside the irq context.  May be called in
- * any context. */
-static void audit_log_end_irq(struct audit_buffer *ab)
-{
-	unsigned long flags;
+	int i, avail, new_len;
+	unsigned char *ptr;
+	struct sk_buff *skb;
+	static const unsigned char *hex = "0123456789ABCDEF";
 
 	if (!ab)
 		return;
-	spin_lock_irqsave(&audit_txlist_lock, flags);
-	list_add_tail(&ab->list, &audit_txlist);
-	spin_unlock_irqrestore(&audit_txlist_lock, flags);
 
-	tasklet_schedule(&audit_tasklet);
+	BUG_ON(!ab->skb);
+	skb = ab->skb;
+	avail = skb_tailroom(skb);
+	new_len = len<<1;
+	if (new_len >= avail) {
+		/* Round the buffer request up to the next multiple */
+		new_len = AUDIT_BUFSIZ*(((new_len-avail)/AUDIT_BUFSIZ) + 1);
+		avail = audit_expand(ab, new_len);
+		if (!avail)
+			return;
+	}
+
+	ptr = skb_tail_pointer(skb);
+	for (i=0; i<len; i++) {
+		*ptr++ = hex[(buf[i] & 0xF0)>>4]; /* Upper nibble */
+		*ptr++ = hex[buf[i] & 0x0F];	  /* Lower nibble */
+	}
+	*ptr = 0;
+	skb_put(skb, len << 1); /* new string is twice the old string */
 }
 
-/* Send the message in the audit buffer directly to user space.  May not
- * be called in an irq context. */
-static void audit_log_end_fast(struct audit_buffer *ab)
+/*
+ * Format a string of no more than slen characters into the audit buffer,
+ * enclosed in quote marks.
+ */
+void audit_log_n_string(struct audit_buffer *ab, const char *string,
+			size_t slen)
 {
-	unsigned long flags;
+	int avail, new_len;
+	unsigned char *ptr;
+	struct sk_buff *skb;
 
-	BUG_ON(in_irq());
+	if (!ab)
+		return;
+
+	BUG_ON(!ab->skb);
+	skb = ab->skb;
+	avail = skb_tailroom(skb);
+	new_len = slen + 3;	/* enclosing quotes + null terminator */
+	if (new_len > avail) {
+		avail = audit_expand(ab, new_len);
+		if (!avail)
+			return;
+	}
+	ptr = skb_tail_pointer(skb);
+	*ptr++ = '"';
+	memcpy(ptr, string, slen);
+	ptr += slen;
+	*ptr++ = '"';
+	*ptr = 0;
+	skb_put(skb, slen + 2);	/* don't include null terminator */
+}
+
+/**
+ * audit_string_contains_control - does a string need to be logged in hex
+ * @string: string to be checked
+ * @len: max length of the string to check
+ */
+int audit_string_contains_control(const char *string, size_t len)
+{
+	const unsigned char *p;
+	for (p = string; p < (const unsigned char *)string + len; p++) {
+		if (*p == '"' || *p < 0x21 || *p > 0x7e)
+			return 1;
+	}
+	return 0;
+}
+
+/**
+ * audit_log_n_untrustedstring - log a string that may contain random characters
+ * @ab: audit_buffer
+ * @len: length of string (not including trailing null)
+ * @string: string to be logged
+ *
+ * This code will escape a string that is passed to it if the string
+ * contains a control character, unprintable character, double quote mark,
+ * or a space. Unescaped strings will start and end with a double quote mark.
+ * Strings that are escaped are printed in hex (2 digits per char).
+ *
+ * The caller specifies the number of characters in the string to log, which may
+ * or may not be the entire string.
+ */
+void audit_log_n_untrustedstring(struct audit_buffer *ab, const char *string,
+				 size_t len)
+{
+	if (audit_string_contains_control(string, len))
+		audit_log_n_hex(ab, string, len);
+	else
+		audit_log_n_string(ab, string, len);
+}
+
+/**
+ * audit_log_untrustedstring - log a string that may contain random characters
+ * @ab: audit_buffer
+ * @string: string to be logged
+ *
+ * Same as audit_log_n_untrustedstring(), except that strlen is used to
+ * determine string length.
+ */
+void audit_log_untrustedstring(struct audit_buffer *ab, const char *string)
+{
+	audit_log_n_untrustedstring(ab, string, strlen(string));
+}
+
+/* This is a helper-function to print the escaped d_path */
+void audit_log_d_path(struct audit_buffer *ab, const char *prefix,
+		      const struct path *path)
+{
+	char *p, *pathname;
+
+	if (prefix)
+		audit_log_format(ab, "%s", prefix);
+
+	/* We will allow 11 spaces for ' (deleted)' to be appended */
+	pathname = kmalloc(PATH_MAX+11, ab->gfp_mask);
+	if (!pathname) {
+		audit_log_string(ab, "<no_memory>");
+		return;
+	}
+	p = d_path(path, pathname, PATH_MAX+11);
+	if (IS_ERR(p)) { /* Should never happen since we send PATH_MAX */
+		/* FIXME: can we save some information here? */
+		audit_log_string(ab, "<too_long>");
+	} else
+		audit_log_untrustedstring(ab, p);
+	kfree(pathname);
+}
+
+void audit_log_key(struct audit_buffer *ab, char *key)
+{
+	audit_log_format(ab, " key=");
+	if (key)
+		audit_log_untrustedstring(ab, key);
+	else
+		audit_log_format(ab, "(null)");
+}
+
+/**
+ * audit_log_end - end one audit record
+ * @ab: the audit_buffer
+ *
+ * The netlink_* functions cannot be called inside an irq context, so
+ * the audit buffer is placed on a queue and a tasklet is scheduled to
+ * remove them from the queue outside the irq context.  May be called in
+ * any context.
+ */
+void audit_log_end(struct audit_buffer *ab)
+{
 	if (!ab)
 		return;
 	if (!audit_rate_check()) {
 		audit_log_lost("rate limit exceeded");
 	} else {
-		audit_log_move(ab);
-		if (audit_log_drain(ab))
-			return;
+		struct nlmsghdr *nlh = nlmsg_hdr(ab->skb);
+		nlh->nlmsg_len = ab->skb->len - NLMSG_SPACE(0);
+
+		if (audit_pid) {
+			skb_queue_tail(&audit_skb_queue, ab->skb);
+			wake_up_interruptible(&kauditd_wait);
+		} else {
+			audit_printk_skb(ab->skb);
+		}
+		ab->skb = NULL;
 	}
-
-	atomic_dec(&audit_backlog);
-	spin_lock_irqsave(&audit_freelist_lock, flags);
-	if (++audit_freelist_count > AUDIT_MAXFREE)
-		kfree(ab);
-	else
-		list_add(&ab->list, &audit_freelist);
-	spin_unlock_irqrestore(&audit_freelist_lock, flags);
+	audit_buffer_free(ab);
 }
 
-/* Send or queue the message in the audit buffer, depending on the
- * current context.  (A convenience function that may be called in any
- * context.) */
-void audit_log_end(struct audit_buffer *ab)
-{
-	if (in_irq())
-		audit_log_end_irq(ab);
-	else
-		audit_log_end_fast(ab);
-}
-
-/* Log an audit record.  This is a convenience function that calls
- * audit_log_start, audit_log_vformat, and audit_log_end.  It may be
- * called in any context. */
-void audit_log(struct audit_context *ctx, const char *fmt, ...)
+/**
+ * audit_log - Log an audit record
+ * @ctx: audit context
+ * @gfp_mask: type of allocation
+ * @type: audit message type
+ * @fmt: format string to use
+ * @...: variable parameters matching the format string
+ *
+ * This is a convenience function that calls audit_log_start,
+ * audit_log_vformat, and audit_log_end.  It may be called
+ * in any context.
+ */
+void audit_log(struct audit_context *ctx, gfp_t gfp_mask, int type,
+	       const char *fmt, ...)
 {
 	struct audit_buffer *ab;
 	va_list args;
 
-	ab = audit_log_start(ctx);
+	ab = audit_log_start(ctx, gfp_mask, type);
 	if (ab) {
 		va_start(args, fmt);
 		audit_log_vformat(ab, fmt, args);
@@ -837,3 +1520,34 @@ void audit_log(struct audit_context *ctx, const char *fmt, ...)
 		audit_log_end(ab);
 	}
 }
+
+#ifdef CONFIG_SECURITY
+/**
+ * audit_log_secctx - Converts and logs SELinux context
+ * @ab: audit_buffer
+ * @secid: security number
+ *
+ * This is a helper function that calls security_secid_to_secctx to convert
+ * secid to secctx and then adds the (converted) SELinux context to the audit
+ * log by calling audit_log_format, thus also preventing leak of internal secid
+ * to userspace. If secid cannot be converted audit_panic is called.
+ */
+void audit_log_secctx(struct audit_buffer *ab, u32 secid)
+{
+	u32 len;
+	char *secctx;
+
+	if (security_secid_to_secctx(secid, &secctx, &len)) {
+		audit_panic("Cannot convert secid to context");
+	} else {
+		audit_log_format(ab, " obj=%s", secctx);
+		security_release_secctx(secctx, len);
+	}
+}
+EXPORT_SYMBOL(audit_log_secctx);
+#endif
+
+EXPORT_SYMBOL(audit_log_start);
+EXPORT_SYMBOL(audit_log_end);
+EXPORT_SYMBOL(audit_log_format);
+EXPORT_SYMBOL(audit_log);

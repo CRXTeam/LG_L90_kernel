@@ -7,9 +7,6 @@
 #ifndef _LINUX_NFS_H
 #define _LINUX_NFS_H
 
-#include <linux/sunrpc/msg_prot.h>
-#include <linux/string.h>
-
 #define NFS_PROGRAM	100003
 #define NFS_PORT	2049
 #define NFS_MAXDATA	8192
@@ -28,8 +25,11 @@
 #define NFSMODE_SOCK	0140000
 #define NFSMODE_FIFO	0010000
 
-#define NFS_MNT_PROGRAM	100005
-#define NFS_MNT_PORT	627
+#define NFS_MNT_PROGRAM		100005
+#define NFS_MNT_VERSION		1
+#define NFS_MNT3_VERSION	3
+
+#define NFS_PIPE_DIRNAME "nfs"
 
 /*
  * NFS stats. The good thing with these values is that NFSv3 errors are
@@ -112,7 +112,6 @@
 	NFSERR_FILE_OPEN = 10046,      /*       v4 */
 	NFSERR_ADMIN_REVOKED = 10047,  /*       v4 */
 	NFSERR_CB_PATH_DOWN = 10048,   /*       v4 */
-	NFSERR_REPLAY_ME = 10049	/*       v4 */
 };
 
 /* NFSv2 file types - beware, these are not the same in NFSv3 */
@@ -129,7 +128,10 @@ enum nfs_ftype {
 	NFFIFO = 8
 };
 
-#if defined(__KERNEL__)
+#ifdef __KERNEL__
+#include <linux/sunrpc/msg_prot.h>
+#include <linux/string.h>
+
 /*
  * This is the kernel NFS client file handle representation
  */

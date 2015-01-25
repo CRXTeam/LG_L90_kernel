@@ -9,7 +9,6 @@
  * Internal I/O Port Management
  */
 
-#include <linux/config.h>
 #include <linux/stddef.h>
 #include <linux/proc_fs.h>
 #include <linux/kernel.h>
@@ -122,7 +121,7 @@ int h8300_get_gpio_dir(int port_bit)
 static char *port_status(int portno)
 {
 	static char result[10];
-	const static char io[2]={'I','O'};
+	static const char io[2]={'I','O'};
 	char *rp;
 	int c;
 	unsigned char used,ddr;
@@ -143,7 +142,7 @@ static int gpio_proc_read(char *buf, char **start, off_t offset,
                           int len, int *unused_i, void *unused_v)
 {
 	int c,outlen;
-	const static char port_name[]="123456789ABCDEFGH";
+	static const char port_name[]="123456789ABCDEFGH";
 	outlen = 0;
 	for (c = 0; c < MAX_PORT; c++) {
 		if (ddrs[c] == NULL)

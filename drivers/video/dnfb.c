@@ -2,12 +2,11 @@
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/tty.h>
-#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
+#include <linux/platform_device.h>
+
 #include <asm/setup.h>
-#include <asm/system.h>
 #include <asm/irq.h>
 #include <asm/amigahw.h>
 #include <asm/amigaints.h>
@@ -114,7 +113,6 @@ static struct fb_ops dn_fb_ops = {
 	.fb_fillrect	= cfb_fillrect,
 	.fb_copyarea	= dnfb_copyarea,
 	.fb_imageblit	= cfb_imageblit,
-	.fb_cursor	= soft_cursor,
 };
 
 struct fb_var_screeninfo dnfb_var __devinitdata = {
@@ -226,9 +224,8 @@ void dnfb_copyarea(struct fb_info *info, const struct fb_copyarea *area)
  * Initialization
  */
 
-static int __devinit dnfb_probe(struct device *device)
+static int __devinit dnfb_probe(struct platform_device *dev)
 {
-	struct platform_device *dev = to_platform_device(device);
 	struct fb_info *info;
 	int err = 0;
 
@@ -256,7 +253,7 @@ static int __devinit dnfb_probe(struct device *device)
 		framebuffer_release(info);
 		return err;
 	}
-	dev_set_drvdata(&dev->dev, info);
+	platform_set_drvdata(dev, info);
 
 	/* now we have registered we can safely setup the hardware */
 	out_8(AP_CONTROL_3A, RESET_CREG);
@@ -270,10 +267,11 @@ static int __devinit dnfb_probe(struct device *device)
 	return err;
 }
 
-static struct device_driver dnfb_driver = {
-	.name	= "dnfb",
-	.bus	= &platform_bus_type,
+static struct platform_driver dnfb_driver = {
 	.probe	= dnfb_probe,
+	.driver	= {
+		.name	= "dnfb",
+	},
 };
 
 static struct platform_device dnfb_device = {
@@ -284,15 +282,18 @@ int __init dnfb_init(void)
 {
 	int ret;
 
+	if (!MACH_IS_APOLLO)
+		return -ENODEV;
+
 	if (fb_get_options("dnfb", NULL))
 		return -ENODEV;
 
-	ret = driver_register(&dnfb_driver);
+	ret = platform_driver_register(&dnfb_driver);
 
 	if (!ret) {
 		ret = platform_device_register(&dnfb_device);
 		if (ret)
-			driver_unregister(&dnfb_driver);
+			platform_driver_unregister(&dnfb_driver);
 	}
 	return ret;
 }

@@ -4,55 +4,44 @@
  * (C) 1999 Mihai Spatar
  * (C) 2000 YAEGASHI Takeshi
  * (C) 2003, 2004 Paul Mundt
- * (C) 2003, 2004 Andriy Skulysh
+ * (C) 2003, 2004, 2006 Andriy Skulysh
  *
  *  This file is subject to the terms and conditions of the GNU General Public
  *  License. See the file COPYING in the main directory of this archive for
  *  more details.
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/tty.h>
-#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/init.h>
+#include <linux/platform_device.h>
 #include <linux/fb.h>
 
 #include <asm/machvec.h>
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
 #include <asm/io.h>
-#include <asm/hd64461/hd64461.h>
-
-#ifdef MACH_HP600
-#include <asm/cpu/dac.h>
-#include <asm/hp6xx/hp6xx.h>
-#endif
+#include <asm/hd64461.h>
+#include <cpu/dac.h>
 
 #define	WIDTH 640
 
-static struct fb_var_screeninfo hitfb_var __initdata = {
+static struct fb_var_screeninfo hitfb_var __devinitdata = {
 	.activate	= FB_ACTIVATE_NOW,
 	.height		= -1,
 	.width		= -1,
 	.vmode		= FB_VMODE_NONINTERLACED,
 };
 
-static struct fb_fix_screeninfo hitfb_fix __initdata = {
+static struct fb_fix_screeninfo hitfb_fix __devinitdata = {
 	.id		= "Hitachi HD64461",
 	.type		= FB_TYPE_PACKED_PIXELS,
-	.ypanstep	= 8,
 	.accel		= FB_ACCEL_NONE,
 };
-
-static u32 pseudo_palette[16];
-static struct fb_info fb_info;
 
 static inline void hitfb_accel_wait(void)
 {
@@ -75,24 +64,12 @@ static inline void hitfb_accel_set_dest(int truecolor, u16 dx, u16 dy,
 	if (truecolor)
 		saddr <<= 1;
 
-	fb_writew(width, HD64461_BBTDWR);
-	fb_writew(height, HD64461_BBTDHR);
+	fb_writew(width-1, HD64461_BBTDWR);
+	fb_writew(height-1, HD64461_BBTDHR);
 
 	fb_writew(saddr & 0xffff, HD64461_BBTDSARL);
 	fb_writew(saddr >> 16, HD64461_BBTDSARH);
 
-}
-
-static inline void hitfb_accel_solidfill(int truecolor, u16 dx, u16 dy,
-					 u16 width, u16 height, u16 color)
-{
-	hitfb_accel_set_dest(truecolor, dx, dy, width, height);
-
-	fb_writew(0x00f0, HD64461_BBTROPR);
-	fb_writew(16, HD64461_BBTMDR);
-	fb_writew(color, HD64461_GRSCR);
-
-	hitfb_accel_start(truecolor);
 }
 
 static inline void hitfb_accel_bitblt(int truecolor, u16 sx, u16 sy, u16 dx,
@@ -102,6 +79,8 @@ static inline void hitfb_accel_bitblt(int truecolor, u16 sx, u16 sy, u16 dx,
 	u32 saddr, daddr;
 	u32 maddr = 0;
 
+	height--;
+	width--;
 	fb_writew(rop, HD64461_BBTROPR);
 	if ((sy < dy) || ((sy == dy) && (sx <= dx))) {
 		saddr = WIDTH * (sy + height) + sx + width;
@@ -148,6 +127,7 @@ static void hitfb_fillrect(struct fb_info *p, const struct fb_fillrect *rect)
 	if (rect->rop != ROP_COPY)
 		cfb_fillrect(p, rect);
 	else {
+		hitfb_accel_wait();
 		fb_writew(0x00f0, HD64461_BBTROPR);
 		fb_writew(16, HD64461_BBTMDR);
 
@@ -163,16 +143,15 @@ static void hitfb_fillrect(struct fb_info *p, const struct fb_fillrect *rect)
 					     rect->height);
 			hitfb_accel_start(0);
 		}
-		hitfb_accel_wait();
 	}
 }
 
 static void hitfb_copyarea(struct fb_info *p, const struct fb_copyarea *area)
 {
+	hitfb_accel_wait();
 	hitfb_accel_bitblt(p->var.bits_per_pixel == 16, area->sx, area->sy,
 			   area->dx, area->dy, area->width, area->height,
 			   0x00cc, 0);
-	hitfb_accel_wait();
 }
 
 static int hitfb_pan_display(struct fb_var_screeninfo *var,
@@ -184,7 +163,7 @@ static int hitfb_pan_display(struct fb_var_screeninfo *var,
 	if (xoffset != 0)
 		return -EINVAL;
 
-	fb_writew(yoffset, HD64461_LCDCBAR);
+	fb_writew((yoffset*info->fix.line_length)>>10, HD64461_LCDCBAR);
 
 	return 0;
 }
@@ -194,12 +173,6 @@ int hitfb_blank(int blank_mode, struct fb_info *info)
 	unsigned short v;
 
 	if (blank_mode) {
-#ifdef MACH_HP600
-		sh_dac_disable(DAC_LCD_BRIGHTNESS);
-		v = fb_readw(HD64461_GPBDR);
-		v |= HD64461_GPBDR_LCDOFF;
-		fb_writew(v, HD64461_GPBDR);
-#endif
 		v = fb_readw(HD64461_LDR1);
 		v &= ~HD64461_LDR1_DON;
 		fb_writew(v, HD64461_LDR1);
@@ -215,19 +188,18 @@ int hitfb_blank(int blank_mode, struct fb_info *info)
 		v = fb_readw(HD64461_STBCR);
 		v &= ~HD64461_STBCR_SLCDST;
 		fb_writew(v, HD64461_STBCR);
-#ifdef MACH_HP600
-		sh_dac_enable(DAC_LCD_BRIGHTNESS);
-		v = fb_readw(HD64461_GPBDR);
-		v &= ~HD64461_GPBDR_LCDOFF;
-		fb_writew(v, HD64461_GPBDR);
-#endif
+
+		v = fb_readw(HD64461_LCDCCR);
+		v &= ~(HD64461_LCDCCR_MOFF | HD64461_LCDCCR_STREQ);
+		fb_writew(v, HD64461_LCDCCR);
+
+		do {
+		    v = fb_readw(HD64461_LCDCCR);
+		} while(v&HD64461_LCDCCR_STBACK);
+
 		v = fb_readw(HD64461_LDR1);
 		v |= HD64461_LDR1_DON;
 		fb_writew(v, HD64461_LDR1);
-
-		v = fb_readw(HD64461_LCDCCR);
-		v &= ~HD64461_LCDCCR_MOFF;
-		fb_writew(v, HD64461_LCDCCR);
 	}
 	return 0;
 }
@@ -235,7 +207,7 @@ int hitfb_blank(int blank_mode, struct fb_info *info)
 static int hitfb_setcolreg(unsigned regno, unsigned red, unsigned green,
 			   unsigned blue, unsigned transp, struct fb_info *info)
 {
-	if (regno >= info->cmap.len)
+	if (regno >= 256)
 		return 1;
 
 	switch (info->var.bits_per_pixel) {
@@ -246,6 +218,8 @@ static int hitfb_setcolreg(unsigned regno, unsigned red, unsigned green,
 		fb_writew(blue >> 10, HD64461_CPTWDR);
 		break;
 	case 16:
+		if (regno >= 16)
+			return 1;
 		((u32 *) (info->pseudo_palette))[regno] =
 		    ((red & 0xf800)) |
 		    ((green & 0xfc00) >> 5) | ((blue & 0xf800) >> 11);
@@ -254,27 +228,115 @@ static int hitfb_setcolreg(unsigned regno, unsigned red, unsigned green,
 	return 0;
 }
 
+static int hitfb_sync(struct fb_info *info)
+{
+	hitfb_accel_wait();
+
+	return 0;
+}
+
+static int hitfb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
+{
+	int maxy;
+
+	var->xres = info->var.xres;
+	var->xres_virtual = info->var.xres;
+	var->yres = info->var.yres;
+
+	if ((var->bits_per_pixel != 8) && (var->bits_per_pixel != 16))
+		var->bits_per_pixel = info->var.bits_per_pixel;
+
+	if (var->yres_virtual < var->yres)
+		var->yres_virtual = var->yres;
+
+	maxy = info->fix.smem_len / var->xres;
+
+	if (var->bits_per_pixel == 16)
+		maxy /= 2;
+
+	if (var->yres_virtual > maxy)
+		var->yres_virtual = maxy;
+
+	var->xoffset = 0;
+	var->yoffset = 0;
+
+	switch (var->bits_per_pixel) {
+	case 8:
+		var->red.offset = 0;
+		var->red.length = 8;
+		var->green.offset = 0;
+		var->green.length = 8;
+		var->blue.offset = 0;
+		var->blue.length = 8;
+		var->transp.offset = 0;
+		var->transp.length = 0;
+		break;
+	case 16:		/* RGB 565 */
+		var->red.offset = 11;
+		var->red.length = 5;
+		var->green.offset = 5;
+		var->green.length = 6;
+		var->blue.offset = 0;
+		var->blue.length = 5;
+		var->transp.offset = 0;
+		var->transp.length = 0;
+		break;
+	}
+
+	return 0;
+}
+
+static int hitfb_set_par(struct fb_info *info)
+{
+	unsigned short ldr3;
+
+	switch (info->var.bits_per_pixel) {
+	case 8:
+		info->fix.line_length = info->var.xres;
+		info->fix.visual = FB_VISUAL_PSEUDOCOLOR;
+		info->fix.ypanstep = 16;
+		break;
+	case 16:
+		info->fix.line_length = info->var.xres*2;
+		info->fix.visual = FB_VISUAL_TRUECOLOR;
+		info->fix.ypanstep = 8;
+		break;
+	}
+
+	fb_writew(info->fix.line_length, HD64461_LCDCLOR);
+	ldr3 = fb_readw(HD64461_LDR3);
+	ldr3 &= ~15;
+	ldr3 |= (info->var.bits_per_pixel == 8) ? 4 : 8;
+	fb_writew(ldr3, HD64461_LDR3);
+	return 0;
+}
+
 static struct fb_ops hitfb_ops = {
 	.owner		= THIS_MODULE,
+	.fb_check_var	= hitfb_check_var,
+	.fb_set_par		= hitfb_set_par,
 	.fb_setcolreg	= hitfb_setcolreg,
 	.fb_blank	= hitfb_blank,
+	.fb_sync	= hitfb_sync,
 	.fb_pan_display = hitfb_pan_display,
 	.fb_fillrect	= hitfb_fillrect,
 	.fb_copyarea	= hitfb_copyarea,
 	.fb_imageblit	= cfb_imageblit,
-	.fb_cursor	= soft_cursor,
 };
 
-int __init hitfb_init(void)
+static int __devinit hitfb_probe(struct platform_device *dev)
 {
 	unsigned short lcdclor, ldr3, ldvndr;
-	int size;
+	struct fb_info *info;
+	int ret;
 
 	if (fb_get_options("hitfb", NULL))
 		return -ENODEV;
 
-	hitfb_fix.smem_start = CONFIG_HD64461_IOBASE + 0x02000000;
-	hitfb_fix.smem_len = (MACH_HP690) ? 1024 * 1024 : 512 * 1024;
+	hitfb_fix.mmio_start = HD64461_IO_OFFSET(0x1000);
+	hitfb_fix.mmio_len = 0x1000;
+	hitfb_fix.smem_start = HD64461_IO_OFFSET(0x02000000);
+	hitfb_fix.smem_len = 512 * 1024;
 
 	lcdclor = fb_readw(HD64461_LCDCLOR);
 	ldvndr = fb_readw(HD64461_LDVNDR);
@@ -320,28 +382,117 @@ int __init hitfb_init(void)
 		break;
 	}
 
-	fb_info.fbops = &hitfb_ops;
-	fb_info.var = hitfb_var;
-	fb_info.fix = hitfb_fix;
-	fb_info.pseudo_palette = pseudo_palette;
-	fb_info.flags = FBINFO_DEFAULT;
+	info = framebuffer_alloc(sizeof(u32) * 16, &dev->dev);
+	if (unlikely(!info))
+		return -ENOMEM;
 
-	fb_info.screen_base = (void *)hitfb_fix.smem_start;
+	info->fbops = &hitfb_ops;
+	info->var = hitfb_var;
+	info->fix = hitfb_fix;
+	info->pseudo_palette = info->par;
+	info->flags = FBINFO_DEFAULT | FBINFO_HWACCEL_YPAN |
+		FBINFO_HWACCEL_FILLRECT | FBINFO_HWACCEL_COPYAREA;
 
-	size = (fb_info.var.bits_per_pixel == 8) ? 256 : 16;
-	fb_alloc_cmap(&fb_info.cmap, size, 0);
+	info->screen_base = (void *)hitfb_fix.smem_start;
 
-	if (register_framebuffer(&fb_info) < 0)
-		return -EINVAL;
+	ret = fb_alloc_cmap(&info->cmap, 256, 0);
+	if (unlikely(ret < 0))
+		goto err_fb;
+
+	ret = register_framebuffer(info);
+	if (unlikely(ret < 0))
+		goto err;
+
+	platform_set_drvdata(dev, info);
 
 	printk(KERN_INFO "fb%d: %s frame buffer device\n",
-	       fb_info.node, fb_info.fix.id);
+	       info->node, info->fix.id);
+
+	return 0;
+
+err:
+	fb_dealloc_cmap(&info->cmap);
+err_fb:
+	framebuffer_release(info);
+	return ret;
+}
+
+static int __devexit hitfb_remove(struct platform_device *dev)
+{
+	struct fb_info *info = platform_get_drvdata(dev);
+
+	unregister_framebuffer(info);
+	fb_dealloc_cmap(&info->cmap);
+	framebuffer_release(info);
+
 	return 0;
 }
 
+static int hitfb_suspend(struct device *dev)
+{
+	u16 v;
+
+	hitfb_blank(1,0);
+	v = fb_readw(HD64461_STBCR);
+	v |= HD64461_STBCR_SLCKE_IST;
+	fb_writew(v, HD64461_STBCR);
+
+	return 0;
+}
+
+static int hitfb_resume(struct device *dev)
+{
+	u16 v;
+
+	v = fb_readw(HD64461_STBCR);
+	v &= ~HD64461_STBCR_SLCKE_OST;
+	msleep(100);
+	v = fb_readw(HD64461_STBCR);
+	v &= ~HD64461_STBCR_SLCKE_IST;
+	fb_writew(v, HD64461_STBCR);
+	hitfb_blank(0,0);
+
+	return 0;
+}
+
+static const struct dev_pm_ops hitfb_dev_pm_ops = {
+	.suspend	= hitfb_suspend,
+	.resume		= hitfb_resume,
+};
+
+static struct platform_driver hitfb_driver = {
+	.probe		= hitfb_probe,
+	.remove		= __devexit_p(hitfb_remove),
+	.driver		= {
+		.name	= "hitfb",
+		.owner	= THIS_MODULE,
+		.pm	= &hitfb_dev_pm_ops,
+	},
+};
+
+static struct platform_device hitfb_device = {
+	.name	= "hitfb",
+	.id	= -1,
+};
+
+static int __init hitfb_init(void)
+{
+	int ret;
+
+	ret = platform_driver_register(&hitfb_driver);
+	if (!ret) {
+		ret = platform_device_register(&hitfb_device);
+		if (ret)
+			platform_driver_unregister(&hitfb_driver);
+	}
+	return ret;
+}
+
+
 static void __exit hitfb_exit(void)
 {
-	unregister_framebuffer(&fb_info);
+	platform_device_unregister(&hitfb_device);
+	platform_driver_unregister(&hitfb_driver);
 }
 
 module_init(hitfb_init);

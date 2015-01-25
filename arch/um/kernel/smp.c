@@ -1,15 +1,11 @@
-/* 
- * Copyright (C) 2000 - 2003 Jeff Dike (jdike@addtoit.com)
+/*
+ * Copyright (C) 2000 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  * Licensed under the GPL
  */
 
-#include "linux/config.h"
 #include "linux/percpu.h"
 #include "asm/pgalloc.h"
 #include "asm/tlb.h"
-
-/* For some reason, mmu_gathers are referenced when CONFIG_SMP is off. */
-DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
 
 #ifdef CONFIG_SMP
 
@@ -22,18 +18,9 @@ DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
 #include "asm/smp.h"
 #include "asm/processor.h"
 #include "asm/spinlock.h"
-#include "user_util.h"
-#include "kern_util.h"
 #include "kern.h"
 #include "irq_user.h"
 #include "os.h"
-
-/* CPU online map, set by smp_boot_cpus */
-cpumask_t cpu_online_map = CPU_MASK_NONE;
-cpumask_t cpu_possible_map = CPU_MASK_NONE;
-
-EXPORT_SYMBOL(cpu_online_map);
-EXPORT_SYMBOL(cpu_possible_map);
 
 /* Per CPU bogomips and other parameters
  * The only piece used here is the ipi pipe, which is set before SMP is
@@ -58,12 +45,12 @@ void smp_send_stop(void)
 	int i;
 
 	printk(KERN_INFO "Stopping all CPUs...");
-	for(i = 0; i < num_online_cpus(); i++){
-		if(i == current_thread->cpu)
+	for (i = 0; i < num_online_cpus(); i++) {
+		if (i == current_thread->cpu)
 			continue;
 		os_write_file(cpu_data[i].ipi_pipe[1], "S", 1);
 	}
-	printk("done\n");
+	printk(KERN_CONT "done\n");
 }
 
 static cpumask_t smp_commenced_mask = CPU_MASK_NONE;
@@ -74,46 +61,43 @@ static int idle_proc(void *cpup)
 	int cpu = (int) cpup, err;
 
 	err = os_pipe(cpu_data[cpu].ipi_pipe, 1, 1);
-	if(err < 0)
+	if (err < 0)
 		panic("CPU#%d failed to create IPI pipe, err = %d", cpu, -err);
 
-	activate_ipi(cpu_data[cpu].ipi_pipe[0], 
-		     current->thread.mode.tt.extern_pid);
- 
+	os_set_fd_async(cpu_data[cpu].ipi_pipe[0]);
+
 	wmb();
 	if (cpu_test_and_set(cpu, cpu_callin_map)) {
-		printk("huh, CPU#%d already present??\n", cpu);
+		printk(KERN_ERR "huh, CPU#%d already present??\n", cpu);
 		BUG();
 	}
 
 	while (!cpu_isset(cpu, smp_commenced_mask))
 		cpu_relax();
 
-	cpu_set(cpu, cpu_online_map);
+	notify_cpu_starting(cpu);
+	set_cpu_online(cpu, true);
 	default_idle();
-	return(0);
+	return 0;
 }
 
 static struct task_struct *idle_thread(int cpu)
 {
 	struct task_struct *new_task;
-	unsigned char c;
 
-        current->thread.request.u.thread.proc = idle_proc;
-        current->thread.request.u.thread.arg = (void *) cpu;
+	current->thread.request.u.thread.proc = idle_proc;
+	current->thread.request.u.thread.arg = (void *) cpu;
 	new_task = fork_idle(cpu);
-	if(IS_ERR(new_task))
+	if (IS_ERR(new_task))
 		panic("copy_process failed in idle_thread, error = %ld",
 		      PTR_ERR(new_task));
 
-	cpu_tasks[cpu] = ((struct cpu_task) 
+	cpu_tasks[cpu] = ((struct cpu_task)
 		          { .pid = 	new_task->thread.mode.tt.extern_pid,
 			    .task = 	new_task } );
 	idle_threads[cpu] = new_task;
-	CHOOSE_MODE(os_write_file(new_task->thread.mode.tt.switch_pipe[1], &c,
-			  sizeof(c)),
-		    ({ panic("skas mode doesn't support SMP"); }));
-	return(new_task);
+	panic("skas mode doesn't support SMP");
+	return new_task;
 }
 
 void smp_prepare_cpus(unsigned int maxcpus)
@@ -124,54 +108,50 @@ void smp_prepare_cpus(unsigned int maxcpus)
 	int i;
 
 	for (i = 0; i < ncpus; ++i)
-		cpu_set(i, cpu_possible_map);
+		set_cpu_possible(i, true);
 
-	cpu_clear(me, cpu_online_map);
-	cpu_set(me, cpu_online_map);
+	set_cpu_online(me, true);
 	cpu_set(me, cpu_callin_map);
 
 	err = os_pipe(cpu_data[me].ipi_pipe, 1, 1);
-	if(err < 0)
+	if (err < 0)
 		panic("CPU#0 failed to create IPI pipe, errno = %d", -err);
 
-	activate_ipi(cpu_data[me].ipi_pipe[0],
-		     current->thread.mode.tt.extern_pid);
+	os_set_fd_async(cpu_data[me].ipi_pipe[0]);
 
-	for(cpu = 1; cpu < ncpus; cpu++){
-		printk("Booting processor %d...\n", cpu);
-		
+	for (cpu = 1; cpu < ncpus; cpu++) {
+		printk(KERN_INFO "Booting processor %d...\n", cpu);
+
 		idle = idle_thread(cpu);
 
 		init_idle(idle, cpu);
-		unhash_process(idle);
 
 		waittime = 200000000;
 		while (waittime-- && !cpu_isset(cpu, cpu_callin_map))
 			cpu_relax();
 
-		if (cpu_isset(cpu, cpu_callin_map))
-			printk("done\n");
-		else printk("failed\n");
+		printk(KERN_INFO "%s\n",
+		       cpu_isset(cpu, cpu_calling_map) ? "done" : "failed");
 	}
 }
 
 void smp_prepare_boot_cpu(void)
 {
-	cpu_set(smp_processor_id(), cpu_online_map);
+	set_cpu_online(smp_processor_id(), true);
 }
 
 int __cpu_up(unsigned int cpu)
 {
 	cpu_set(cpu, smp_commenced_mask);
-	while (!cpu_isset(cpu, cpu_online_map))
+	while (!cpu_online(cpu))
 		mb();
-	return(0);
+	return 0;
 }
 
 int setup_profiling_timer(unsigned int multiplier)
 {
 	printk(KERN_INFO "setup_profiling_timer\n");
-	return(0);
+	return 0;
 }
 
 void smp_call_function_slave(int cpu);
@@ -189,17 +169,18 @@ void IPI_handler(int cpu)
 			break;
 
 		case 'R':
-			set_tsk_need_resched(current);
+			scheduler_ipi();
 			break;
 
 		case 'S':
-			printk("CPU#%d stopping\n", cpu);
-			while(1)
+			printk(KERN_INFO "CPU#%d stopping\n", cpu);
+			while (1)
 				pause();
 			break;
 
 		default:
-			printk("CPU#%d received unknown IPI [%c]!\n", cpu, c);
+			printk(KERN_ERR "CPU#%d received unknown IPI [%c]!\n",
+			       cpu, c);
 			break;
 		}
 	}
@@ -207,7 +188,7 @@ void IPI_handler(int cpu)
 
 int hard_smp_processor_id(void)
 {
-	return(pid_to_processor_id(os_getpid()));
+	return pid_to_processor_id(os_getpid());
 }
 
 static DEFINE_SPINLOCK(call_lock);
@@ -223,8 +204,7 @@ void smp_call_function_slave(int cpu)
 	atomic_inc(&scf_finished);
 }
 
-int smp_call_function(void (*_func)(void *info), void *_info, int nonatomic, 
-		      int wait)
+int smp_call_function(void (*_func)(void *info), void *_info, int wait)
 {
 	int cpus = num_online_cpus() - 1;
 	int i;
@@ -256,14 +236,3 @@ int smp_call_function(void (*_func)(void *info), void *_info, int nonatomic,
 }
 
 #endif
-
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-file-style: "linux"
- * End:
- */

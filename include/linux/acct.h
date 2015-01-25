@@ -16,6 +16,7 @@
 #define _LINUX_ACCT_H
 
 #include <linux/types.h>
+
 #include <asm/param.h>
 #include <asm/byteorder.h>
 
@@ -114,19 +115,24 @@ struct acct_v3
 
 #ifdef __KERNEL__
 
-#include <linux/config.h>
 
 #ifdef CONFIG_BSD_PROCESS_ACCT
+struct vfsmount;
 struct super_block;
+struct pacct_struct;
+struct pid_namespace;
+extern int acct_parm[]; /* for sysctl */
+extern void acct_auto_close_mnt(struct vfsmount *m);
 extern void acct_auto_close(struct super_block *sb);
-extern void acct_process(long exitcode);
-extern void acct_update_integrals(struct task_struct *tsk);
-extern void acct_clear_integrals(struct task_struct *tsk);
+extern void acct_collect(long exitcode, int group_dead);
+extern void acct_process(void);
+extern void acct_exit_ns(struct pid_namespace *);
 #else
+#define acct_auto_close_mnt(x)	do { } while (0)
 #define acct_auto_close(x)	do { } while (0)
-#define acct_process(x)		do { } while (0)
-#define acct_update_integrals(x)		do { } while (0)
-#define acct_clear_integrals(task)	do { } while (0)
+#define acct_collect(x,y)	do { } while (0)
+#define acct_process()		do { } while (0)
+#define acct_exit_ns(ns)	do { } while (0)
 #endif
 
 /*
@@ -139,6 +145,9 @@ extern void acct_clear_integrals(struct task_struct *tsk);
  * 5: new binary incompatible format (128 bytes, second half)
  *
  */
+
+#undef ACCT_VERSION
+#undef AHZ
 
 #ifdef CONFIG_BSD_PROCESS_ACCT_V3
 #define ACCT_VERSION	3
@@ -160,15 +169,20 @@ typedef struct acct acct_t;
 #endif	/* __KERNEL */
 
 #ifdef __KERNEL__
+#include <linux/jiffies.h>
 /*
  * Yet another set of HZ to *HZ helper functions.
- * See <linux/times.h> for the original.
+ * See <linux/jiffies.h> for the original.
  */
 
 static inline u32 jiffies_to_AHZ(unsigned long x)
 {
 #if (TICK_NSEC % (NSEC_PER_SEC / AHZ)) == 0
-	return x / (HZ / USER_HZ);
+# if HZ < AHZ
+	return x * (AHZ / HZ);
+# else
+	return x / (HZ / AHZ);
+# endif
 #else
         u64 tmp = (u64)x * TICK_NSEC;
         do_div(tmp, (NSEC_PER_SEC / AHZ));

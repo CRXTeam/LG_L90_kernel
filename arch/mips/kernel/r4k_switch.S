@@ -4,18 +4,17 @@
  * for more details.
  *
  * Copyright (C) 1994, 1995, 1996, 1998, 1999, 2002, 2003 Ralf Baechle
- * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
+ * Copyright (C) 1996 David S. Miller (davem@davemloft.net)
  * Copyright (C) 1994, 1995, 1996, by Andreas Busse
  * Copyright (C) 1999 Silicon Graphics, Inc.
  * Copyright (C) 2000 MIPS Technologies, Inc.
  *    written by Carsten Langgaard, carstenl@mips.com
  */
-#include <linux/config.h>
 #include <asm/asm.h>
 #include <asm/cachectl.h>
 #include <asm/fpregdef.h>
 #include <asm/mipsregs.h>
-#include <asm/offset.h>
+#include <asm/asm-offsets.h>
 #include <asm/page.h>
 #include <asm/pgtable-bits.h>
 #include <asm/regdef.h>
@@ -33,7 +32,7 @@
 /*
  * FPU context is saved iff the process has used it's FPU in the current
  * time slice as indicated by _TIF_USEDFPU.  In any case, the CU1 bit for user
- * space STATUS register should be 0, so that a process *always* starts its 
+ * space STATUS register should be 0, so that a process *always* starts its
  * userland with FPU disabled after each context switch.
  *
  * FPU will be enabled as soon as the process accesses FPU again, through
@@ -46,9 +45,6 @@
  */
 	.align	5
 	LEAF(resume)
-#ifndef CONFIG_CPU_HAS_LLSC
-	sw	zero, ll_bit
-#endif
 	mfc0	t1, CP0_STATUS
 	LONG_S	t1, THREAD_STATUS(a0)
 	cpu_save_nonscratch a0
@@ -75,8 +71,8 @@
 	and	t0, t0, t1
 	LONG_S	t0, ST_OFF(t3)
 
-	fpu_save_double a0 t1 t0 t2		# c0_status passed in t1
-						# clobbers t0 and t2
+	fpu_save_double a0 t0 t1		# c0_status passed in t0
+						# clobbers t1
 1:
 
 	/*
@@ -86,9 +82,20 @@
 	move	$28, a2
 	cpu_restore_nonscratch a1
 
-	PTR_ADDIU	t0, $28, _THREAD_SIZE - 32
+	PTR_ADDU	t0, $28, _THREAD_SIZE - 32
 	set_saved_sp	t0, t1, t2
-
+#ifdef CONFIG_MIPS_MT_SMTC
+	/* Read-modify-writes of Status must be atomic on a VPE */
+	mfc0	t2, CP0_TCSTATUS
+	ori	t1, t2, TCSTATUS_IXMT
+	mtc0	t1, CP0_TCSTATUS
+	andi	t2, t2, TCSTATUS_IXMT
+	_ehb
+	DMT	8				# dmt	t0
+	move	t1,ra
+	jal	mips_ihb
+	move	ra,t1
+#endif /* CONFIG_MIPS_MT_SMTC */
 	mfc0	t1, CP0_STATUS		/* Do we really need this? */
 	li	a3, 0xff01
 	and	t1, a3
@@ -97,6 +104,18 @@
 	and	a2, a3
 	or	a2, t1
 	mtc0	a2, CP0_STATUS
+#ifdef CONFIG_MIPS_MT_SMTC
+	_ehb
+	andi	t0, t0, VPECONTROL_TE
+	beqz	t0, 1f
+	emt
+1:
+	mfc0	t1, CP0_TCSTATUS
+	xori	t1, t1, TCSTATUS_IXMT
+	or	t1, t1, t2
+	mtc0	t1, CP0_TCSTATUS
+	_ehb
+#endif /* CONFIG_MIPS_MT_SMTC */
 	move	v0, a0
 	jr	ra
 	END(resume)
@@ -105,10 +124,10 @@
  * Save a thread's fp context.
  */
 LEAF(_save_fp)
-#ifdef CONFIG_MIPS64
-	mfc0	t1, CP0_STATUS
+#ifdef CONFIG_64BIT
+	mfc0	t0, CP0_STATUS
 #endif
-	fpu_save_double a0 t1 t0 t2		# clobbers t1
+	fpu_save_double a0 t0 t1		# clobbers t1
 	jr	ra
 	END(_save_fp)
 
@@ -116,7 +135,10 @@ LEAF(_save_fp)
  * Restore a thread's fp context.
  */
 LEAF(_restore_fp)
-	fpu_restore_double a0, t1		# clobbers t1
+#ifdef CONFIG_64BIT
+	mfc0	t0, CP0_STATUS
+#endif
+	fpu_restore_double a0 t0 t1		# clobbers t1
 	jr	ra
 	END(_restore_fp)
 
@@ -131,18 +153,27 @@ LEAF(_restore_fp)
 #define FPU_DEFAULT  0x00000000
 
 LEAF(_init_fpu)
+#ifdef CONFIG_MIPS_MT_SMTC
+	/* Rather than manipulate per-VPE Status, set per-TC bit in TCStatus */
+	mfc0	t0, CP0_TCSTATUS
+	/* Bit position is the same for Status, TCStatus */
+	li	t1, ST0_CU1
+	or	t0, t1
+	mtc0	t0, CP0_TCSTATUS
+#else /* Normal MIPS CU1 enable */
 	mfc0	t0, CP0_STATUS
 	li	t1, ST0_CU1
 	or	t0, t1
 	mtc0	t0, CP0_STATUS
-	fpu_enable_hazard
+#endif /* CONFIG_MIPS_MT_SMTC */
+	enable_fpu_hazard
 
 	li	t1, FPU_DEFAULT
 	ctc1	t1, fcr31
 
 	li	t1, -1				# SNaN
 
-#ifdef CONFIG_MIPS64
+#ifdef CONFIG_64BIT
 	sll	t0, t0, 5
 	bgez	t0, 1f				# 16 / 32 register mode?
 
@@ -164,7 +195,7 @@ LEAF(_init_fpu)
 	dmtc1	t1, $f31
 1:
 #endif
-	
+
 #ifdef CONFIG_CPU_MIPS32
 	mtc1	t1, $f0
 	mtc1	t1, $f1

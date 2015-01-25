@@ -1,4 +1,4 @@
-/* $Id: hypersparc.S,v 1.18 2001/12/21 04:56:15 davem Exp $
+/*
  * hypersparc.S: High speed Hypersparc mmu/cache operations.
  *
  * Copyright (C) 1997 David S. Miller (davem@caip.rutgers.edu)
@@ -6,11 +6,10 @@
 
 #include <asm/ptrace.h>
 #include <asm/psr.h>
-#include <asm/asm_offsets.h>
+#include <asm/asm-offsets.h>
 #include <asm/asi.h>
 #include <asm/page.h>
 #include <asm/pgtsrmmu.h>
-#include <linux/config.h>
 #include <linux/init.h>
 
 	.text

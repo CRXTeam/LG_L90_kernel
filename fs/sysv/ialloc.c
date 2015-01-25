@@ -25,6 +25,7 @@
 #include <linux/stat.h>
 #include <linux/string.h>
 #include <linux/buffer_head.h>
+#include <linux/writeback.h>
 #include "sysv.h"
 
 /* We don't trust the value of
@@ -112,7 +113,6 @@ void sysv_free_inode(struct inode * inode)
 		return;
 	}
 	raw_inode = sysv_raw_inode(sb, ino, &bh);
-	clear_inode(inode);
 	if (!raw_inode) {
 		printk("sysv_free_inode: unable to read inode block on device "
 		       "%s\n", inode->i_sb->s_id);
@@ -132,13 +132,16 @@ void sysv_free_inode(struct inode * inode)
 	brelse(bh);
 }
 
-struct inode * sysv_new_inode(const struct inode * dir, mode_t mode)
+struct inode * sysv_new_inode(const struct inode * dir, umode_t mode)
 {
 	struct super_block *sb = dir->i_sb;
 	struct sysv_sb_info *sbi = SYSV_SB(sb);
 	struct inode *inode;
 	sysv_ino_t ino;
 	unsigned count;
+	struct writeback_control wbc = {
+		.sync_mode = WB_SYNC_NONE
+	};
 
 	inode = new_inode(sb);
 	if (!inode)
@@ -159,25 +162,16 @@ struct inode * sysv_new_inode(const struct inode * dir, mode_t mode)
 	*sbi->s_sb_fic_count = cpu_to_fs16(sbi, count);
 	fs16_add(sbi, sbi->s_sb_total_free_inodes, -1);
 	dirty_sb(sb);
-	
-	if (dir->i_mode & S_ISGID) {
-		inode->i_gid = dir->i_gid;
-		if (S_ISDIR(mode))
-			mode |= S_ISGID;
-	} else
-		inode->i_gid = current->fsgid;
-
-	inode->i_uid = current->fsuid;
+	inode_init_owner(inode, dir, mode);
 	inode->i_ino = fs16_to_cpu(sbi, ino);
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME_SEC;
-	inode->i_blocks = inode->i_blksize = 0;
+	inode->i_blocks = 0;
 	memset(SYSV_I(inode)->i_data, 0, sizeof(SYSV_I(inode)->i_data));
 	SYSV_I(inode)->i_dir_start_lookup = 0;
 	insert_inode_hash(inode);
 	mark_inode_dirty(inode);
 
-	inode->i_mode = mode;		/* for sysv_write_inode() */
-	sysv_write_inode(inode, 0);	/* ensure inode not allocated again */
+	sysv_write_inode(inode, &wbc);	/* ensure inode not allocated again */
 	mark_inode_dirty(inode);	/* cleared by sysv_write_inode() */
 	/* That's it. */
 	unlock_super(sb);

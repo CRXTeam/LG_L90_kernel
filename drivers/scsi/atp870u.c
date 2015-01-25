@@ -1,8 +1,8 @@
 /* 
  *  Copyright (C) 1997	Wu Ching Chen
  *  2.1.x update (C) 1998  Krzysztof G. Baranowski
- *  2.5.x update (C) 2002  Red Hat <alan@redhat.com>
- *  2.6.x update (C) 2004  Red Hat <alan@redhat.com>
+ *  2.5.x update (C) 2002  Red Hat
+ *  2.6.x update (C) 2004  Red Hat
  *
  * Marcelo Tosatti <marcelo@conectiva.com.br> : SMP fixes
  *
@@ -28,7 +28,8 @@
 #include <linux/spinlock.h>
 #include <linux/pci.h>
 #include <linux/blkdev.h>
-#include <asm/system.h>
+#include <linux/dma-mapping.h>
+#include <linux/slab.h>
 #include <asm/io.h>
 
 #include <scsi/scsi.h>
@@ -43,7 +44,7 @@ static void send_s870(struct atp_unit *dev,unsigned char c);
 static void is885(struct atp_unit *dev, unsigned int wkport,unsigned char c);
 static void tscam_885(void);
 
-static irqreturn_t atp870u_intr_handle(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t atp870u_intr_handle(int irq, void *dev_id)
 {
 	unsigned long flags;
 	unsigned short int tmpcip, id;
@@ -297,11 +298,10 @@ stop_dma:
 			}
 			workreq = dev->id[c][target_id].curr_req;
 #ifdef ED_DBGP			
-			printk(KERN_DEBUG "Channel = %d ID = %d LUN = %d CDB",c,workreq->device->id,workreq->device->lun);
-			for(l=0;l<workreq->cmd_len;l++)
-			{
+			scmd_printk(KERN_DEBUG, workreq, "CDB");
+			for (l = 0; l < workreq->cmd_len; l++)
 				printk(KERN_DEBUG " %x",workreq->cmnd[l]);
-			}
+			printk("\n");
 #endif	
 			
 			tmport = workport + 0x0f;
@@ -471,18 +471,8 @@ go_42:
 			/*
 			 *	Complete the command
 			 */
-			if (workreq->use_sg) {
-				pci_unmap_sg(dev->pdev,
-					(struct scatterlist *)workreq->buffer,
-					workreq->use_sg,
-					workreq->sc_data_direction);
-			} else if (workreq->request_bufflen &&
-					workreq->sc_data_direction != DMA_NONE) {
-				pci_unmap_single(dev->pdev,
-					workreq->SCp.dma_handle,
-					workreq->request_bufflen,
-					workreq->sc_data_direction);
-			}			
+			scsi_dma_unmap(workreq);
+
 			spin_lock_irqsave(dev->host->host_lock, flags);
 			(*workreq->scsi_done) (workreq);
 #ifdef ED_DBGP
@@ -614,7 +604,7 @@ handled:
  *
  *	Queue a command to the ATP queue. Called with the host lock held.
  */
-static int atp870u_queuecommand(struct scsi_cmnd * req_p, 
+static int atp870u_queuecommand_lck(struct scsi_cmnd *req_p,
 			 void (*done) (struct scsi_cmnd *))
 {
 	unsigned char c;
@@ -622,10 +612,10 @@ static int atp870u_queuecommand(struct scsi_cmnd * req_p,
 	struct atp_unit *dev;
 	struct Scsi_Host *host;
 
-	c = req_p->device->channel;	
+	c = scmd_channel(req_p);
 	req_p->sense_buffer[0]=0;
-	req_p->resid = 0;
-	if (req_p->device->channel > 1) {
+	scsi_set_resid(req_p, 0);
+	if (scmd_channel(req_p) > 1) {
 		req_p->result = 0x00040000;
 		done(req_p);
 #ifdef ED_DBGP		
@@ -640,7 +630,7 @@ static int atp870u_queuecommand(struct scsi_cmnd * req_p,
 
 		
 	m = 1;
-	m = m << req_p->device->id;
+	m = m << scmd_id(req_p);
 
 	/*
 	 *      Fake a timeout for missing targets
@@ -703,6 +693,8 @@ static int atp870u_queuecommand(struct scsi_cmnd * req_p,
 	return 0;
 }
 
+static DEF_SCSI_QCMD(atp870u_queuecommand)
+
 /**
  *	send_s870	-	send a command to the controller
  *	@host: host
@@ -722,7 +714,6 @@ static void send_s870(struct atp_unit *dev,unsigned char c)
 	unsigned short int tmpcip, w;
 	unsigned long l, bttl = 0;
 	unsigned int workport;
-	struct scatterlist *sgpnt;
 	unsigned long  sg_count;
 
 	if (dev->in_snd[c] != 0) {
@@ -758,9 +749,9 @@ static void send_s870(struct atp_unit *dev,unsigned char c)
 		dev->quhd[c] = 0;
 	}
 	workreq = dev->quereq[c][dev->quhd[c]];
-	if (dev->id[c][workreq->device->id].curr_req == 0) {	
-		dev->id[c][workreq->device->id].curr_req = workreq;
-		dev->last_cmd[c] = workreq->device->id;
+	if (dev->id[c][scmd_id(workreq)].curr_req == NULL) {
+		dev->id[c][scmd_id(workreq)].curr_req = workreq;
+		dev->last_cmd[c] = scmd_id(workreq);
 		goto cmd_subp;
 	}	
 	dev->quhd[c] = j;
@@ -787,30 +778,31 @@ abortsnd:
 oktosend:
 #ifdef ED_DBGP
 	printk("OK to Send\n");
-	printk("CDB");
+	scmd_printk(KERN_DEBUG, workreq, "CDB");
 	for(i=0;i<workreq->cmd_len;i++) {
 		printk(" %x",workreq->cmnd[i]);
 	}
-	printk("\nChannel = %d ID = %d LUN = %d\n",c,workreq->device->id,workreq->device->lun);
+	printk("\n");
 #endif	
+	l = scsi_bufflen(workreq);
+
 	if (dev->dev_id == ATP885_DEVID) {
 		j = inb(dev->baseport + 0x29) & 0xfe;
 		outb(j, dev->baseport + 0x29);
-		dev->r1f[c][workreq->device->id] = 0;
+		dev->r1f[c][scmd_id(workreq)] = 0;
 	}
 	
 	if (workreq->cmnd[0] == READ_CAPACITY) {
-		if (workreq->request_bufflen > 8) {
-			workreq->request_bufflen = 0x08;
-		}
+		if (l > 8)
+			l = 8;
 	}
 	if (workreq->cmnd[0] == 0x00) {
-		workreq->request_bufflen = 0;
+		l = 0;
 	}
 
 	tmport = workport + 0x1b;
 	j = 0;
-	target_id = workreq->device->id;
+	target_id = scmd_id(workreq);
 
 	/*
 	 *	Wide ?
@@ -852,40 +844,8 @@ oktosend:
 #ifdef ED_DBGP	
 	printk("dev->id[%d][%d].devsp = %2x\n",c,target_id,dev->id[c][target_id].devsp);
 #endif
-	/*
-	 *	Figure out the transfer size
-	 */
-	if (workreq->use_sg) {
-#ifdef ED_DBGP
-		printk("Using SGL\n");
-#endif		
-		l = 0;
-		
-		sgpnt = (struct scatterlist *) workreq->request_buffer;
-		sg_count = pci_map_sg(dev->pdev, sgpnt, workreq->use_sg,
-	   			workreq->sc_data_direction);		
-		
-		for (i = 0; i < workreq->use_sg; i++) {
-			if (sgpnt[i].length == 0 || workreq->use_sg > ATP870U_SCATTER) {
-				panic("Foooooooood fight!");
-			}
-			l += sgpnt[i].length;
-		}
-#ifdef ED_DBGP		
-		printk( "send_s870: workreq->use_sg %d, sg_count %d l %8ld\n", workreq->use_sg, sg_count, l);
-#endif
-	} else if(workreq->request_bufflen && workreq->sc_data_direction != PCI_DMA_NONE) {
-#ifdef ED_DBGP
-		printk("Not using SGL\n");
-#endif					
-		workreq->SCp.dma_handle = pci_map_single(dev->pdev, workreq->request_buffer,
-				workreq->request_bufflen,
-				workreq->sc_data_direction);		
-		l = workreq->request_bufflen;
-#ifdef ED_DBGP		
-		printk( "send_s870: workreq->use_sg %d, l %8ld\n", workreq->use_sg, l);
-#endif
-	} else l = 0;
+
+	sg_count = scsi_dma_map(workreq);
 	/*
 	 *	Write transfer size
 	 */
@@ -938,16 +898,16 @@ oktosend:
 	 *	a linear chain.
 	 */
 
-	if (workreq->use_sg) {
-		sgpnt = (struct scatterlist *) workreq->request_buffer;
+	if (l) {
+		struct scatterlist *sgpnt;
 		i = 0;
-		for (j = 0; j < workreq->use_sg; j++) {
-			bttl = sg_dma_address(&sgpnt[j]);
-			l=sg_dma_len(&sgpnt[j]);
+		scsi_for_each_sg(workreq, sgpnt, sg_count, j) {
+			bttl = sg_dma_address(sgpnt);
+			l=sg_dma_len(sgpnt);
 #ifdef ED_DBGP		
-		printk("1. bttl %x, l %x\n",bttl, l);
+			printk("1. bttl %x, l %x\n",bttl, l);
 #endif			
-		while (l > 0x10000) {
+			while (l > 0x10000) {
 				(((u16 *) (prd))[i + 3]) = 0x0000;
 				(((u16 *) (prd))[i + 2]) = 0x0000;
 				(((u32 *) (prd))[i >> 1]) = cpu_to_le32(bttl);
@@ -965,37 +925,12 @@ oktosend:
 		printk("prd %4x %4x %4x %4x\n",(((unsigned short int *)prd)[0]),(((unsigned short int *)prd)[1]),(((unsigned short int *)prd)[2]),(((unsigned short int *)prd)[3]));
 		printk("2. bttl %x, l %x\n",bttl, l);
 #endif			
-	} else {
-		/*
-		 *	For a linear request write a chain of blocks
-		 */        
-		bttl = workreq->SCp.dma_handle;
-		l = workreq->request_bufflen;
-		i = 0;
-#ifdef ED_DBGP		
-		printk("3. bttl %x, l %x\n",bttl, l);
-#endif			
-		while (l > 0x10000) {
-				(((u16 *) (prd))[i + 3]) = 0x0000;
-				(((u16 *) (prd))[i + 2]) = 0x0000;
-				(((u32 *) (prd))[i >> 1]) = cpu_to_le32(bttl);
-				l -= 0x10000;
-				bttl += 0x10000;
-				i += 0x04;
-			}
-			(((u16 *) (prd))[i + 3]) = cpu_to_le16(0x8000);
-			(((u16 *) (prd))[i + 2]) = cpu_to_le16(l);
-			(((u32 *) (prd))[i >> 1]) = cpu_to_le32(bttl);		
-#ifdef ED_DBGP		
-		printk("prd %4x %4x %4x %4x\n",(((unsigned short int *)prd)[0]),(((unsigned short int *)prd)[1]),(((unsigned short int *)prd)[2]),(((unsigned short int *)prd)[3]));
-		printk("4. bttl %x, l %x\n",bttl, l);
-#endif			
-		
 	}
 	tmpcip += 4;
 #ifdef ED_DBGP		
 	printk("send_s870: prdaddr_2 0x%8x tmpcip %x target_id %d\n", dev->id[c][target_id].prdaddr,tmpcip,target_id);
 #endif	
+	dev->id[c][target_id].prdaddr = dev->id[c][target_id].prd_bus;
 	outl(dev->id[c][target_id].prdaddr, tmpcip);
 	tmpcip = tmpcip - 2;
 	outb(0x06, tmpcip);
@@ -1292,7 +1227,7 @@ TCM_5:			/* isolation complete..  */
 	printk(" \n%x %x %x %s\n ",assignid_map,mbuf[0],mbuf[1],&mbuf[2]); */
 	i = 15;
 	j = mbuf[0];
-	if ((j & 0x20) != 0) {	/* bit5=1:ID upto 7      */
+	if ((j & 0x20) != 0) {	/* bit5=1:ID up to 7      */
 		i = 7;
 	}
 	if ((j & 0x06) == 0) {	/* IDvalid?             */
@@ -2572,7 +2507,7 @@ static void atp870u_free_tables(struct Scsi_Host *host)
 		for (k = 0; k < 16; k++) {
 			if (!atp_dev->id[j][k].prd_table)
 				continue;
-			pci_free_consistent(atp_dev->pdev, 1024, atp_dev->id[j][k].prd_table, atp_dev->id[j][k].prdaddr);
+			pci_free_consistent(atp_dev->pdev, 1024, atp_dev->id[j][k].prd_table, atp_dev->id[j][k].prd_bus);
 			atp_dev->id[j][k].prd_table = NULL;
 		}
 	}
@@ -2584,12 +2519,13 @@ static int atp870u_init_tables(struct Scsi_Host *host)
 	int c,k;
 	for(c=0;c < 2;c++) {
 	   	for(k=0;k<16;k++) {
-	   			atp_dev->id[c][k].prd_table = pci_alloc_consistent(atp_dev->pdev, 1024, &(atp_dev->id[c][k].prdaddr));
+	   			atp_dev->id[c][k].prd_table = pci_alloc_consistent(atp_dev->pdev, 1024, &(atp_dev->id[c][k].prd_bus));
 	   			if (!atp_dev->id[c][k].prd_table) {
 	   				printk("atp870u_init_tables fail\n");
 				atp870u_free_tables(host);
 				return -ENOMEM;
 			}
+			atp_dev->id[c][k].prdaddr = atp_dev->id[c][k].prd_bus;
 			atp_dev->id[c][k].devsp=0x20;
 			atp_dev->id[c][k].devtype = 0x7f;
 			atp_dev->id[c][k].curr_req = NULL;			   
@@ -2623,29 +2559,32 @@ static int atp870u_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	unsigned int base_io, tmport, error,n;
 	unsigned char host_id;
 	struct Scsi_Host *shpnt = NULL;
-	struct atp_unit atp_dev, *p;
+	struct atp_unit *atpdev, *p;
 	unsigned char setupdata[2][16];
 	int count = 0;
-	
-	if (pci_enable_device(pdev))
-		return -EIO;
 
-        if (!pci_set_dma_mask(pdev, 0xFFFFFFFFUL)) {
+	atpdev = kzalloc(sizeof(*atpdev), GFP_KERNEL);
+	if (!atpdev)
+		return -ENOMEM;
+
+	if (pci_enable_device(pdev))
+		goto err_eio;
+
+        if (!pci_set_dma_mask(pdev, DMA_BIT_MASK(32))) {
                 printk(KERN_INFO "atp870u: use 32bit DMA mask.\n");
         } else {
                 printk(KERN_ERR "atp870u: DMA mask required but not available.\n");
-                return -EIO;
+		goto err_eio;
         }
 
-	memset(&atp_dev, 0, sizeof atp_dev);
 	/*
 	 * It's probably easier to weed out some revisions like
 	 * this than via the PCI device table
 	 */
 	if (ent->device == PCI_DEVICE_ID_ARTOP_AEC7610) {
-		error = pci_read_config_byte(pdev, PCI_CLASS_REVISION, &atp_dev.chip_ver);
-		if (atp_dev.chip_ver < 2)
-			return -EIO;
+		atpdev->chip_ver = pdev->revision;
+		if (atpdev->chip_ver < 2)
+			goto err_eio;
 	}
 
 	switch (ent->device) {
@@ -2654,15 +2593,15 @@ static int atp870u_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	case ATP880_DEVID1:	
 	case ATP880_DEVID2:	
 	case ATP885_DEVID:	
-		atp_dev.chip_ver = 0x04;
+		atpdev->chip_ver = 0x04;
 	default:
 		break;
 	}
 	base_io = pci_resource_start(pdev, 0);
 	base_io &= 0xfffffff8;
-	
+
 	if ((ent->device == ATP880_DEVID1)||(ent->device == ATP880_DEVID2)) {
-		error = pci_read_config_byte(pdev, PCI_CLASS_REVISION, &atp_dev.chip_ver);
+		atpdev->chip_ver = pdev->revision;
 		pci_write_config_byte(pdev, PCI_LATENCY_TIMER, 0x80);//JCC082803
 
 		host_id = inb(base_io + 0x39);
@@ -2670,17 +2609,17 @@ static int atp870u_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 		printk(KERN_INFO "   ACARD AEC-67160 PCI Ultra3 LVD Host Adapter: %d"
 			"    IO:%x, IRQ:%d.\n", count, base_io, pdev->irq);
-		atp_dev.ioport[0] = base_io + 0x40;
-		atp_dev.pciport[0] = base_io + 0x28;
-		atp_dev.dev_id = ent->device;
-		atp_dev.host_id[0] = host_id;
+		atpdev->ioport[0] = base_io + 0x40;
+		atpdev->pciport[0] = base_io + 0x28;
+		atpdev->dev_id = ent->device;
+		atpdev->host_id[0] = host_id;
 
 		tmport = base_io + 0x22;
-		atp_dev.scam_on = inb(tmport);
+		atpdev->scam_on = inb(tmport);
 		tmport += 0x13;
-		atp_dev.global_map[0] = inb(tmport);
+		atpdev->global_map[0] = inb(tmport);
 		tmport += 0x07;
-		atp_dev.ultra_map[0] = inw(tmport);
+		atpdev->ultra_map[0] = inw(tmport);
 
 		n = 0x3f09;
 next_fblk_880:
@@ -2693,63 +2632,63 @@ next_fblk_880:
 		if (inb(base_io + 0x30) == 0xff)
 			goto flash_ok_880;
 
-		atp_dev.sp[0][m++] = inb(base_io + 0x30);
-		atp_dev.sp[0][m++] = inb(base_io + 0x31);
-		atp_dev.sp[0][m++] = inb(base_io + 0x32);
-		atp_dev.sp[0][m++] = inb(base_io + 0x33);
+		atpdev->sp[0][m++] = inb(base_io + 0x30);
+		atpdev->sp[0][m++] = inb(base_io + 0x31);
+		atpdev->sp[0][m++] = inb(base_io + 0x32);
+		atpdev->sp[0][m++] = inb(base_io + 0x33);
 		outw(n, base_io + 0x34);
 		n += 0x0002;
-		atp_dev.sp[0][m++] = inb(base_io + 0x30);
-		atp_dev.sp[0][m++] = inb(base_io + 0x31);
-		atp_dev.sp[0][m++] = inb(base_io + 0x32);
-		atp_dev.sp[0][m++] = inb(base_io + 0x33);
+		atpdev->sp[0][m++] = inb(base_io + 0x30);
+		atpdev->sp[0][m++] = inb(base_io + 0x31);
+		atpdev->sp[0][m++] = inb(base_io + 0x32);
+		atpdev->sp[0][m++] = inb(base_io + 0x33);
 		outw(n, base_io + 0x34);
 		n += 0x0002;
-		atp_dev.sp[0][m++] = inb(base_io + 0x30);
-		atp_dev.sp[0][m++] = inb(base_io + 0x31);
-		atp_dev.sp[0][m++] = inb(base_io + 0x32);
-		atp_dev.sp[0][m++] = inb(base_io + 0x33);
+		atpdev->sp[0][m++] = inb(base_io + 0x30);
+		atpdev->sp[0][m++] = inb(base_io + 0x31);
+		atpdev->sp[0][m++] = inb(base_io + 0x32);
+		atpdev->sp[0][m++] = inb(base_io + 0x33);
 		outw(n, base_io + 0x34);
 		n += 0x0002;
-		atp_dev.sp[0][m++] = inb(base_io + 0x30);
-		atp_dev.sp[0][m++] = inb(base_io + 0x31);
-		atp_dev.sp[0][m++] = inb(base_io + 0x32);
-		atp_dev.sp[0][m++] = inb(base_io + 0x33);
+		atpdev->sp[0][m++] = inb(base_io + 0x30);
+		atpdev->sp[0][m++] = inb(base_io + 0x31);
+		atpdev->sp[0][m++] = inb(base_io + 0x32);
+		atpdev->sp[0][m++] = inb(base_io + 0x33);
 		n += 0x0018;
 		goto next_fblk_880;
 flash_ok_880:
 		outw(0, base_io + 0x34);
-		atp_dev.ultra_map[0] = 0;
-		atp_dev.async[0] = 0;
+		atpdev->ultra_map[0] = 0;
+		atpdev->async[0] = 0;
 		for (k = 0; k < 16; k++) {
 			n = 1;
 			n = n << k;
-			if (atp_dev.sp[0][k] > 1) {
-				atp_dev.ultra_map[0] |= n;
+			if (atpdev->sp[0][k] > 1) {
+				atpdev->ultra_map[0] |= n;
 			} else {
-				if (atp_dev.sp[0][k] == 0)
-					atp_dev.async[0] |= n;
+				if (atpdev->sp[0][k] == 0)
+					atpdev->async[0] |= n;
  			}
 	 	}
-		atp_dev.async[0] = ~(atp_dev.async[0]);
-		outb(atp_dev.global_map[0], base_io + 0x35);
+		atpdev->async[0] = ~(atpdev->async[0]);
+		outb(atpdev->global_map[0], base_io + 0x35);
  
 		shpnt = scsi_host_alloc(&atp870u_template, sizeof(struct atp_unit));
 		if (!shpnt)
-			return -ENOMEM;
+			goto err_nomem;
 
 		p = (struct atp_unit *)&shpnt->hostdata;
 
-		atp_dev.host = shpnt;
-		atp_dev.pdev = pdev;
+		atpdev->host = shpnt;
+		atpdev->pdev = pdev;
 		pci_set_drvdata(pdev, p);
-		memcpy(p, &atp_dev, sizeof atp_dev);
+		memcpy(p, atpdev, sizeof(*atpdev));
 		if (atp870u_init_tables(shpnt) < 0) {
 			printk(KERN_ERR "Unable to allocate tables for Acard controller\n");
 			goto unregister;
 		}
 
-		if (request_irq(pdev->irq, atp870u_intr_handle, SA_SHIRQ, "atp880i", shpnt)) {
+		if (request_irq(pdev->irq, atp870u_intr_handle, IRQF_SHARED, "atp880i", shpnt)) {
  			printk(KERN_ERR "Unable to allocate IRQ%d for Acard controller.\n", pdev->irq);
 			goto free_tables;
 		}
@@ -2796,31 +2735,31 @@ flash_ok_880:
 			printk(KERN_INFO "   ACARD AEC-67162 PCI Ultra3 LVD Host Adapter:  IO:%x, IRQ:%d.\n"
 			       , base_io, pdev->irq);
         	
-		atp_dev.pdev = pdev;	
-		atp_dev.dev_id  = ent->device;
-		atp_dev.baseport = base_io;
-		atp_dev.ioport[0] = base_io + 0x80;
-		atp_dev.ioport[1] = base_io + 0xc0;
-		atp_dev.pciport[0] = base_io + 0x40;
-		atp_dev.pciport[1] = base_io + 0x50;
+		atpdev->pdev = pdev;
+		atpdev->dev_id  = ent->device;
+		atpdev->baseport = base_io;
+		atpdev->ioport[0] = base_io + 0x80;
+		atpdev->ioport[1] = base_io + 0xc0;
+		atpdev->pciport[0] = base_io + 0x40;
+		atpdev->pciport[1] = base_io + 0x50;
 				
 		shpnt = scsi_host_alloc(&atp870u_template, sizeof(struct atp_unit));
 		if (!shpnt)
-			return -ENOMEM;
+			goto err_nomem;
         	
 		p = (struct atp_unit *)&shpnt->hostdata;
         	
-		atp_dev.host = shpnt;
-		atp_dev.pdev = pdev;
+		atpdev->host = shpnt;
+		atpdev->pdev = pdev;
 		pci_set_drvdata(pdev, p);
-		memcpy(p, &atp_dev, sizeof(struct atp_unit));
+		memcpy(p, atpdev, sizeof(struct atp_unit));
 		if (atp870u_init_tables(shpnt) < 0)
 			goto unregister;
 			
 #ifdef ED_DBGP		
 	printk("request_irq() shpnt %p hostdata %p\n", shpnt, p);
 #endif	        
-		if (request_irq(pdev->irq, atp870u_intr_handle, SA_SHIRQ, "atp870u", shpnt)) {
+		if (request_irq(pdev->irq, atp870u_intr_handle, IRQF_SHARED, "atp870u", shpnt)) {
 				printk(KERN_ERR "Unable to allocate IRQ for Acard controller.\n");
 			goto free_tables;
 		}
@@ -2972,43 +2911,43 @@ flash_ok_885:
 		printk(KERN_INFO "   ACARD AEC-671X PCI Ultra/W SCSI-2/3 Host Adapter: %d "
 			"IO:%x, IRQ:%d.\n", count, base_io, pdev->irq);
 
-		atp_dev.ioport[0] = base_io;
-		atp_dev.pciport[0] = base_io + 0x20;
-		atp_dev.dev_id = ent->device;
+		atpdev->ioport[0] = base_io;
+		atpdev->pciport[0] = base_io + 0x20;
+		atpdev->dev_id = ent->device;
 		host_id &= 0x07;
-		atp_dev.host_id[0] = host_id;
+		atpdev->host_id[0] = host_id;
 		tmport = base_io + 0x22;
-		atp_dev.scam_on = inb(tmport);
+		atpdev->scam_on = inb(tmport);
 		tmport += 0x0b;
-		atp_dev.global_map[0] = inb(tmport++);
-		atp_dev.ultra_map[0] = inw(tmport);
+		atpdev->global_map[0] = inb(tmport++);
+		atpdev->ultra_map[0] = inw(tmport);
 
-		if (atp_dev.ultra_map[0] == 0) {
-			atp_dev.scam_on = 0x00;
-			atp_dev.global_map[0] = 0x20;
-			atp_dev.ultra_map[0] = 0xffff;
+		if (atpdev->ultra_map[0] == 0) {
+			atpdev->scam_on = 0x00;
+			atpdev->global_map[0] = 0x20;
+			atpdev->ultra_map[0] = 0xffff;
 		}
 
 		shpnt = scsi_host_alloc(&atp870u_template, sizeof(struct atp_unit));
 		if (!shpnt)
-			return -ENOMEM;
+			goto err_nomem;
 
 		p = (struct atp_unit *)&shpnt->hostdata;
 		
-		atp_dev.host = shpnt;
-		atp_dev.pdev = pdev;
+		atpdev->host = shpnt;
+		atpdev->pdev = pdev;
 		pci_set_drvdata(pdev, p);
-		memcpy(p, &atp_dev, sizeof atp_dev);
+		memcpy(p, atpdev, sizeof(*atpdev));
 		if (atp870u_init_tables(shpnt) < 0)
 			goto unregister;
 
-		if (request_irq(pdev->irq, atp870u_intr_handle, SA_SHIRQ, "atp870i", shpnt)) {
+		if (request_irq(pdev->irq, atp870u_intr_handle, IRQF_SHARED, "atp870i", shpnt)) {
 			printk(KERN_ERR "Unable to allocate IRQ%d for Acard controller.\n", pdev->irq);
 			goto free_tables;
 		}
 
 		spin_lock_irqsave(shpnt->host_lock, flags);
-		if (atp_dev.chip_ver > 0x07) {	/* check if atp876 chip then enable terminator */
+		if (atpdev->chip_ver > 0x07) {	/* check if atp876 chip then enable terminator */
 			tmport = base_io + 0x3e;
 			outb(0x00, tmport);
 		}
@@ -3042,10 +2981,10 @@ flash_ok_885:
 		outb((inb(tmport) & 0xef), tmport);
 		tmport++;
 		outb((inb(tmport) | 0x20), tmport);
-		if (atp_dev.chip_ver == 4)
+		if (atpdev->chip_ver == 4)
 			shpnt->max_id = 16;
 		else		
-			shpnt->max_id = 7;
+			shpnt->max_id = 8;
 		shpnt->this_id = host_id;
 		shpnt->unique_id = base_io;
 		shpnt->io_port = base_io;
@@ -3091,6 +3030,12 @@ unregister:
 	printk("atp870u_prob:unregister\n");
 	scsi_host_put(shpnt);
 	return -1;		
+err_eio:
+	kfree(atpdev);
+	return -EIO;
+err_nomem:
+	kfree(atpdev);
+	return -ENOMEM;
 }
 
 /* The abort command does not leave the device in a clean state where
@@ -3107,7 +3052,7 @@ static int atp870u_abort(struct scsi_cmnd * SCpnt)
 	host = SCpnt->device->host;
 
 	dev = (struct atp_unit *)&host->hostdata;
-	c=SCpnt->device->channel;
+	c = scmd_channel(SCpnt);
 	printk(" atp870u: abort Channel = %x \n", c);
 	printk("working=%x last_cmd=%x ", dev->working[c], dev->last_cmd[c]);
 	printk(" quhdu=%x quendu=%x ", dev->quhd[c], dev->quend[c]);
@@ -3146,8 +3091,8 @@ static const char *atp870u_info(struct Scsi_Host *notused)
 }
 
 #define BLS buffer + len + size
-int atp870u_proc_info(struct Scsi_Host *HBAptr, char *buffer, 
-		      char **start, off_t offset, int length, int inout)
+static int atp870u_proc_info(struct Scsi_Host *HBAptr, char *buffer, 
+			     char **start, off_t offset, int length, int inout)
 {
 	static u8 buff[512];
 	int size = 0;

@@ -9,9 +9,14 @@
  * the Free Software Foundation.
  */
 
+#ifdef __KERNEL__
 #include <asm/io.h>
+#include <linux/types.h>
 #include <linux/list.h>
+#include <linux/mutex.h>
 #include <linux/device.h>
+#include <linux/timer.h>
+#include <linux/slab.h>
 
 struct gameport {
 
@@ -39,19 +44,16 @@ struct gameport {
 	struct gameport *parent, *child;
 
 	struct gameport_driver *drv;
-	struct semaphore drv_sem;	/* protects serio->drv so attributes can pin driver */
+	struct mutex drv_mutex;		/* protects serio->drv so attributes can pin driver */
 
 	struct device dev;
-	unsigned int registered;	/* port has been fully registered with driver core */
 
 	struct list_head node;
 };
 #define to_gameport_port(d)	container_of(d, struct gameport, dev)
 
 struct gameport_driver {
-
-	void *private;
-	char *description;
+	const char *description;
 
 	int (*connect)(struct gameport *, struct gameport_driver *drv);
 	int (*reconnect)(struct gameport *);
@@ -59,25 +61,48 @@ struct gameport_driver {
 
 	struct device_driver driver;
 
-	unsigned int ignore;
+	bool ignore;
 };
 #define to_gameport_driver(d)	container_of(d, struct gameport_driver, driver)
 
 int gameport_open(struct gameport *gameport, struct gameport_driver *drv, int mode);
 void gameport_close(struct gameport *gameport);
-void gameport_rescan(struct gameport *gameport);
+
+#if defined(CONFIG_GAMEPORT) || (defined(MODULE) && defined(CONFIG_GAMEPORT_MODULE))
 
 void __gameport_register_port(struct gameport *gameport, struct module *owner);
-static inline void gameport_register_port(struct gameport *gameport)
-{
-	__gameport_register_port(gameport, THIS_MODULE);
-}
+/* use a define to avoid include chaining to get THIS_MODULE */
+#define gameport_register_port(gameport) \
+	__gameport_register_port(gameport, THIS_MODULE)
 
 void gameport_unregister_port(struct gameport *gameport);
 
+__printf(2, 3)
+void gameport_set_phys(struct gameport *gameport, const char *fmt, ...);
+
+#else
+
+static inline void gameport_register_port(struct gameport *gameport)
+{
+	return;
+}
+
+static inline void gameport_unregister_port(struct gameport *gameport)
+{
+	return;
+}
+
+static inline __printf(2, 3)
+void gameport_set_phys(struct gameport *gameport, const char *fmt, ...)
+{
+	return;
+}
+
+#endif
+
 static inline struct gameport *gameport_allocate_port(void)
 {
-	struct gameport *gameport = kcalloc(1, sizeof(struct gameport), GFP_KERNEL);
+	struct gameport *gameport = kzalloc(sizeof(struct gameport), GFP_KERNEL);
 
 	return gameport;
 }
@@ -92,11 +117,8 @@ static inline void gameport_set_name(struct gameport *gameport, const char *name
 	strlcpy(gameport->name, name, sizeof(gameport->name));
 }
 
-void gameport_set_phys(struct gameport *gameport, const char *fmt, ...)
-	__attribute__ ((format (printf, 2, 3)));
-
 /*
- * Use the following fucntions to manipulate gameport's per-port
+ * Use the following functions to manipulate gameport's per-port
  * driver-specific data.
  */
 static inline void *gameport_get_drvdata(struct gameport *gameport)
@@ -110,25 +132,28 @@ static inline void gameport_set_drvdata(struct gameport *gameport, void *data)
 }
 
 /*
- * Use the following fucntions to pin gameport's driver in process context
+ * Use the following functions to pin gameport's driver in process context
  */
 static inline int gameport_pin_driver(struct gameport *gameport)
 {
-	return down_interruptible(&gameport->drv_sem);
+	return mutex_lock_interruptible(&gameport->drv_mutex);
 }
 
 static inline void gameport_unpin_driver(struct gameport *gameport)
 {
-	up(&gameport->drv_sem);
+	mutex_unlock(&gameport->drv_mutex);
 }
 
-void __gameport_register_driver(struct gameport_driver *drv, struct module *owner);
-static inline void gameport_register_driver(struct gameport_driver *drv)
-{
-	__gameport_register_driver(drv, THIS_MODULE);
-}
+int __must_check __gameport_register_driver(struct gameport_driver *drv,
+				struct module *owner, const char *mod_name);
+
+/* use a define to avoid include chaining to get THIS_MODULE & friends */
+#define gameport_register_driver(drv) \
+	__gameport_register_driver(drv, THIS_MODULE, KBUILD_MODNAME)
 
 void gameport_unregister_driver(struct gameport_driver *drv);
+
+#endif /* __KERNEL__ */
 
 #define GAMEPORT_MODE_DISABLED		0
 #define GAMEPORT_MODE_RAW		1
@@ -144,6 +169,8 @@ void gameport_unregister_driver(struct gameport_driver *drv);
 #define GAMEPORT_ID_VENDOR_THRUSTMASTER	0x0008
 #define GAMEPORT_ID_VENDOR_GRAVIS	0x0009
 #define GAMEPORT_ID_VENDOR_GUILLEMOT	0x000a
+
+#ifdef __KERNEL__
 
 static inline void gameport_trigger(struct gameport *gameport)
 {
@@ -195,4 +222,5 @@ static inline void gameport_set_poll_interval(struct gameport *gameport, unsigne
 void gameport_start_polling(struct gameport *gameport);
 void gameport_stop_polling(struct gameport *gameport);
 
+#endif /* __KERNEL__ */
 #endif

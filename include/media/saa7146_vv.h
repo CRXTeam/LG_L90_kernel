@@ -1,10 +1,10 @@
 #ifndef __SAA7146_VV__
 #define __SAA7146_VV__
 
-#include <linux/videodev2.h>
-
+#include <media/v4l2-common.h>
+#include <media/v4l2-ioctl.h>
 #include <media/saa7146.h>
-#include <media/video-buf.h>
+#include <media/videobuf-dma-sg.h>
 
 #define MAX_SAA7146_CAPTURE_BUFFERS	32	/* arbitrary */
 #define BUFFER_TIMEOUT     (HZ/2)  /* 0.5 seconds */
@@ -108,16 +108,12 @@ struct saa7146_fh {
 
 struct saa7146_vv
 {
-	int vbi_minor;
-
 	/* vbi capture */
 	struct saa7146_dmaqueue		vbi_q;
 	/* vbi workaround interrupt queue */
-        wait_queue_head_t		vbi_wq;
+	wait_queue_head_t		vbi_wq;
 	int				vbi_fieldcount;
 	struct saa7146_fh		*vbi_streaming;
-
-	int video_minor;
 
 	int				video_status;
 	struct saa7146_fh		*video_fh;
@@ -150,16 +146,6 @@ struct saa7146_vv
 	unsigned int resources;	/* resource management for device */
 };
 
-#define SAA7146_EXCLUSIVE	0x1
-#define SAA7146_BEFORE		0x2
-#define SAA7146_AFTER		0x4
-
-struct saa7146_extension_ioctls
-{
-	unsigned int	cmd;
-	int		flags;
-};
-
 /* flags */
 #define SAA7146_USE_PORT_B_FOR_VBI	0x2     /* use input port b for vbi hardware bug workaround */
 
@@ -176,15 +162,19 @@ struct saa7146_ext_vv
 	int num_stds;
 	int (*std_callback)(struct saa7146_dev*, struct saa7146_standard *);
 
-	struct saa7146_extension_ioctls *ioctls;
-	int (*ioctl)(struct saa7146_fh*, unsigned int cmd, void *arg);
+	/* the extension can override this */
+	struct v4l2_ioctl_ops ops;
+	/* pointer to the saa7146 core ops */
+	const struct v4l2_ioctl_ops *core_ops;
+
+	struct v4l2_file_operations vbi_fops;
 };
 
 struct saa7146_use_ops  {
-        void (*init)(struct saa7146_dev *, struct saa7146_vv *);
-        int(*open)(struct saa7146_dev *, struct file *);
-        void (*release)(struct saa7146_dev *, struct file *);
-        void (*irq_done)(struct saa7146_dev *, unsigned long status);
+	void (*init)(struct saa7146_dev *, struct saa7146_vv *);
+	int(*open)(struct saa7146_dev *, struct file *);
+	void (*release)(struct saa7146_dev *, struct file *);
+	void (*irq_done)(struct saa7146_dev *, unsigned long status);
 	ssize_t (*read)(struct file *, char __user *, size_t, loff_t *);
 };
 
@@ -195,7 +185,8 @@ void saa7146_buffer_finish(struct saa7146_dev *dev, struct saa7146_dmaqueue *q, 
 void saa7146_buffer_next(struct saa7146_dev *dev, struct saa7146_dmaqueue *q,int vbi);
 int saa7146_buffer_queue(struct saa7146_dev *dev, struct saa7146_dmaqueue *q, struct saa7146_buf *buf);
 void saa7146_buffer_timeout(unsigned long data);
-void saa7146_dma_free(struct saa7146_dev *dev,struct saa7146_buf *buf);
+void saa7146_dma_free(struct saa7146_dev* dev,struct videobuf_queue *q,
+						struct saa7146_buf *buf);
 
 int saa7146_vv_init(struct saa7146_dev* dev, struct saa7146_ext_vv *ext_vv);
 int saa7146_vv_release(struct saa7146_dev* dev);
@@ -210,9 +201,11 @@ void saa7146_set_hps_source_and_sync(struct saa7146_dev *saa, int source, int sy
 void saa7146_set_gpio(struct saa7146_dev *saa, u8 pin, u8 data);
 
 /* from saa7146_video.c */
+extern const struct v4l2_ioctl_ops saa7146_video_ioctl_ops;
 extern struct saa7146_use_ops saa7146_video_uops;
 int saa7146_start_preview(struct saa7146_fh *fh);
 int saa7146_stop_preview(struct saa7146_fh *fh);
+long saa7146_video_do_ioctl(struct file *file, unsigned int cmd, void *arg);
 
 /* from saa7146_vbi.c */
 extern struct saa7146_use_ops saa7146_vbi_uops;
@@ -236,7 +229,8 @@ void saa7146_res_free(struct saa7146_fh *fh, unsigned int bits);
 #define SAA7146_HPS_SYNC_PORT_B		0x01
 
 /* some memory sizes */
-#define SAA7146_CLIPPING_MEM	(14*PAGE_SIZE)
+/* max. 16 clipping rectangles */
+#define SAA7146_CLIPPING_MEM	(16 * 4 * sizeof(u32))
 
 /* some defines for the various clipping-modes */
 #define SAA7146_CLIPPING_RECT		0x4

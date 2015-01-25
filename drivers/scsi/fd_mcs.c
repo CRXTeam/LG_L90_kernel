@@ -88,11 +88,11 @@
 #include <linux/delay.h>
 #include <linux/mca.h>
 #include <linux/spinlock.h>
+#include <linux/slab.h>
 #include <scsi/scsicam.h>
 #include <linux/mca-legacy.h>
 
 #include <asm/io.h>
-#include <asm/system.h>
 
 #include "scsi.h"
 #include <scsi/scsi_host.h>
@@ -279,9 +279,9 @@ static struct fd_mcs_adapters_struct fd_mcs_adapters[] = {
 	 2},
 };
 
-#define FD_BRDS sizeof(fd_mcs_adapters)/sizeof(struct fd_mcs_adapters_struct)
+#define FD_BRDS ARRAY_SIZE(fd_mcs_adapters)
 
-static irqreturn_t fd_mcs_intr(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t fd_mcs_intr(int irq, void *dev_id);
 
 static unsigned long addresses[] = { 0xc8000, 0xca000, 0xce000, 0xde000 };
 static unsigned short ports[] = { 0x140, 0x150, 0x160, 0x170 };
@@ -294,6 +294,7 @@ static struct Scsi_Host *hosts[FD_MAX_HOSTS + 1] = { NULL };
 static int user_fifo_count = 0;
 static int user_fifo_size = 0;
 
+#ifndef MODULE
 static int __init fd_mcs_setup(char *str)
 {
 	static int done_setup = 0;
@@ -311,6 +312,7 @@ static int __init fd_mcs_setup(char *str)
 }
 
 __setup("fd_mcs=", fd_mcs_setup);
+#endif /* !MODULE */
 
 static void print_banner(struct Scsi_Host *shpnt)
 {
@@ -343,7 +345,7 @@ static void fd_mcs_make_bus_idle(struct Scsi_Host *shpnt)
 		outb(0x01 | PARITY_MASK, TMC_Cntl_port);
 }
 
-static int fd_mcs_detect(Scsi_Host_Template * tpnt)
+static int fd_mcs_detect(struct scsi_host_template * tpnt)
 {
 	int loop;
 	struct Scsi_Host *shpnt;
@@ -400,7 +402,7 @@ static int fd_mcs_detect(Scsi_Host_Template * tpnt)
 				mca_set_adapter_name(slot - 1, fd_mcs_adapters[loop].name);
 
 				/* check irq/region */
-				if (request_irq(irq, fd_mcs_intr, SA_SHIRQ, "fd_mcs", hosts)) {
+				if (request_irq(irq, fd_mcs_intr, IRQF_SHARED, "fd_mcs", hosts)) {
 					printk(KERN_ERR "fd_mcs: interrupt is not available, skipping...\n");
 					continue;
 				}
@@ -617,7 +619,7 @@ static void my_done(struct Scsi_Host *shpnt, int error)
 }
 
 /* only my_done needs to be protected  */
-static irqreturn_t fd_mcs_intr(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t fd_mcs_intr(int irq, void *dev_id)
 {
 	unsigned long flags;
 	int status;
@@ -671,7 +673,7 @@ static irqreturn_t fd_mcs_intr(int irq, void *dev_id, struct pt_regs *regs)
 		outb(0x40 | FIFO_COUNT, Interrupt_Cntl_port);
 
 		outb(0x82, SCSI_Cntl_port);	/* Bus Enable + Select */
-		outb(adapter_mask | (1 << current_SC->device->id), SCSI_Data_NoACK_port);
+		outb(adapter_mask | (1 << scmd_id(current_SC)), SCSI_Data_NoACK_port);
 
 		/* Stop arbitration and enable parity */
 		outb(0x10 | PARITY_MASK, TMC_Cntl_port);
@@ -683,7 +685,7 @@ static irqreturn_t fd_mcs_intr(int irq, void *dev_id, struct pt_regs *regs)
 		status = inb(SCSI_Status_port);
 		if (!(status & 0x01)) {
 			/* Try again, for slow devices */
-			if (fd_mcs_select(shpnt, current_SC->device->id)) {
+			if (fd_mcs_select(shpnt, scmd_id(current_SC))) {
 #if EVERY_ACCESS
 				printk(" SFAIL ");
 #endif
@@ -971,7 +973,7 @@ static irqreturn_t fd_mcs_intr(int irq, void *dev_id, struct pt_regs *regs)
 				if (current_SC->SCp.buffers_residual) {
 					--current_SC->SCp.buffers_residual;
 					++current_SC->SCp.buffer;
-					current_SC->SCp.ptr = page_address(current_SC->SCp.buffer->page) + current_SC->SCp.buffer->offset;
+					current_SC->SCp.ptr = sg_virt(current_SC->SCp.buffer);
 					current_SC->SCp.this_residual = current_SC->SCp.buffer->length;
 				} else
 					break;
@@ -1004,7 +1006,7 @@ static irqreturn_t fd_mcs_intr(int irq, void *dev_id, struct pt_regs *regs)
 			if (!current_SC->SCp.this_residual && current_SC->SCp.buffers_residual) {
 				--current_SC->SCp.buffers_residual;
 				++current_SC->SCp.buffer;
-				current_SC->SCp.ptr = page_address(current_SC->SCp.buffer->page) + current_SC->SCp.buffer->offset;
+				current_SC->SCp.ptr = sg_virt(current_SC->SCp.buffer);
 				current_SC->SCp.this_residual = current_SC->SCp.buffer->length;
 			}
 		}
@@ -1015,24 +1017,6 @@ static irqreturn_t fd_mcs_intr(int irq, void *dev_id, struct pt_regs *regs)
 		printk(" ** IN DONE %d ** ", current_SC->SCp.have_data_in);
 #endif
 
-#if ERRORS_ONLY
-		if (current_SC->cmnd[0] == REQUEST_SENSE && !current_SC->SCp.Status) {
-			if ((unsigned char) (*((char *) current_SC->request_buffer + 2)) & 0x0f) {
-				unsigned char key;
-				unsigned char code;
-				unsigned char qualifier;
-
-				key = (unsigned char) (*((char *) current_SC->request_buffer + 2)) & 0x0f;
-				code = (unsigned char) (*((char *) current_SC->request_buffer + 12));
-				qualifier = (unsigned char) (*((char *) current_SC->request_buffer + 13));
-
-				if (key != UNIT_ATTENTION && !(key == NOT_READY && code == 0x04 && (!qualifier || qualifier == 0x02 || qualifier == 0x01))
-				    && !(key == ILLEGAL_REQUEST && (code == 0x25 || code == 0x24 || !code)))
-
-					printk("fd_mcs: REQUEST SENSE " "Key = %x, Code = %x, Qualifier = %x\n", key, code, qualifier);
-			}
-		}
-#endif
 #if EVERY_ACCESS
 		printk("BEFORE MY_DONE. . .");
 #endif
@@ -1087,7 +1071,7 @@ static int fd_mcs_release(struct Scsi_Host *shpnt)
 	return 0;
 }
 
-static int fd_mcs_queue(Scsi_Cmnd * SCpnt, void (*done) (Scsi_Cmnd *))
+static int fd_mcs_queue_lck(Scsi_Cmnd * SCpnt, void (*done) (Scsi_Cmnd *))
 {
 	struct Scsi_Host *shpnt = SCpnt->device->host;
 
@@ -1095,7 +1079,9 @@ static int fd_mcs_queue(Scsi_Cmnd * SCpnt, void (*done) (Scsi_Cmnd *))
 		panic("fd_mcs: fd_mcs_queue() NOT REENTRANT!\n");
 	}
 #if EVERY_ACCESS
-	printk("queue: target = %d cmnd = 0x%02x pieces = %d size = %u\n", SCpnt->target, *(unsigned char *) SCpnt->cmnd, SCpnt->use_sg, SCpnt->request_bufflen);
+	printk("queue: target = %d cmnd = 0x%02x pieces = %d size = %u\n",
+		SCpnt->target, *(unsigned char *) SCpnt->cmnd,
+		scsi_sg_count(SCpnt), scsi_bufflen(SCpnt));
 #endif
 
 	fd_mcs_make_bus_idle(shpnt);
@@ -1105,14 +1091,14 @@ static int fd_mcs_queue(Scsi_Cmnd * SCpnt, void (*done) (Scsi_Cmnd *))
 
 	/* Initialize static data */
 
-	if (current_SC->use_sg) {
-		current_SC->SCp.buffer = (struct scatterlist *) current_SC->request_buffer;
-		current_SC->SCp.ptr = page_address(current_SC->SCp.buffer->page) + current_SC->SCp.buffer->offset;
+	if (scsi_bufflen(current_SC)) {
+		current_SC->SCp.buffer = scsi_sglist(current_SC);
+		current_SC->SCp.ptr = sg_virt(current_SC->SCp.buffer);
 		current_SC->SCp.this_residual = current_SC->SCp.buffer->length;
-		current_SC->SCp.buffers_residual = current_SC->use_sg - 1;
+		current_SC->SCp.buffers_residual = scsi_sg_count(current_SC) - 1;
 	} else {
-		current_SC->SCp.ptr = (char *) current_SC->request_buffer;
-		current_SC->SCp.this_residual = current_SC->request_bufflen;
+		current_SC->SCp.ptr = NULL;
+		current_SC->SCp.this_residual = 0;
 		current_SC->SCp.buffer = NULL;
 		current_SC->SCp.buffers_residual = 0;
 	}
@@ -1134,6 +1120,8 @@ static int fd_mcs_queue(Scsi_Cmnd * SCpnt, void (*done) (Scsi_Cmnd *))
 
 	return 0;
 }
+
+static DEF_SCSI_QCMD(fd_mcs_queue)
 
 #if DEBUG_ABORT || DEBUG_RESET
 static void fd_mcs_print_info(Scsi_Cmnd * SCpnt)
@@ -1164,7 +1152,9 @@ static void fd_mcs_print_info(Scsi_Cmnd * SCpnt)
 		break;
 	}
 
-	printk("(%d), target = %d cmnd = 0x%02x pieces = %d size = %u\n", SCpnt->SCp.phase, SCpnt->device->id, *(unsigned char *) SCpnt->cmnd, SCpnt->use_sg, SCpnt->request_bufflen);
+	printk("(%d), target = %d cmnd = 0x%02x pieces = %d size = %u\n",
+		SCpnt->SCp.phase, SCpnt->device->id, *(unsigned char *) SCpnt->cmnd,
+		scsi_sg_count(SCpnt), scsi_bufflen(SCpnt));
 	printk("sent_command = %d, have_data_in = %d, timeout = %d\n", SCpnt->SCp.sent_command, SCpnt->SCp.have_data_in, SCpnt->timeout);
 #if DEBUG_RACE
 	printk("in_interrupt_flag = %d\n", in_interrupt_flag);
@@ -1241,18 +1231,9 @@ static int fd_mcs_abort(Scsi_Cmnd * SCpnt)
 	return SUCCESS;
 }
 
-static int fd_mcs_host_reset(Scsi_Cmnd * SCpnt)
-{
-	return FAILED;
-}
-
-static int fd_mcs_device_reset(Scsi_Cmnd * SCpnt) 
-{
-	return FAILED;
-}
-
 static int fd_mcs_bus_reset(Scsi_Cmnd * SCpnt) {
 	struct Scsi_Host *shpnt = SCpnt->device->host;
+	unsigned long flags;
 
 #if DEBUG_RESET
 	static int called_once = 0;
@@ -1269,12 +1250,16 @@ static int fd_mcs_bus_reset(Scsi_Cmnd * SCpnt) {
 	called_once = 1;
 #endif
 
+	spin_lock_irqsave(shpnt->host_lock, flags);
+
 	outb(1, SCSI_Cntl_port);
 	do_pause(2);
 	outb(0, SCSI_Cntl_port);
 	do_pause(115);
 	outb(0, SCSI_Mode_Cntl_port);
 	outb(PARITY_MASK, TMC_Cntl_port);
+
+	spin_unlock_irqrestore(shpnt->host_lock, flags);
 
 	/* Unless this is the very first call (i.e., SCPnt == NULL), everything
 	   is probably hosed at this point.  We will, however, try to keep
@@ -1348,7 +1333,7 @@ static int fd_mcs_biosparam(struct scsi_device * disk, struct block_device *bdev
 	return 0;
 }
 
-static Scsi_Host_Template driver_template = {
+static struct scsi_host_template driver_template = {
 	.proc_name			= "fd_mcs",
 	.proc_info			= fd_mcs_proc_info,
 	.detect				= fd_mcs_detect,
@@ -1357,8 +1342,6 @@ static Scsi_Host_Template driver_template = {
 	.queuecommand   		= fd_mcs_queue, 
 	.eh_abort_handler		= fd_mcs_abort,
 	.eh_bus_reset_handler		= fd_mcs_bus_reset,
-	.eh_host_reset_handler		= fd_mcs_host_reset,
-	.eh_device_reset_handler	= fd_mcs_device_reset,
 	.bios_param     		= fd_mcs_biosparam,
 	.can_queue      		= 1,
 	.this_id        		= 7,
@@ -1367,3 +1350,5 @@ static Scsi_Host_Template driver_template = {
 	.use_clustering 		= DISABLE_CLUSTERING,
 };
 #include "scsi_module.c"
+
+MODULE_LICENSE("GPL");

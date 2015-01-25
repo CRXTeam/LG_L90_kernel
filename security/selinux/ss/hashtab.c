@@ -8,18 +8,17 @@
 #include <linux/errno.h>
 #include "hashtab.h"
 
-struct hashtab *hashtab_create(u32 (*hash_value)(struct hashtab *h, void *key),
-                               int (*keycmp)(struct hashtab *h, void *key1, void *key2),
-                               u32 size)
+struct hashtab *hashtab_create(u32 (*hash_value)(struct hashtab *h, const void *key),
+			       int (*keycmp)(struct hashtab *h, const void *key1, const void *key2),
+			       u32 size)
 {
 	struct hashtab *p;
 	u32 i;
 
-	p = kmalloc(sizeof(*p), GFP_KERNEL);
+	p = kzalloc(sizeof(*p), GFP_KERNEL);
 	if (p == NULL)
 		return p;
 
-	memset(p, 0, sizeof(*p));
 	p->size = size;
 	p->nel = 0;
 	p->hash_value = hash_value;
@@ -55,10 +54,9 @@ int hashtab_insert(struct hashtab *h, void *key, void *datum)
 	if (cur && (h->keycmp(h, key, cur->key) == 0))
 		return -EEXIST;
 
-	newnode = kmalloc(sizeof(*newnode), GFP_KERNEL);
+	newnode = kzalloc(sizeof(*newnode), GFP_KERNEL);
 	if (newnode == NULL)
 		return -ENOMEM;
-	memset(newnode, 0, sizeof(*newnode));
 	newnode->key = key;
 	newnode->datum = datum;
 	if (prev) {
@@ -73,7 +71,7 @@ int hashtab_insert(struct hashtab *h, void *key, void *datum)
 	return 0;
 }
 
-void *hashtab_search(struct hashtab *h, void *key)
+void *hashtab_search(struct hashtab *h, const void *key)
 {
 	u32 hvalue;
 	struct hashtab_node *cur;
@@ -83,7 +81,7 @@ void *hashtab_search(struct hashtab *h, void *key)
 
 	hvalue = h->hash_value(h, key);
 	cur = h->htable[hvalue];
-	while (cur != NULL && h->keycmp(h, key, cur->key) > 0)
+	while (cur && h->keycmp(h, key, cur->key) > 0)
 		cur = cur->next;
 
 	if (cur == NULL || (h->keycmp(h, key, cur->key) != 0))
@@ -102,7 +100,7 @@ void hashtab_destroy(struct hashtab *h)
 
 	for (i = 0; i < h->size; i++) {
 		cur = h->htable[i];
-		while (cur != NULL) {
+		while (cur) {
 			temp = cur;
 			cur = cur->next;
 			kfree(temp);
@@ -129,7 +127,7 @@ int hashtab_map(struct hashtab *h,
 
 	for (i = 0; i < h->size; i++) {
 		cur = h->htable[i];
-		while (cur != NULL) {
+		while (cur) {
 			ret = apply(cur->key, cur->datum, args);
 			if (ret)
 				return ret;

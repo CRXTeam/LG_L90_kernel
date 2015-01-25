@@ -5,17 +5,16 @@
  * Copyright (C) 1994, 1995, 1996 by Andreas Busse
  *
  * Multi-cpu abstraction and macros for easier reading:
- * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
+ * Copyright (C) 1996 David S. Miller (davem@davemloft.net)
  *
  * Further modifications to make this work:
  * Copyright (c) 1998-2000 Harald Koerfgen
  */
-#include <linux/config.h>
 #include <asm/asm.h>
 #include <asm/cachectl.h>
 #include <asm/fpregdef.h>
 #include <asm/mipsregs.h>
-#include <asm/offset.h>
+#include <asm/asm-offsets.h>
 #include <asm/page.h>
 #include <asm/regdef.h>
 #include <asm/stackframe.h>
@@ -35,7 +34,7 @@
 /*
  * FPU context is saved iff the process has used it's FPU in the current
  * time slice as indicated by TIF_USEDFPU.  In any case, the CU1 bit for user
- * space STATUS register should be 0, so that a process *always* starts its 
+ * space STATUS register should be 0, so that a process *always* starts its
  * userland with FPU disabled after each context switch.
  *
  * FPU will be enabled as soon as the process accesses FPU again, through
@@ -47,15 +46,12 @@
  *                     struct thread_info *next_ti) )
  */
 LEAF(resume)
-#ifndef CONFIG_CPU_HAS_LLSC
-	sw      zero, ll_bit
-#endif
 	mfc0	t1, CP0_STATUS
 	sw	t1, THREAD_STATUS(a0)
 	cpu_save_nonscratch a0
 	sw	ra, THREAD_REG31(a0)
 
-	/* 
+	/*
 	 * check if we need to save FPU registers
 	 */
 	lw	t3, TASK_THREAD_INFO(a0)

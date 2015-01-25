@@ -1,21 +1,32 @@
-/* 
+/*
  * Linux driver for Disk-On-Chip devices
  *
- * Copyright (C) 1999 Machine Vision Holdings, Inc.   
- * Copyright (C) 2001-2003 David Woodhouse <dwmw2@infradead.org>
- * Copyright (C) 2002-2003 Greg Ungerer <gerg@snapgear.com>
- * Copyright (C) 2002-2003 SnapGear Inc
+ * Copyright © 1999 Machine Vision Holdings, Inc.
+ * Copyright © 1999-2010 David Woodhouse <dwmw2@infradead.org>
+ * Copyright © 2002-2003 Greg Ungerer <gerg@snapgear.com>
+ * Copyright © 2002-2003 SnapGear Inc
  *
- * $Id: doc2000.h,v 1.24 2005/01/05 12:40:38 dwmw2 Exp $ 
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
- * Released under GPL
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ *
  */
 
 #ifndef __MTD_DOC2000_H__
 #define __MTD_DOC2000_H__
 
 #include <linux/mtd/mtd.h>
-#include <asm/semaphore.h>
+#include <linux/mutex.h>
 
 #define DoC_Sig1 0
 #define DoC_Sig2 1
@@ -75,10 +86,10 @@
 #define DoC_Mplus_CtrlConfirm		0x1076
 #define DoC_Mplus_Power			0x1fff
 
-/* How to access the device? 
- * On ARM, it'll be mmap'd directly with 32-bit wide accesses. 
+/* How to access the device?
+ * On ARM, it'll be mmap'd directly with 32-bit wide accesses.
  * On PPC, it's mmap'd and 16-bit wide.
- * Others use readb/writeb 
+ * Others use readb/writeb
  */
 #if defined(__arm__)
 #define ReadDOC_(adr, reg)      ((unsigned char)(*(volatile __u32 *)(((unsigned long)adr)+((reg)<<2))))
@@ -172,7 +183,7 @@ struct DiskOnChip {
 	unsigned long totlen;
 	unsigned char ChipID; /* Type of DiskOnChip */
 	int ioreg;
-	
+
 	unsigned long mfr; /* Flash IDs - only one type of flash per device */
 	unsigned long id;
 	int chipshift;
@@ -180,14 +191,14 @@ struct DiskOnChip {
 	char pageadrlen;
 	char interleave; /* Internal interleaving - Millennium Plus style */
 	unsigned long erasesize;
-	
+
 	int curfloor;
 	int curchip;
-	
+
 	int numchips;
 	struct Nand *chips;
 	struct mtd_info *nextdoc;
-	struct semaphore lock;
+	struct mutex lock;
 };
 
 int doc_decode_ecc(unsigned char sector[512], unsigned char ecc1[6]);

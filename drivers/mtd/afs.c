@@ -1,27 +1,25 @@
 /*======================================================================
 
     drivers/mtd/afs.c: ARM Flash Layout/Partitioning
-  
-    Copyright (C) 2000 ARM Limited
-  
+
+    Copyright © 2000 ARM Limited
+
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 2 of the License, or
    (at your option) any later version.
-  
+
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
-  
+
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
-  
-   This is access code for flashes using ARM's flash partitioning 
-   standards.
 
-   $Id: afs.c,v 1.13 2004/02/27 22:09:59 rmk Exp $
+   This is access code for flashes using ARM's flash partitioning
+   standards.
 
 ======================================================================*/
 
@@ -77,7 +75,7 @@ afs_read_footer(struct mtd_info *mtd, u_int *img_start, u_int *iis_start,
 	size_t sz;
 	int ret;
 
-	ret = mtd->read(mtd, ptr, sizeof(fs), &sz, (u_char *) &fs);
+	ret = mtd_read(mtd, ptr, sizeof(fs), &sz, (u_char *)&fs);
 	if (ret >= 0 && sz != sizeof(fs))
 		ret = -EINVAL;
 
@@ -134,7 +132,7 @@ afs_read_iis(struct mtd_info *mtd, struct image_info_struct *iis, u_int ptr)
 	int ret, i;
 
 	memset(iis, 0, sizeof(*iis));
-	ret = mtd->read(mtd, ptr, sizeof(*iis), &sz, (u_char *) iis);
+	ret = mtd_read(mtd, ptr, sizeof(*iis), &sz, (u_char *)iis);
 	if (ret < 0)
 		goto failed;
 
@@ -163,9 +161,9 @@ afs_read_iis(struct mtd_info *mtd, struct image_info_struct *iis, u_int ptr)
 	return ret;
 }
 
-static int parse_afs_partitions(struct mtd_info *mtd, 
-                         struct mtd_partition **pparts,
-                         unsigned long origin)
+static int parse_afs_partitions(struct mtd_info *mtd,
+				struct mtd_partition **pparts,
+				struct mtd_part_parser_data *data)
 {
 	struct mtd_partition *parts;
 	u_int mask, off, idx, sz;
@@ -207,11 +205,10 @@ static int parse_afs_partitions(struct mtd_info *mtd,
 	if (!sz)
 		return ret;
 
-	parts = kmalloc(sz, GFP_KERNEL);
+	parts = kzalloc(sz, GFP_KERNEL);
 	if (!parts)
 		return -ENOMEM;
 
-	memset(parts, 0, sz);
 	str = (char *)(parts + idx);
 
 	/*
@@ -219,7 +216,7 @@ static int parse_afs_partitions(struct mtd_info *mtd,
 	 */
 	for (idx = off = 0; off < mtd->size; off += mtd->erasesize) {
 		struct image_info_struct iis;
-		u_int iis_ptr, img_ptr, size;
+		u_int iis_ptr, img_ptr;
 
 		/* Read the footer. */
 		ret = afs_read_footer(mtd, &img_ptr, &iis_ptr, off, mask);
@@ -236,25 +233,13 @@ static int parse_afs_partitions(struct mtd_info *mtd,
 			continue;
 
 		strcpy(str, iis.name);
-		size = mtd->erasesize + off - img_ptr;
-
-		/*
-		 * In order to support JFFS2 partitions on this layout,
-		 * we must lie to MTD about the real size of JFFS2
-		 * partitions; this ensures that the AFS flash footer
-		 * won't be erased by JFFS2.  Please ensure that your
-		 * JFFS2 partitions are given image numbers between
-		 * 1000 and 2000 inclusive.
-		 */
-		if (iis.imageNumber >= 1000 && iis.imageNumber < 2000)
-			size -= mtd->erasesize;
 
 		parts[idx].name		= str;
-		parts[idx].size		= size;
+		parts[idx].size		= (iis.length + mtd->erasesize - 1) & ~(mtd->erasesize - 1);
 		parts[idx].offset	= img_ptr;
 		parts[idx].mask_flags	= 0;
 
-		printk("  mtd%d: at 0x%08x, %5dKB, %8u, %s\n",
+		printk("  mtd%d: at 0x%08x, %5lluKiB, %8u, %s\n",
 			idx, img_ptr, parts[idx].size / 1024,
 			iis.imageNumber, str);
 

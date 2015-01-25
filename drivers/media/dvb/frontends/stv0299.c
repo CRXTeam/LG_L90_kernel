@@ -45,9 +45,9 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/moduleparam.h>
 #include <linux/string.h>
 #include <linux/slab.h>
+#include <linux/jiffies.h>
 #include <asm/div64.h>
 
 #include "dvb_frontend.h"
@@ -55,7 +55,6 @@
 
 struct stv0299_state {
 	struct i2c_adapter* i2c;
-	struct dvb_frontend_ops ops;
 	const struct stv0299_config* config;
 	struct dvb_frontend frontend;
 
@@ -64,12 +63,15 @@ struct stv0299_state {
 	u32 symbol_rate;
 	fe_code_rate_t fec_inner;
 	int errmode;
+	u32 ucblocks;
+	u8 mcr_reg;
 };
 
 #define STATUS_BER 0
 #define STATUS_UCBLOCKS 1
 
 static int debug;
+static int debug_legacy_dish_switch;
 #define dprintk(args...) \
 	do { \
 		if (debug) printk(KERN_DEBUG "stv0299: " args); \
@@ -86,16 +88,19 @@ static int stv0299_writeregI (struct stv0299_state* state, u8 reg, u8 data)
 
 	if (ret != 1)
 		dprintk("%s: writereg error (reg == 0x%02x, val == 0x%02x, "
-			"ret == %i)\n", __FUNCTION__, reg, data, ret);
+			"ret == %i)\n", __func__, reg, data, ret);
 
 	return (ret != 1) ? -EREMOTEIO : 0;
 }
 
-int stv0299_writereg (struct dvb_frontend* fe, u8 reg, u8 data)
+static int stv0299_write(struct dvb_frontend* fe, const u8 buf[], int len)
 {
-        struct stv0299_state* state = (struct stv0299_state*) fe->demodulator_priv;
+	struct stv0299_state* state = fe->demodulator_priv;
 
-	return stv0299_writeregI(state, reg, data);
+	if (len != 2)
+		return -EINVAL;
+
+	return stv0299_writeregI(state, buf[0], buf[1]);
 }
 
 static u8 stv0299_readreg (struct stv0299_state* state, u8 reg)
@@ -110,7 +115,7 @@ static u8 stv0299_readreg (struct stv0299_state* state, u8 reg)
 
 	if (ret != 2)
 		dprintk("%s: readreg error (reg == 0x%02x, ret == %i)\n",
-				__FUNCTION__, reg, ret);
+				__func__, reg, ret);
 
 	return b1[0];
 }
@@ -124,14 +129,14 @@ static int stv0299_readregs (struct stv0299_state* state, u8 reg1, u8 *b, u8 len
 	ret = i2c_transfer (state->i2c, msg, 2);
 
 	if (ret != 2)
-		dprintk("%s: readreg error (ret == %i)\n", __FUNCTION__, ret);
+		dprintk("%s: readreg error (ret == %i)\n", __func__, ret);
 
 	return ret == 2 ? 0 : ret;
 }
 
 static int stv0299_set_FEC (struct stv0299_state* state, fe_code_rate_t fec)
 {
-	dprintk ("%s\n", __FUNCTION__);
+	dprintk ("%s\n", __func__);
 
 	switch (fec) {
 	case FEC_AUTO:
@@ -171,7 +176,7 @@ static fe_code_rate_t stv0299_get_fec (struct stv0299_state* state)
 					     FEC_7_8, FEC_1_2 };
 	u8 index;
 
-	dprintk ("%s\n", __FUNCTION__);
+	dprintk ("%s\n", __func__);
 
 	index = stv0299_readreg (state, 0x1b);
 	index &= 0x7;
@@ -186,11 +191,11 @@ static int stv0299_wait_diseqc_fifo (struct stv0299_state* state, int timeout)
 {
 	unsigned long start = jiffies;
 
-	dprintk ("%s\n", __FUNCTION__);
+	dprintk ("%s\n", __func__);
 
 	while (stv0299_readreg(state, 0x0a) & 1) {
 		if (jiffies - start > timeout) {
-			dprintk ("%s: timeout!!\n", __FUNCTION__);
+			dprintk ("%s: timeout!!\n", __func__);
 			return -ETIMEDOUT;
 		}
 		msleep(10);
@@ -203,11 +208,11 @@ static int stv0299_wait_diseqc_idle (struct stv0299_state* state, int timeout)
 {
 	unsigned long start = jiffies;
 
-	dprintk ("%s\n", __FUNCTION__);
+	dprintk ("%s\n", __func__);
 
 	while ((stv0299_readreg(state, 0x0a) & 3) != 2 ) {
 		if (jiffies - start > timeout) {
-			dprintk ("%s: timeout!!\n", __FUNCTION__);
+			dprintk ("%s: timeout!!\n", __func__);
 			return -ETIMEDOUT;
 		}
 		msleep(10);
@@ -218,7 +223,7 @@ static int stv0299_wait_diseqc_idle (struct stv0299_state* state, int timeout)
 
 static int stv0299_set_symbolrate (struct dvb_frontend* fe, u32 srate)
 {
-        struct stv0299_state* state = (struct stv0299_state*) fe->demodulator_priv;
+	struct stv0299_state* state = fe->demodulator_priv;
 	u64 big = srate;
 	u32 ratio;
 
@@ -242,10 +247,10 @@ static int stv0299_get_symbolrate (struct stv0299_state* state)
 	u8 sfr[3];
 	s8 rtf;
 
-	dprintk ("%s\n", __FUNCTION__);
+	dprintk ("%s\n", __func__);
 
 	stv0299_readregs (state, 0x1f, sfr, 3);
-	stv0299_readregs (state, 0x1a, &rtf, 1);
+	stv0299_readregs (state, 0x1a, (u8 *)&rtf, 1);
 
 	srate = (sfr[0] << 8) | sfr[1];
 	srate *= Mclk;
@@ -254,8 +259,8 @@ static int stv0299_get_symbolrate (struct stv0299_state* state)
 	offset = (s32) rtf * (srate / 4096L);
 	offset /= 128;
 
-	dprintk ("%s : srate = %i\n", __FUNCTION__, srate);
-	dprintk ("%s : ofset = %i\n", __FUNCTION__, offset);
+	dprintk ("%s : srate = %i\n", __func__, srate);
+	dprintk ("%s : ofset = %i\n", __func__, offset);
 
 	srate += offset;
 
@@ -269,11 +274,11 @@ static int stv0299_get_symbolrate (struct stv0299_state* state)
 static int stv0299_send_diseqc_msg (struct dvb_frontend* fe,
 				    struct dvb_diseqc_master_cmd *m)
 {
-        struct stv0299_state* state = (struct stv0299_state*) fe->demodulator_priv;
+	struct stv0299_state* state = fe->demodulator_priv;
 	u8 val;
 	int i;
 
-	dprintk ("%s\n", __FUNCTION__);
+	dprintk ("%s\n", __func__);
 
 	if (stv0299_wait_diseqc_idle (state, 100) < 0)
 		return -ETIMEDOUT;
@@ -299,10 +304,10 @@ static int stv0299_send_diseqc_msg (struct dvb_frontend* fe,
 
 static int stv0299_send_diseqc_burst (struct dvb_frontend* fe, fe_sec_mini_cmd_t burst)
 {
-        struct stv0299_state* state = (struct stv0299_state*) fe->demodulator_priv;
+	struct stv0299_state* state = fe->demodulator_priv;
 	u8 val;
 
-	dprintk ("%s\n", __FUNCTION__);
+	dprintk ("%s\n", __func__);
 
 	if (stv0299_wait_diseqc_idle (state, 100) < 0)
 		return -ETIMEDOUT;
@@ -326,7 +331,7 @@ static int stv0299_send_diseqc_burst (struct dvb_frontend* fe, fe_sec_mini_cmd_t
 
 static int stv0299_set_tone (struct dvb_frontend* fe, fe_sec_tone_mode_t tone)
 {
-        struct stv0299_state* state = (struct stv0299_state*) fe->demodulator_priv;
+	struct stv0299_state* state = fe->demodulator_priv;
 	u8 val;
 
 	if (stv0299_wait_diseqc_idle (state, 100) < 0)
@@ -348,11 +353,11 @@ static int stv0299_set_tone (struct dvb_frontend* fe, fe_sec_tone_mode_t tone)
 
 static int stv0299_set_voltage (struct dvb_frontend* fe, fe_sec_voltage_t voltage)
 {
-        struct stv0299_state* state = (struct stv0299_state*) fe->demodulator_priv;
+	struct stv0299_state* state = fe->demodulator_priv;
 	u8 reg0x08;
 	u8 reg0x0c;
 
-	dprintk("%s: %s\n", __FUNCTION__,
+	dprintk("%s: %s\n", __func__,
 		voltage == SEC_VOLTAGE_13 ? "SEC_VOLTAGE_13" :
 		voltage == SEC_VOLTAGE_18 ? "SEC_VOLTAGE_18" : "??");
 
@@ -363,56 +368,82 @@ static int stv0299_set_voltage (struct dvb_frontend* fe, fe_sec_voltage_t voltag
 	 *  H/V switching over OP0, OP1 and OP2 are LNB power enable bits
 	 */
 	reg0x0c &= 0x0f;
-
-	if (voltage == SEC_VOLTAGE_OFF) {
-		stv0299_writeregI (state, 0x0c, 0x00); /*	LNB power off! */
-		return stv0299_writeregI (state, 0x08, 0x00); /*	LNB power off! */
-	}
-
-	stv0299_writeregI (state, 0x08, (reg0x08 & 0x3f) | (state->config->lock_output << 6));
+	reg0x08 = (reg0x08 & 0x3f) | (state->config->lock_output << 6);
 
 	switch (voltage) {
 	case SEC_VOLTAGE_13:
-		if (state->config->volt13_op0_op1 == STV0299_VOLT13_OP0) reg0x0c |= 0x10;
-		else reg0x0c |= 0x40;
-
-		return stv0299_writeregI(state, 0x0c, reg0x0c);
-
+		if (state->config->volt13_op0_op1 == STV0299_VOLT13_OP0)
+			reg0x0c |= 0x10; /* OP1 off, OP0 on */
+		else
+			reg0x0c |= 0x40; /* OP1 on, OP0 off */
+		break;
 	case SEC_VOLTAGE_18:
-		return stv0299_writeregI(state, 0x0c, reg0x0c | 0x50);
+		reg0x0c |= 0x50; /* OP1 on, OP0 on */
+		break;
+	case SEC_VOLTAGE_OFF:
+		/* LNB power off! */
+		reg0x08 = 0x00;
+		reg0x0c = 0x00;
+		break;
 	default:
 		return -EINVAL;
 	};
+
+	if (state->config->op0_off)
+		reg0x0c &= ~0x10;
+
+	stv0299_writeregI(state, 0x08, reg0x08);
+	return stv0299_writeregI(state, 0x0c, reg0x0c);
 }
 
-static int stv0299_send_legacy_dish_cmd(struct dvb_frontend* fe, u32 cmd)
+static int stv0299_send_legacy_dish_cmd (struct dvb_frontend* fe, unsigned long cmd)
 {
+	struct stv0299_state* state = fe->demodulator_priv;
+	u8 reg0x08;
+	u8 reg0x0c;
+	u8 lv_mask = 0x40;
 	u8 last = 1;
 	int i;
+	struct timeval nexttime;
+	struct timeval tv[10];
 
-	/* reset voltage at the end
-	if((0x50 & stv0299_readreg (i2c, 0x0c)) == 0x50)
-		cmd |= 0x80;
-	else
-		cmd &= 0x7F;
-	*/
+	reg0x08 = stv0299_readreg (state, 0x08);
+	reg0x0c = stv0299_readreg (state, 0x0c);
+	reg0x0c &= 0x0f;
+	stv0299_writeregI (state, 0x08, (reg0x08 & 0x3f) | (state->config->lock_output << 6));
+	if (state->config->volt13_op0_op1 == STV0299_VOLT13_OP0)
+		lv_mask = 0x10;
 
 	cmd = cmd << 1;
-	dprintk("%s switch command: 0x%04x\n",__FUNCTION__, cmd);
+	if (debug_legacy_dish_switch)
+		printk ("%s switch command: 0x%04lx\n",__func__, cmd);
 
-	stv0299_set_voltage(fe,SEC_VOLTAGE_18);
-	msleep(32);
+	do_gettimeofday (&nexttime);
+	if (debug_legacy_dish_switch)
+		memcpy (&tv[0], &nexttime, sizeof (struct timeval));
+	stv0299_writeregI (state, 0x0c, reg0x0c | 0x50); /* set LNB to 18V */
+
+	dvb_frontend_sleep_until(&nexttime, 32000);
 
 	for (i=0; i<9; i++) {
+		if (debug_legacy_dish_switch)
+			do_gettimeofday (&tv[i+1]);
 		if((cmd & 0x01) != last) {
-			stv0299_set_voltage(fe, last ? SEC_VOLTAGE_13 : SEC_VOLTAGE_18);
+			/* set voltage to (last ? 13V : 18V) */
+			stv0299_writeregI (state, 0x0c, reg0x0c | (last ? lv_mask : 0x50));
 			last = (last) ? 0 : 1;
 		}
 
 		cmd = cmd >> 1;
 
 		if (i != 8)
-			msleep(8);
+			dvb_frontend_sleep_until(&nexttime, 8000);
+	}
+	if (debug_legacy_dish_switch) {
+		printk ("%s(%d): switch delay (should be 32k followed by all 8k\n",
+			__func__, fe->dvb->num);
+		for (i = 1; i < 10; i++)
+			printk ("%d: %d\n", i, timeval_usec_diff(tv[i-1] , tv[i]));
 	}
 
 	return 0;
@@ -420,18 +451,26 @@ static int stv0299_send_legacy_dish_cmd(struct dvb_frontend* fe, u32 cmd)
 
 static int stv0299_init (struct dvb_frontend* fe)
 {
-        struct stv0299_state* state = (struct stv0299_state*) fe->demodulator_priv;
+	struct stv0299_state* state = fe->demodulator_priv;
 	int i;
+	u8 reg;
+	u8 val;
 
 	dprintk("stv0299: init chip\n");
 
-	for (i=0; !(state->config->inittab[i] == 0xff && state->config->inittab[i+1] == 0xff); i+=2)
-		stv0299_writeregI(state, state->config->inittab[i], state->config->inittab[i+1]);
+	stv0299_writeregI(state, 0x02, 0x30 | state->mcr_reg);
+	msleep(50);
 
-	if (state->config->pll_init) {
-		stv0299_writeregI(state, 0x05, 0xb5);	/*  enable i2c repeater on stv0299  */
-		state->config->pll_init(fe);
-		stv0299_writeregI(state, 0x05, 0x35);	/*  disable i2c repeater on stv0299  */
+	for (i = 0; ; i += 2)  {
+		reg = state->config->inittab[i];
+		val = state->config->inittab[i+1];
+		if (reg == 0xff && val == 0xff)
+			break;
+		if (reg == 0x0c && state->config->op0_off)
+			val &= ~0x10;
+		if (reg == 0x2)
+			state->mcr_reg = val & 0xf;
+		stv0299_writeregI(state, reg, val);
 	}
 
 	return 0;
@@ -439,12 +478,12 @@ static int stv0299_init (struct dvb_frontend* fe)
 
 static int stv0299_read_status(struct dvb_frontend* fe, fe_status_t* status)
 {
-        struct stv0299_state* state = (struct stv0299_state*) fe->demodulator_priv;
+	struct stv0299_state* state = fe->demodulator_priv;
 
 	u8 signal = 0xff - stv0299_readreg (state, 0x18);
 	u8 sync = stv0299_readreg (state, 0x1b);
 
-	dprintk ("%s : FE_READ_STATUS : VSTATUS: 0x%02x\n", __FUNCTION__, sync);
+	dprintk ("%s : FE_READ_STATUS : VSTATUS: 0x%02x\n", __func__, sync);
 	*status = 0;
 
 	if (signal > 10)
@@ -467,22 +506,24 @@ static int stv0299_read_status(struct dvb_frontend* fe, fe_status_t* status)
 
 static int stv0299_read_ber(struct dvb_frontend* fe, u32* ber)
 {
-        struct stv0299_state* state = (struct stv0299_state*) fe->demodulator_priv;
+	struct stv0299_state* state = fe->demodulator_priv;
 
-	if (state->errmode != STATUS_BER) return 0;
-	*ber = (stv0299_readreg (state, 0x1d) << 8) | stv0299_readreg (state, 0x1e);
+	if (state->errmode != STATUS_BER)
+		return -ENOSYS;
+
+	*ber = stv0299_readreg(state, 0x1e) | (stv0299_readreg(state, 0x1d) << 8);
 
 	return 0;
 }
 
 static int stv0299_read_signal_strength(struct dvb_frontend* fe, u16* strength)
 {
-        struct stv0299_state* state = (struct stv0299_state*) fe->demodulator_priv;
+	struct stv0299_state* state = fe->demodulator_priv;
 
 	s32 signal =  0xffff - ((stv0299_readreg (state, 0x18) << 8)
 			       | stv0299_readreg (state, 0x19));
 
-	dprintk ("%s : FE_READ_SIGNAL_STRENGTH : AGC2I: 0x%02x%02x, signal=0x%04x\n", __FUNCTION__,
+	dprintk ("%s : FE_READ_SIGNAL_STRENGTH : AGC2I: 0x%02x%02x, signal=0x%04x\n", __func__,
 		 stv0299_readreg (state, 0x18),
 		 stv0299_readreg (state, 0x19), (int) signal);
 
@@ -494,7 +535,7 @@ static int stv0299_read_signal_strength(struct dvb_frontend* fe, u16* strength)
 
 static int stv0299_read_snr(struct dvb_frontend* fe, u16* snr)
 {
-        struct stv0299_state* state = (struct stv0299_state*) fe->demodulator_priv;
+	struct stv0299_state* state = fe->demodulator_priv;
 
 	s32 xsnr = 0xffff - ((stv0299_readreg (state, 0x24) << 8)
 			   | stv0299_readreg (state, 0x25));
@@ -506,20 +547,27 @@ static int stv0299_read_snr(struct dvb_frontend* fe, u16* snr)
 
 static int stv0299_read_ucblocks(struct dvb_frontend* fe, u32* ucblocks)
 {
-        struct stv0299_state* state = (struct stv0299_state*) fe->demodulator_priv;
+	struct stv0299_state* state = fe->demodulator_priv;
 
-	if (state->errmode != STATUS_UCBLOCKS) *ucblocks = 0;
-	else *ucblocks = (stv0299_readreg (state, 0x1d) << 8) | stv0299_readreg (state, 0x1e);
+	if (state->errmode != STATUS_UCBLOCKS)
+		return -ENOSYS;
+
+	state->ucblocks += stv0299_readreg(state, 0x1e);
+	state->ucblocks += (stv0299_readreg(state, 0x1d) << 8);
+	*ucblocks = state->ucblocks;
 
 	return 0;
 }
 
-static int stv0299_set_frontend(struct dvb_frontend* fe, struct dvb_frontend_parameters * p)
+static int stv0299_set_frontend(struct dvb_frontend *fe)
 {
-        struct stv0299_state* state = (struct stv0299_state*) fe->demodulator_priv;
+	struct dtv_frontend_properties *p = &fe->dtv_property_cache;
+	struct stv0299_state* state = fe->demodulator_priv;
 	int invval = 0;
 
-	dprintk ("%s : FE_SET_FRONTEND\n", __FUNCTION__);
+	dprintk ("%s : FE_SET_FRONTEND\n", __func__);
+	if (state->config->set_ts_params)
+		state->config->set_ts_params(fe, 0);
 
 	// set the inversion
 	if (p->inversion == INVERSION_OFF) invval = 0;
@@ -531,60 +579,27 @@ static int stv0299_set_frontend(struct dvb_frontend* fe, struct dvb_frontend_par
 	if (state->config->invert) invval = (~invval) & 1;
 	stv0299_writeregI(state, 0x0c, (stv0299_readreg(state, 0x0c) & 0xfe) | invval);
 
-	if (state->config->enhanced_tuning) {
-		/* check if we should do a finetune */
-		int frequency_delta = p->frequency - state->tuner_frequency;
-		int minmax = p->u.qpsk.symbol_rate / 2000;
-		if (minmax < 5000) minmax = 5000;
-
-		if ((frequency_delta > -minmax) && (frequency_delta < minmax) && (frequency_delta != 0) &&
-		    (state->fec_inner == p->u.qpsk.fec_inner) &&
-		    (state->symbol_rate == p->u.qpsk.symbol_rate)) {
-			int Drot_freq = (frequency_delta << 16) / (state->config->mclk / 1000);
-
-			// zap the derotator registers first
-			stv0299_writeregI(state, 0x22, 0x00);
-			stv0299_writeregI(state, 0x23, 0x00);
-
-			// now set them as we want
-			stv0299_writeregI(state, 0x22, Drot_freq >> 8);
-			stv0299_writeregI(state, 0x23, Drot_freq);
-		} else {
-			/* A "normal" tune is requested */
-			stv0299_writeregI(state, 0x05, 0xb5);	/*  enable i2c repeater on stv0299  */
-			state->config->pll_set(fe, p);
-			stv0299_writeregI(state, 0x05, 0x35);	/*  disable i2c repeater on stv0299  */
-
-			stv0299_writeregI(state, 0x32, 0x80);
-			stv0299_writeregI(state, 0x22, 0x00);
-			stv0299_writeregI(state, 0x23, 0x00);
-			stv0299_writeregI(state, 0x32, 0x19);
-			stv0299_set_symbolrate (fe, p->u.qpsk.symbol_rate);
-			stv0299_set_FEC (state, p->u.qpsk.fec_inner);
-		}
-	} else {
-		stv0299_writeregI(state, 0x05, 0xb5);	/*  enable i2c repeater on stv0299  */
-		state->config->pll_set(fe, p);
-		stv0299_writeregI(state, 0x05, 0x35);	/*  disable i2c repeater on stv0299  */
-
-		stv0299_set_FEC (state, p->u.qpsk.fec_inner);
-		stv0299_set_symbolrate (fe, p->u.qpsk.symbol_rate);
-		stv0299_writeregI(state, 0x22, 0x00);
-		stv0299_writeregI(state, 0x23, 0x00);
-		stv0299_readreg (state, 0x23);
-		stv0299_writeregI(state, 0x12, 0xb9);
+	if (fe->ops.tuner_ops.set_params) {
+		fe->ops.tuner_ops.set_params(fe);
+		if (fe->ops.i2c_gate_ctrl) fe->ops.i2c_gate_ctrl(fe, 0);
 	}
 
+	stv0299_set_FEC(state, p->fec_inner);
+	stv0299_set_symbolrate(fe, p->symbol_rate);
+	stv0299_writeregI(state, 0x22, 0x00);
+	stv0299_writeregI(state, 0x23, 0x00);
+
 	state->tuner_frequency = p->frequency;
-	state->fec_inner = p->u.qpsk.fec_inner;
-	state->symbol_rate = p->u.qpsk.symbol_rate;
+	state->fec_inner = p->fec_inner;
+	state->symbol_rate = p->symbol_rate;
 
 	return 0;
 }
 
-static int stv0299_get_frontend(struct dvb_frontend* fe, struct dvb_frontend_parameters * p)
+static int stv0299_get_frontend(struct dvb_frontend *fe)
 {
-        struct stv0299_state* state = (struct stv0299_state*) fe->demodulator_priv;
+	struct dtv_frontend_properties *p = &fe->dtv_property_cache;
+	struct stv0299_state* state = fe->demodulator_priv;
 	s32 derot_freq;
 	int invval;
 
@@ -601,40 +616,54 @@ static int stv0299_get_frontend(struct dvb_frontend* fe, struct dvb_frontend_par
 	if (state->config->invert) invval = (~invval) & 1;
 	p->inversion = invval ? INVERSION_ON : INVERSION_OFF;
 
-	p->u.qpsk.fec_inner = stv0299_get_fec (state);
-	p->u.qpsk.symbol_rate = stv0299_get_symbolrate (state);
+	p->fec_inner = stv0299_get_fec(state);
+	p->symbol_rate = stv0299_get_symbolrate(state);
 
 	return 0;
 }
 
 static int stv0299_sleep(struct dvb_frontend* fe)
 {
-        struct stv0299_state* state = (struct stv0299_state*) fe->demodulator_priv;
+	struct stv0299_state* state = fe->demodulator_priv;
 
-	stv0299_writeregI(state, 0x02, 0x80);
+	stv0299_writeregI(state, 0x02, 0xb0 | state->mcr_reg);
 	state->initialised = 0;
 
 	return 0;
 }
 
+static int stv0299_i2c_gate_ctrl(struct dvb_frontend* fe, int enable)
+{
+	struct stv0299_state* state = fe->demodulator_priv;
+
+	if (enable) {
+		stv0299_writeregI(state, 0x05, 0xb5);
+	} else {
+		stv0299_writeregI(state, 0x05, 0x35);
+	}
+	udelay(1);
+	return 0;
+}
+
 static int stv0299_get_tune_settings(struct dvb_frontend* fe, struct dvb_frontend_tune_settings* fesettings)
 {
-        struct stv0299_state* state = (struct stv0299_state*) fe->demodulator_priv;
+	struct stv0299_state* state = fe->demodulator_priv;
+	struct dtv_frontend_properties *p = &fe->dtv_property_cache;
 
 	fesettings->min_delay_ms = state->config->min_delay_ms;
-	if (fesettings->parameters.u.qpsk.symbol_rate < 10000000) {
-		fesettings->step_size = fesettings->parameters.u.qpsk.symbol_rate / 32000;
+	if (p->symbol_rate < 10000000) {
+		fesettings->step_size = p->symbol_rate / 32000;
 		fesettings->max_drift = 5000;
 	} else {
-		fesettings->step_size = fesettings->parameters.u.qpsk.symbol_rate / 16000;
-		fesettings->max_drift = fesettings->parameters.u.qpsk.symbol_rate / 2000;
+		fesettings->step_size = p->symbol_rate / 16000;
+		fesettings->max_drift = p->symbol_rate / 2000;
 	}
 	return 0;
 }
 
 static void stv0299_release(struct dvb_frontend* fe)
 {
-	struct stv0299_state* state = (struct stv0299_state*) fe->demodulator_priv;
+	struct stv0299_state* state = fe->demodulator_priv;
 	kfree(state);
 }
 
@@ -647,13 +676,12 @@ struct dvb_frontend* stv0299_attach(const struct stv0299_config* config,
 	int id;
 
 	/* allocate memory for the internal state */
-	state = (struct stv0299_state*) kmalloc(sizeof(struct stv0299_state), GFP_KERNEL);
+	state = kzalloc(sizeof(struct stv0299_state), GFP_KERNEL);
 	if (state == NULL) goto error;
 
 	/* setup the state */
 	state->config = config;
 	state->i2c = i2c;
-	memcpy(&state->ops, &stv0299_ops, sizeof(struct dvb_frontend_ops));
 	state->initialised = 0;
 	state->tuner_frequency = 0;
 	state->symbol_rate = 0;
@@ -661,7 +689,7 @@ struct dvb_frontend* stv0299_attach(const struct stv0299_config* config,
 	state->errmode = STATUS_BER;
 
 	/* check if the demod is there */
-	stv0299_writeregI(state, 0x02, 0x34); /* standby off */
+	stv0299_writeregI(state, 0x02, 0x30); /* standby off */
 	msleep(200);
 	id = stv0299_readreg(state, 0x00);
 
@@ -670,8 +698,8 @@ struct dvb_frontend* stv0299_attach(const struct stv0299_config* config,
 	if (id != 0xa1 && id != 0x80) goto error;
 
 	/* create dvb_frontend */
-	state->frontend.ops = &state->ops;
-        state->frontend.demodulator_priv = state;
+	memcpy(&state->frontend.ops, &stv0299_ops, sizeof(struct dvb_frontend_ops));
+	state->frontend.demodulator_priv = state;
 	return &state->frontend;
 
 error:
@@ -680,10 +708,9 @@ error:
 }
 
 static struct dvb_frontend_ops stv0299_ops = {
-
+	.delsys = { SYS_DVBS },
 	.info = {
 		.name			= "ST STV0299 DVB-S",
-		.type			= FE_QPSK,
 		.frequency_min		= 950000,
 		.frequency_max		= 2150000,
 		.frequency_stepsize	= 125,	 /* kHz for QPSK frontends */
@@ -701,6 +728,8 @@ static struct dvb_frontend_ops stv0299_ops = {
 
 	.init = stv0299_init,
 	.sleep = stv0299_sleep,
+	.write = stv0299_write,
+	.i2c_gate_ctrl = stv0299_i2c_gate_ctrl,
 
 	.set_frontend = stv0299_set_frontend,
 	.get_frontend = stv0299_get_frontend,
@@ -719,13 +748,15 @@ static struct dvb_frontend_ops stv0299_ops = {
 	.dishnetwork_send_legacy_command = stv0299_send_legacy_dish_cmd,
 };
 
+module_param(debug_legacy_dish_switch, int, 0444);
+MODULE_PARM_DESC(debug_legacy_dish_switch, "Enable timing analysis for Dish Network legacy switches");
+
 module_param(debug, int, 0644);
 MODULE_PARM_DESC(debug, "Turn on/off frontend debugging (default:off).");
 
 MODULE_DESCRIPTION("ST STV0299 DVB Demodulator driver");
 MODULE_AUTHOR("Ralph Metzler, Holger Waechtler, Peter Schildmann, Felix Domke, "
-              "Andreas Oberritter, Andrew de Quincey, Kenneth Aafløy");
+	      "Andreas Oberritter, Andrew de Quincey, Kenneth Aafly");
 MODULE_LICENSE("GPL");
 
-EXPORT_SYMBOL(stv0299_writereg);
 EXPORT_SYMBOL(stv0299_attach);

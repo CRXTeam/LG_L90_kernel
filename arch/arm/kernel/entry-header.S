@@ -1,24 +1,10 @@
-#include <linux/config.h> /* for CONFIG_ARCH_xxxx */
+#include <linux/init.h>
 #include <linux/linkage.h>
 
 #include <asm/assembler.h>
-#include <asm/constants.h>
+#include <asm/asm-offsets.h>
 #include <asm/errno.h>
-#include <asm/hardware.h>
-#include <asm/arch/irqs.h>
-#include <asm/arch/entry-macro.S>
-
-#ifndef MODE_SVC
-#define MODE_SVC 0x13
-#endif
-
-	.macro	zero_fp
-#ifdef CONFIG_FRAME_POINTER
-	mov	fp, #0
-#endif
-	.endm
-
-	.text
+#include <asm/thread_info.h>
 
 @ Bad Abort numbers
 @ -----------------
@@ -29,111 +15,97 @@
 #define BAD_IRQ		3
 #define BAD_UNDEFINSTR	4
 
-#define PT_TRACESYS	0x00000002
-
-@ OS version number used in SWIs
-@  RISC OS is 0
-@  RISC iX is 8
 @
-#define OS_NUMBER	9
-#define ARMSWI_OFFSET	0x000f0000
-
+@ Most of the stack format comes from struct pt_regs, but with
+@ the addition of 8 bytes for storing syscall args 5 and 6.
+@ This _must_ remain a multiple of 8 for EABI.
 @
-@ Stack format (ensured by USER_* and SVC_*)
-@
-#define S_FRAME_SIZE	72
-#define S_OLD_R0	68
-#define S_PSR		64
-
-#define S_PC		60
-#define S_LR		56
-#define S_SP		52
-#define S_IP		48
-#define S_FP		44
-#define S_R10		40
-#define S_R9		36
-#define S_R8		32
-#define S_R7		28
-#define S_R6		24
-#define S_R5		20
-#define S_R4		16
-#define S_R3		12
-#define S_R2		8
-#define S_R1		4
-#define S_R0		0
 #define S_OFF		8
 
-	.macro	set_cpsr_c, reg, mode
-	msr	cpsr_c, \mode
-	.endm
-
-#if __LINUX_ARM_ARCH__ >= 6
-	.macro	disable_irq, temp
-	cpsid	i
-	.endm
-
-	.macro	enable_irq, temp
-	cpsie	i
-	.endm
-#else
-	.macro	disable_irq, temp
-	set_cpsr_c \temp, #PSR_I_BIT | MODE_SVC
-	.endm
-
-	.macro	enable_irq, temp
-	set_cpsr_c \temp, #MODE_SVC
-	.endm
+/* 
+ * The SWI code relies on the fact that R0 is at the bottom of the stack
+ * (due to slow/fast restore user regs).
+ */
+#if S_R0 != 0
+#error "Please fix"
 #endif
 
-	.macro	save_user_regs
-	sub	sp, sp, #S_FRAME_SIZE
-	stmia	sp, {r0 - r12}			@ Calling r0 - r12
-	add	r8, sp, #S_PC
-	stmdb	r8, {sp, lr}^			@ Calling sp, lr
-	mrs	r8, spsr			@ called from non-FIQ mode, so ok.
-	str	lr, [sp, #S_PC]			@ Save calling PC
-	str	r8, [sp, #S_PSR]		@ Save CPSR
-	str	r0, [sp, #S_OLD_R0]		@ Save OLD_R0
+	.macro	zero_fp
+#ifdef CONFIG_FRAME_POINTER
+	mov	fp, #0
+#endif
 	.endm
 
-	.macro	restore_user_regs
-	ldr	r1, [sp, #S_PSR]		@ Get calling cpsr
-	disable_irq ip				@ disable IRQs
-	ldr	lr, [sp, #S_PC]!		@ Get PC
-	msr	spsr_cxsf, r1			@ save in spsr_svc
-	ldmdb	sp, {r0 - lr}^			@ Get calling r0 - lr
-	mov	r0, r0
-	add	sp, sp, #S_FRAME_SIZE - S_PC
-	movs	pc, lr				@ return & move spsr_svc into cpsr
+	.macro	alignment_trap, rtemp
+#ifdef CONFIG_ALIGNMENT_TRAP
+	ldr	\rtemp, .LCcralign
+	ldr	\rtemp, [\rtemp]
+	mcr	p15, 0, \rtemp, c1, c0
+#endif
 	.endm
 
-/*
- * Must be called with IRQs already disabled.
- */
-	.macro	fast_restore_user_regs
-	ldr	r1, [sp, #S_OFF + S_PSR]	@ get calling cpsr
-	ldr	lr, [sp, #S_OFF + S_PC]!	@ get pc
+	@
+	@ Store/load the USER SP and LR registers by switching to the SYS
+	@ mode. Useful in Thumb-2 mode where "stm/ldm rd, {sp, lr}^" is not
+	@ available. Should only be called from SVC mode
+	@
+	.macro	store_user_sp_lr, rd, rtemp, offset = 0
+	mrs	\rtemp, cpsr
+	eor	\rtemp, \rtemp, #(SVC_MODE ^ SYSTEM_MODE)
+	msr	cpsr_c, \rtemp			@ switch to the SYS mode
+
+	str	sp, [\rd, #\offset]		@ save sp_usr
+	str	lr, [\rd, #\offset + 4]		@ save lr_usr
+
+	eor	\rtemp, \rtemp, #(SVC_MODE ^ SYSTEM_MODE)
+	msr	cpsr_c, \rtemp			@ switch back to the SVC mode
+	.endm
+
+	.macro	load_user_sp_lr, rd, rtemp, offset = 0
+	mrs	\rtemp, cpsr
+	eor	\rtemp, \rtemp, #(SVC_MODE ^ SYSTEM_MODE)
+	msr	cpsr_c, \rtemp			@ switch to the SYS mode
+
+	ldr	sp, [\rd, #\offset]		@ load sp_usr
+	ldr	lr, [\rd, #\offset + 4]		@ load lr_usr
+
+	eor	\rtemp, \rtemp, #(SVC_MODE ^ SYSTEM_MODE)
+	msr	cpsr_c, \rtemp			@ switch back to the SVC mode
+	.endm
+
+#ifndef CONFIG_THUMB2_KERNEL
+	.macro	svc_exit, rpsr
+	msr	spsr_cxsf, \rpsr
+#if defined(CONFIG_CPU_V6)
+	ldr	r0, [sp]
+	strex	r1, r2, [sp]			@ clear the exclusive monitor
+	ldmib	sp, {r1 - pc}^			@ load r1 - pc, cpsr
+#elif defined(CONFIG_CPU_32v6K)
+	clrex					@ clear the exclusive monitor
+	ldmia	sp, {r0 - pc}^			@ load r0 - pc, cpsr
+#else
+	ldmia	sp, {r0 - pc}^			@ load r0 - pc, cpsr
+#endif
+	.endm
+
+	.macro	restore_user_regs, fast = 0, offset = 0
+	ldr	r1, [sp, #\offset + S_PSR]	@ get calling cpsr
+	ldr	lr, [sp, #\offset + S_PC]!	@ get pc
 	msr	spsr_cxsf, r1			@ save in spsr_svc
+#if defined(CONFIG_CPU_V6)
+	strex	r1, r2, [sp]			@ clear the exclusive monitor
+#elif defined(CONFIG_CPU_32v6K)
+	clrex					@ clear the exclusive monitor
+#endif
+	.if	\fast
 	ldmdb	sp, {r1 - lr}^			@ get calling r1 - lr
-	mov	r0, r0
+	.else
+	ldmdb	sp, {r0 - lr}^			@ get calling r0 - lr
+	.endif
+	mov	r0, r0				@ ARMv5T and earlier require a nop
+						@ after ldm {}^
 	add	sp, sp, #S_FRAME_SIZE - S_PC
 	movs	pc, lr				@ return & move spsr_svc into cpsr
-	.endm
-
-/*
- * Must be called with IRQs already disabled.
- */
-	.macro	slow_restore_user_regs
-	ldr	r1, [sp, #S_PSR]		@ get calling cpsr
-	ldr	lr, [sp, #S_PC]!		@ get pc
-	msr	spsr_cxsf, r1			@ save in spsr_svc
-	ldmdb	sp, {r0 - lr}^			@ get calling r1 - lr
-	mov	r0, r0
-	add	sp, sp, #S_FRAME_SIZE - S_PC
-	movs	pc, lr				@ return & move spsr_svc into cpsr
-	.endm
-
-	.macro	mask_pc, rd, rm
 	.endm
 
 	.macro	get_thread_info, rd
@@ -141,15 +113,55 @@
 	mov	\rd, \rd, lsl #13
 	.endm
 
-	.macro	alignment_trap, rbase, rtemp, sym
-#ifdef CONFIG_ALIGNMENT_TRAP
-#define OFF_CR_ALIGNMENT(x)	cr_alignment - x
-
-	ldr	\rtemp, [\rbase, #OFF_CR_ALIGNMENT(\sym)]
-	mcr	p15, 0, \rtemp, c1, c0
-#endif
+	@
+	@ 32-bit wide "mov pc, reg"
+	@
+	.macro	movw_pc, reg
+	mov	pc, \reg
+	.endm
+#else	/* CONFIG_THUMB2_KERNEL */
+	.macro	svc_exit, rpsr
+	ldr	lr, [sp, #S_SP]			@ top of the stack
+	ldrd	r0, r1, [sp, #S_LR]		@ calling lr and pc
+	clrex					@ clear the exclusive monitor
+	stmdb	lr!, {r0, r1, \rpsr}		@ calling lr and rfe context
+	ldmia	sp, {r0 - r12}
+	mov	sp, lr
+	ldr	lr, [sp], #4
+	rfeia	sp!
 	.endm
 
+	.macro	restore_user_regs, fast = 0, offset = 0
+	clrex					@ clear the exclusive monitor
+	mov	r2, sp
+	load_user_sp_lr r2, r3, \offset + S_SP	@ calling sp, lr
+	ldr	r1, [sp, #\offset + S_PSR]	@ get calling cpsr
+	ldr	lr, [sp, #\offset + S_PC]	@ get pc
+	add	sp, sp, #\offset + S_SP
+	msr	spsr_cxsf, r1			@ save in spsr_svc
+	.if	\fast
+	ldmdb	sp, {r1 - r12}			@ get calling r1 - r12
+	.else
+	ldmdb	sp, {r0 - r12}			@ get calling r0 - r12
+	.endif
+	add	sp, sp, #S_FRAME_SIZE - S_SP
+	movs	pc, lr				@ return & move spsr_svc into cpsr
+	.endm
+
+	.macro	get_thread_info, rd
+	mov	\rd, sp
+	lsr	\rd, \rd, #13
+	mov	\rd, \rd, lsl #13
+	.endm
+
+	@
+	@ 32-bit wide "mov pc, reg"
+	@
+	.macro	movw_pc, reg
+	mov	pc, \reg
+	nop
+	.endm
+#endif	/* !CONFIG_THUMB2_KERNEL */
 
 /*
  * These are the registers used in the syscall handler, and allow us to
@@ -165,18 +177,3 @@ scno	.req	r7		@ syscall number
 tbl	.req	r8		@ syscall table pointer
 why	.req	r8		@ Linux syscall (!= 0)
 tsk	.req	r9		@ current thread_info
-
-/*
- * Get the system call number.
- */
-	.macro	get_scno
-#ifdef CONFIG_ARM_THUMB
-	tst	r8, #PSR_T_BIT		@ this is SPSR from save_user_regs
-	addne	scno, r7, #OS_NUMBER << 20 @ put OS number in
-	ldreq	scno, [lr, #-4]
-
-#else
-	mask_pc	lr, lr
-	ldr	scno, [lr, #-4]		@ get SWI instruction
-#endif
-	.endm

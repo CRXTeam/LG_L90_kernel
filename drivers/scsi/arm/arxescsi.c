@@ -1,5 +1,5 @@
 /*
- * linux/arch/arm/drivers/scsi/arxescsi.c
+ * linux/drivers/scsi/arm/arxescsi.c
  *
  * Copyright (C) 1997-2000 Russell King, Stefan Hanske
  *
@@ -23,7 +23,6 @@
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
-#include <linux/sched.h>
 #include <linux/proc_fs.h>
 #include <linux/unistd.h>
 #include <linux/stat.h>
@@ -33,7 +32,6 @@
 
 #include <asm/dma.h>
 #include <asm/io.h>
-#include <asm/irq.h>
 #include <asm/ecard.h>
 
 #include "../scsi.h"
@@ -65,7 +63,7 @@ struct arxescsi_info {
  * Returns : 0 if we should not set CMD_WITHDMA for transfer info command
  */
 static fasdmatype_t
-arxescsi_dma_setup(struct Scsi_Host *host, Scsi_Pointer *SCp,
+arxescsi_dma_setup(struct Scsi_Host *host, struct scsi_pointer *SCp,
 		       fasdmadir_t direction, fasdmatype_t min_type)
 {
 	/*
@@ -111,7 +109,7 @@ static void arxescsi_pseudo_dma_write(unsigned char *addr, void __iomem *base)
  *	     transfer  - minimum number of bytes we expect to transfer
  */
 static void
-arxescsi_dma_pseudo(struct Scsi_Host *host, Scsi_Pointer *SCp,
+arxescsi_dma_pseudo(struct Scsi_Host *host, struct scsi_pointer *SCp,
 		    fasdmadir_t direction, int transfer)
 {
 	struct arxescsi_info *info = (struct arxescsi_info *)host->hostdata;
@@ -197,7 +195,7 @@ arxescsi_dma_pseudo(struct Scsi_Host *host, Scsi_Pointer *SCp,
  * Params  : host  - host
  *	     SCpnt - command
  */
-static void arxescsi_dma_stop(struct Scsi_Host *host, Scsi_Pointer *SCp)
+static void arxescsi_dma_stop(struct Scsi_Host *host, struct scsi_pointer *SCp)
 {
 	/*
 	 * no DMA to stop
@@ -230,7 +228,7 @@ static const char *arxescsi_info(struct Scsi_Host *host)
  * Params  : buffer - a buffer to write information to
  *	     start  - a pointer into this buffer set by this routine to the start
  *		      of the required information.
- *	     offset - offset into information that we have read upto.
+ *	     offset - offset into information that we have read up to.
  *	     length - length of buffer
  *	     host_no - host number to return information for
  *	     inout  - 0 for reading, 1 for writing.
@@ -261,7 +259,7 @@ arxescsi_proc_info(struct Scsi_Host *host, char *buffer, char **start, off_t off
 	return pos;
 }
 
-static Scsi_Host_Template arxescsi_template = {
+static struct scsi_host_template arxescsi_template = {
 	.proc_info			= arxescsi_proc_info,
 	.name				= "ARXE SCSI card",
 	.info				= arxescsi_info,
@@ -283,7 +281,6 @@ arxescsi_probe(struct expansion_card *ec, const struct ecard_id *id)
 {
 	struct Scsi_Host *host;
 	struct arxescsi_info *info;
-	unsigned long resbase, reslen;
 	void __iomem *base;
 	int ret;
 
@@ -291,9 +288,7 @@ arxescsi_probe(struct expansion_card *ec, const struct ecard_id *id)
 	if (ret)
 		goto out;
 
-	resbase = ecard_resource_start(ec, ECARD_RES_MEMC);
-	reslen = ecard_resource_len(ec, ECARD_RES_MEMC);
-	base = ioremap(resbase, reslen);
+	base = ecardm_iomap(ec, ECARD_RES_MEMC, 0, 0);
 	if (!base) {
 		ret = -ENOMEM;
 		goto out_region;
@@ -302,7 +297,7 @@ arxescsi_probe(struct expansion_card *ec, const struct ecard_id *id)
 	host = scsi_host_alloc(&arxescsi_template, sizeof(struct arxescsi_info));
 	if (!host) {
 		ret = -ENOMEM;
-		goto out_unmap;
+		goto out_region;
 	}
 
 	info = (struct arxescsi_info *)host->hostdata;
@@ -310,7 +305,7 @@ arxescsi_probe(struct expansion_card *ec, const struct ecard_id *id)
 	info->base = base;
 
 	info->info.scsi.io_base		= base + 0x2000;
-	info->info.scsi.irq		= NO_IRQ;
+	info->info.scsi.irq		= 0;
 	info->info.scsi.dma		= NO_DMA;
 	info->info.scsi.io_shift	= 5;
 	info->info.ifcfg.clockrate	= 24; /* MHz */
@@ -339,8 +334,6 @@ arxescsi_probe(struct expansion_card *ec, const struct ecard_id *id)
 	fas216_release(host);
  out_unregister:
 	scsi_host_put(host);
- out_unmap:
-	iounmap(base);
  out_region:
 	ecard_release_resources(ec);
  out:
@@ -350,12 +343,9 @@ arxescsi_probe(struct expansion_card *ec, const struct ecard_id *id)
 static void __devexit arxescsi_remove(struct expansion_card *ec)
 {
 	struct Scsi_Host *host = ecard_get_drvdata(ec);
-	struct arxescsi_info *info = (struct arxescsi_info *)host->hostdata;
 
 	ecard_set_drvdata(ec, NULL);
 	fas216_remove(host);
-
-	iounmap(info->base);
 
 	fas216_release(host);
 	scsi_host_put(host);

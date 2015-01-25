@@ -25,10 +25,8 @@ static struct dentry *hfs_lookup(struct inode *dir, struct dentry *dentry,
 	struct inode *inode = NULL;
 	int res;
 
-	dentry->d_op = &hfs_dentry_operations;
-
 	hfs_find_init(HFS_SB(dir->i_sb)->cat_tree, &fd);
-	hfs_cat_build_key(fd.search_key, dir->i_ino, &dentry->d_name);
+	hfs_cat_build_key(dir->i_sb, fd.search_key, dir->i_ino, &dentry->d_name);
 	res = hfs_brec_read(&fd, &rec, sizeof(rec));
 	if (res) {
 		hfs_find_exit(&fd);
@@ -53,10 +51,10 @@ done:
  */
 static int hfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 {
-	struct inode *inode = filp->f_dentry->d_inode;
+	struct inode *inode = filp->f_path.dentry->d_inode;
 	struct super_block *sb = inode->i_sb;
 	int len, err;
-	char strbuf[HFS_NAMELEN + 1];
+	char strbuf[HFS_MAX_NAMELEN];
 	union hfs_cat_rec entry;
 	struct hfs_find_data fd;
 	struct hfs_readdir_data *rd;
@@ -66,7 +64,7 @@ static int hfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 		return 0;
 
 	hfs_find_init(HFS_SB(sb)->cat_tree, &fd);
-	hfs_cat_build_key(fd.search_key, inode->i_ino, NULL);
+	hfs_cat_build_key(sb, fd.search_key, inode->i_ino, NULL);
 	err = hfs_brec_find(&fd);
 	if (err)
 		goto out;
@@ -79,14 +77,19 @@ static int hfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 		filp->f_pos++;
 		/* fall through */
 	case 1:
+		if (fd.entrylength > sizeof(entry) || fd.entrylength < 0) {
+			err = -EIO;
+			goto out;
+		}
+
 		hfs_bnode_read(fd.bnode, &entry, fd.entryoffset, fd.entrylength);
 		if (entry.type != HFS_CDR_THD) {
-			printk("HFS: bad catalog folder thread\n");
+			printk(KERN_ERR "hfs: bad catalog folder thread\n");
 			err = -EIO;
 			goto out;
 		}
 		//if (fd.entrylength < HFS_MIN_THREAD_SZ) {
-		//	printk("HFS: truncated catalog thread\n");
+		//	printk(KERN_ERR "hfs: truncated catalog thread\n");
 		//	err = -EIO;
 		//	goto out;
 		//}
@@ -105,16 +108,22 @@ static int hfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 
 	for (;;) {
 		if (be32_to_cpu(fd.key->cat.ParID) != inode->i_ino) {
-			printk("HFS: walked past end of dir\n");
+			printk(KERN_ERR "hfs: walked past end of dir\n");
 			err = -EIO;
 			goto out;
 		}
+
+		if (fd.entrylength > sizeof(entry) || fd.entrylength < 0) {
+			err = -EIO;
+			goto out;
+		}
+
 		hfs_bnode_read(fd.bnode, &entry, fd.entryoffset, fd.entrylength);
 		type = entry.type;
-		len = hfs_mac2triv(strbuf, &fd.key->cat.CName);
+		len = hfs_mac2asc(sb, strbuf, &fd.key->cat.CName);
 		if (type == HFS_CDR_DIR) {
 			if (fd.entrylength < sizeof(struct hfs_cat_dir)) {
-				printk("HFS: small dir entry\n");
+				printk(KERN_ERR "hfs: small dir entry\n");
 				err = -EIO;
 				goto out;
 			}
@@ -123,7 +132,7 @@ static int hfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 				break;
 		} else if (type == HFS_CDR_FIL) {
 			if (fd.entrylength < sizeof(struct hfs_cat_file)) {
-				printk("HFS: small file entry\n");
+				printk(KERN_ERR "hfs: small file entry\n");
 				err = -EIO;
 				goto out;
 			}
@@ -131,7 +140,7 @@ static int hfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 				    be32_to_cpu(entry.file.FlNum), DT_REG))
 				break;
 		} else {
-			printk("HFS: bad catalog entry type %d\n", type);
+			printk(KERN_ERR "hfs: bad catalog entry type %d\n", type);
 			err = -EIO;
 			goto out;
 		}
@@ -177,7 +186,7 @@ static int hfs_dir_release(struct inode *inode, struct file *file)
  * a directory and return a corresponding inode, given the inode for
  * the directory and the name (and its length) of the new file.
  */
-static int hfs_create(struct inode *dir, struct dentry *dentry, int mode,
+static int hfs_create(struct inode *dir, struct dentry *dentry, umode_t mode,
 		      struct nameidata *nd)
 {
 	struct inode *inode;
@@ -189,7 +198,7 @@ static int hfs_create(struct inode *dir, struct dentry *dentry, int mode,
 
 	res = hfs_cat_create(inode->i_ino, dir, &dentry->d_name, inode);
 	if (res) {
-		inode->i_nlink = 0;
+		clear_nlink(inode);
 		hfs_delete_inode(inode);
 		iput(inode);
 		return res;
@@ -207,7 +216,7 @@ static int hfs_create(struct inode *dir, struct dentry *dentry, int mode,
  * in a directory, given the inode for the parent directory and the
  * name (and its length) of the new directory.
  */
-static int hfs_mkdir(struct inode *dir, struct dentry *dentry, int mode)
+static int hfs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 {
 	struct inode *inode;
 	int res;
@@ -218,7 +227,7 @@ static int hfs_mkdir(struct inode *dir, struct dentry *dentry, int mode)
 
 	res = hfs_cat_create(inode->i_ino, dir, &dentry->d_name, inode);
 	if (res) {
-		inode->i_nlink = 0;
+		clear_nlink(inode);
 		hfs_delete_inode(inode);
 		iput(inode);
 		return res;
@@ -229,51 +238,27 @@ static int hfs_mkdir(struct inode *dir, struct dentry *dentry, int mode)
 }
 
 /*
- * hfs_unlink()
+ * hfs_remove()
  *
- * This is the unlink() entry in the inode_operations structure for
- * regular HFS directories.  The purpose is to delete an existing
- * file, given the inode for the parent directory and the name
- * (and its length) of the existing file.
+ * This serves as both unlink() and rmdir() in the inode_operations
+ * structure for regular HFS directories.  The purpose is to delete
+ * an existing child, given the inode for the parent directory and
+ * the name (and its length) of the existing directory.
+ *
+ * HFS does not have hardlinks, so both rmdir and unlink set the
+ * link count to 0.  The only difference is the emptiness check.
  */
-static int hfs_unlink(struct inode *dir, struct dentry *dentry)
+static int hfs_remove(struct inode *dir, struct dentry *dentry)
 {
-	struct inode *inode;
+	struct inode *inode = dentry->d_inode;
 	int res;
 
-	inode = dentry->d_inode;
-	res = hfs_cat_delete(inode->i_ino, dir, &dentry->d_name);
-	if (res)
-		return res;
-
-	inode->i_nlink--;
-	hfs_delete_inode(inode);
-	inode->i_ctime = CURRENT_TIME_SEC;
-	mark_inode_dirty(inode);
-
-	return res;
-}
-
-/*
- * hfs_rmdir()
- *
- * This is the rmdir() entry in the inode_operations structure for
- * regular HFS directories.  The purpose is to delete an existing
- * directory, given the inode for the parent directory and the name
- * (and its length) of the existing directory.
- */
-static int hfs_rmdir(struct inode *dir, struct dentry *dentry)
-{
-	struct inode *inode;
-	int res;
-
-	inode = dentry->d_inode;
-	if (inode->i_size != 2)
+	if (S_ISDIR(inode->i_mode) && inode->i_size != 2)
 		return -ENOTEMPTY;
 	res = hfs_cat_delete(inode->i_ino, dir, &dentry->d_name);
 	if (res)
 		return res;
-	inode->i_nlink = 0;
+	clear_nlink(inode);
 	inode->i_ctime = CURRENT_TIME_SEC;
 	hfs_delete_inode(inode);
 	mark_inode_dirty(inode);
@@ -298,7 +283,7 @@ static int hfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 
 	/* Unlink destination if it already exists */
 	if (new_dentry->d_inode) {
-		res = hfs_unlink(new_dir, new_dentry);
+		res = hfs_remove(new_dir, new_dentry);
 		if (res)
 			return res;
 	}
@@ -307,24 +292,25 @@ static int hfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 			   old_dir, &old_dentry->d_name,
 			   new_dir, &new_dentry->d_name);
 	if (!res)
-		hfs_cat_build_key((btree_key *)&HFS_I(old_dentry->d_inode)->cat_key,
+		hfs_cat_build_key(old_dir->i_sb,
+				  (btree_key *)&HFS_I(old_dentry->d_inode)->cat_key,
 				  new_dir->i_ino, &new_dentry->d_name);
 	return res;
 }
 
-struct file_operations hfs_dir_operations = {
+const struct file_operations hfs_dir_operations = {
 	.read		= generic_read_dir,
 	.readdir	= hfs_readdir,
 	.llseek		= generic_file_llseek,
 	.release	= hfs_dir_release,
 };
 
-struct inode_operations hfs_dir_inode_operations = {
+const struct inode_operations hfs_dir_inode_operations = {
 	.create		= hfs_create,
 	.lookup		= hfs_lookup,
-	.unlink		= hfs_unlink,
+	.unlink		= hfs_remove,
 	.mkdir		= hfs_mkdir,
-	.rmdir		= hfs_rmdir,
+	.rmdir		= hfs_remove,
 	.rename		= hfs_rename,
 	.setattr	= hfs_inode_setattr,
 };

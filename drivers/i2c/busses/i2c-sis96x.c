@@ -1,7 +1,4 @@
 /*
-    sis96x.c - Part of lm_sensors, Linux kernel modules for hardware
-              monitoring
-
     Copyright (c) 2003 Mark M. Hoffman <mhoffman@lightlink.com>
 
     This program is free software; you can redistribute it and/or modify
@@ -32,24 +29,16 @@
     We assume there can only be one SiS96x with one SMBus interface.
 */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/kernel.h>
 #include <linux/delay.h>
 #include <linux/stddef.h>
-#include <linux/sched.h>
 #include <linux/ioport.h>
 #include <linux/i2c.h>
 #include <linux/init.h>
-#include <asm/io.h>
-
-/*
-	HISTORY:
-	2003-05-11	1.0.0 	Updated from lm_sensors project for kernel 2.5
-				(was i2c-sis645.c from lm_sensors 2.7.0)
-*/
-#define SIS96x_VERSION "1.0.0"
+#include <linux/acpi.h>
+#include <linux/io.h>
 
 /* base address register in PCI config space */
 #define SIS96x_BAR 0x04
@@ -83,8 +72,9 @@
 #define SIS96x_PROC_CALL  0x04
 #define SIS96x_BLOCK_DATA 0x05
 
+static struct pci_driver sis96x_driver;
 static struct i2c_adapter sis96x_adapter;
-static u16 sis96x_smbus_base = 0;
+static u16 sis96x_smbus_base;
 
 static inline u8 sis96x_read(u8 reg)
 {
@@ -119,7 +109,7 @@ static int sis96x_transaction(int size)
 		/* check it again */
 		if (((temp = sis96x_read(SMB_CNT)) & 0x03) != 0x00) {
 			dev_dbg(&sis96x_adapter.dev, "Failed (0x%02x)\n", temp);
-			return -1;
+			return -EBUSY;
 		} else {
 			dev_dbg(&sis96x_adapter.dev, "Successful\n");
 		}
@@ -142,21 +132,21 @@ static int sis96x_transaction(int size)
 	} while (!(temp & 0x0e) && (timeout++ < MAX_TIMEOUT));
 
 	/* If the SMBus is still busy, we give up */
-	if (timeout >= MAX_TIMEOUT) {
+	if (timeout > MAX_TIMEOUT) {
 		dev_dbg(&sis96x_adapter.dev, "SMBus Timeout! (0x%02x)\n", temp);
-		result = -1;
+		result = -ETIMEDOUT;
 	}
 
 	/* device error - probably missing ACK */
 	if (temp & 0x02) {
 		dev_dbg(&sis96x_adapter.dev, "Failed bus transaction!\n");
-		result = -1;
+		result = -ENXIO;
 	}
 
 	/* bus collision */
 	if (temp & 0x04) {
 		dev_dbg(&sis96x_adapter.dev, "Bus collision!\n");
-		result = -1;
+		result = -EIO;
 	}
 
 	/* Finish up by resetting the bus */
@@ -169,11 +159,12 @@ static int sis96x_transaction(int size)
 	return result;
 }
 
-/* Return -1 on error. */
+/* Return negative errno on error. */
 static s32 sis96x_access(struct i2c_adapter * adap, u16 addr,
 			 unsigned short flags, char read_write,
 			 u8 command, int size, union i2c_smbus_data * data)
 {
+	int status;
 
 	switch (size) {
 	case I2C_SMBUS_QUICK:
@@ -208,20 +199,14 @@ static s32 sis96x_access(struct i2c_adapter * adap, u16 addr,
 			SIS96x_PROC_CALL : SIS96x_WORD_DATA);
 		break;
 
-	case I2C_SMBUS_BLOCK_DATA:
-		/* TO DO: */
-		dev_info(&adap->dev, "SMBus block not implemented!\n");
-		return -1;
-		break;
-
 	default:
-		dev_info(&adap->dev, "Unsupported I2C size\n");
-		return -1;
-		break;
+		dev_warn(&adap->dev, "Unsupported transaction %d\n", size);
+		return -EOPNOTSUPP;
 	}
 
-	if (sis96x_transaction(size))
-		return -1;
+	status = sis96x_transaction(size);
+	if (status)
+		return status;
 
 	if ((size != SIS96x_PROC_CALL) &&
 		((read_write == I2C_SMBUS_WRITE) || (size == SIS96x_QUICK)))
@@ -249,21 +234,18 @@ static u32 sis96x_func(struct i2c_adapter *adapter)
 	    I2C_FUNC_SMBUS_PROC_CALL;
 }
 
-static struct i2c_algorithm smbus_algorithm = {
-	.name		= "Non-I2C SMBus adapter",
-	.id		= I2C_ALGO_SMBUS,
+static const struct i2c_algorithm smbus_algorithm = {
 	.smbus_xfer	= sis96x_access,
 	.functionality	= sis96x_func,
 };
 
 static struct i2c_adapter sis96x_adapter = {
 	.owner		= THIS_MODULE,
-	.class		= I2C_CLASS_HWMON,
+	.class		= I2C_CLASS_HWMON | I2C_CLASS_SPD,
 	.algo		= &smbus_algorithm,
-	.name		= "unset",
 };
 
-static struct pci_device_id sis96x_ids[] = {
+static DEFINE_PCI_DEVICE_TABLE(sis96x_ids) = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_SI, PCI_DEVICE_ID_SI_SMBUS) },
 	{ 0, }
 };
@@ -296,8 +278,13 @@ static int __devinit sis96x_probe(struct pci_dev *dev,
 	dev_info(&dev->dev, "SiS96x SMBus base address: 0x%04x\n",
 			sis96x_smbus_base);
 
+	retval = acpi_check_resource_conflict(&dev->resource[SIS96x_BAR]);
+	if (retval)
+		return -ENODEV;
+
 	/* Everything is happy, let's grab the memory and set things up. */
-	if (!request_region(sis96x_smbus_base, SMB_IOSIZE, "sis96x-smbus")) {
+	if (!request_region(sis96x_smbus_base, SMB_IOSIZE,
+			    sis96x_driver.name)) {
 		dev_err(&dev->dev, "SMBus registers 0x%04x-0x%04x "
 			"already in use!\n", sis96x_smbus_base,
 			sis96x_smbus_base + SMB_IOSIZE - 1);
@@ -306,10 +293,10 @@ static int __devinit sis96x_probe(struct pci_dev *dev,
 		return -EINVAL;
 	}
 
-	/* set up the driverfs linkage to our parent device */
+	/* set up the sysfs linkage to our parent device */
 	sis96x_adapter.dev.parent = &dev->dev;
 
-	snprintf(sis96x_adapter.name, I2C_NAME_SIZE,
+	snprintf(sis96x_adapter.name, sizeof(sis96x_adapter.name),
 		"SiS96x SMBus adapter at 0x%04x", sis96x_smbus_base);
 
 	if ((retval = i2c_add_adapter(&sis96x_adapter))) {
@@ -339,7 +326,6 @@ static struct pci_driver sis96x_driver = {
 
 static int __init i2c_sis96x_init(void)
 {
-	printk(KERN_INFO "i2c-sis96x version %s\n", SIS96x_VERSION);
 	return pci_register_driver(&sis96x_driver);
 }
 

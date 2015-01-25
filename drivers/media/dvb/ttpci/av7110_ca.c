@@ -25,21 +25,20 @@
  * Or, point your browser to http://www.gnu.org/copyleft/gpl.html
  *
  *
- * the project's page is at http://www.linuxtv.org/dvb/
+ * the project's page is at http://www.linuxtv.org/ 
  */
 
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/delay.h>
 #include <linux/fs.h>
 #include <linux/timer.h>
 #include <linux/poll.h>
-#include <linux/byteorder/swabb.h>
-#include <linux/smp_lock.h>
+#include <linux/gfp.h>
 
 #include "av7110.h"
 #include "av7110_hw.h"
+#include "av7110_ca.h"
 
 
 void CI_handle(struct av7110 *av7110, u8 *data, u16 len)
@@ -123,7 +122,7 @@ static void ci_ll_release(struct dvb_ringbuffer *cirbuf, struct dvb_ringbuffer *
 }
 
 static int ci_ll_reset(struct dvb_ringbuffer *cibuf, struct file *file,
-		int slots, ca_slot_info_t *slot)
+		       int slots, ca_slot_info_t *slot)
 {
 	int i;
 	int len = 0;
@@ -153,7 +152,7 @@ static ssize_t ci_ll_write(struct dvb_ringbuffer *cibuf, struct file *file,
 {
 	int free;
 	int non_blocking = file->f_flags & O_NONBLOCK;
-	char *page = (char *)__get_free_page(GFP_USER);
+	u8 *page = (u8 *)__get_free_page(GFP_USER);
 	int res;
 
 	if (!page)
@@ -210,13 +209,13 @@ static ssize_t ci_ll_read(struct dvb_ringbuffer *cibuf, struct file *file,
 		return -EINVAL;
 	DVB_RINGBUFFER_SKIP(cibuf, 2);
 
-	return dvb_ringbuffer_read(cibuf, buf, len, 1);
+	return dvb_ringbuffer_read_user(cibuf, buf, len);
 }
 
 static int dvb_ca_open(struct inode *inode, struct file *file)
 {
-	struct dvb_device *dvbdev = (struct dvb_device *) file->private_data;
-	struct av7110 *av7110 = (struct av7110 *) dvbdev->priv;
+	struct dvb_device *dvbdev = file->private_data;
+	struct av7110 *av7110 = dvbdev->priv;
 	int err = dvb_generic_open(inode, file);
 
 	dprintk(8, "av7110:%p\n",av7110);
@@ -229,8 +228,8 @@ static int dvb_ca_open(struct inode *inode, struct file *file)
 
 static unsigned int dvb_ca_poll (struct file *file, poll_table *wait)
 {
-	struct dvb_device *dvbdev = (struct dvb_device *) file->private_data;
-	struct av7110 *av7110 = (struct av7110 *) dvbdev->priv;
+	struct dvb_device *dvbdev = file->private_data;
+	struct av7110 *av7110 = dvbdev->priv;
 	struct dvb_ringbuffer *rbuf = &av7110->ci_rbuffer;
 	struct dvb_ringbuffer *wbuf = &av7110->ci_wbuffer;
 	unsigned int mask = 0;
@@ -249,11 +248,10 @@ static unsigned int dvb_ca_poll (struct file *file, poll_table *wait)
 	return mask;
 }
 
-static int dvb_ca_ioctl(struct inode *inode, struct file *file,
-		 unsigned int cmd, void *parg)
+static int dvb_ca_ioctl(struct file *file, unsigned int cmd, void *parg)
 {
-	struct dvb_device *dvbdev = (struct dvb_device *) file->private_data;
-	struct av7110 *av7110 = (struct av7110 *) dvbdev->priv;
+	struct dvb_device *dvbdev = file->private_data;
+	struct av7110 *av7110 = dvbdev->priv;
 	unsigned long arg = (unsigned long) parg;
 
 	dprintk(8, "av7110:%p\n",av7110);
@@ -279,7 +277,7 @@ static int dvb_ca_ioctl(struct inode *inode, struct file *file,
 	{
 		ca_slot_info_t *info=(ca_slot_info_t *)parg;
 
-		if (info->num > 1)
+		if (info->num < 0 || info->num > 1)
 			return -EINVAL;
 		av7110->ci_slot[info->num].num = info->num;
 		av7110->ci_slot[info->num].type = FW_CI_LL_SUPPORT(av7110->arm_app) ?
@@ -330,8 +328,8 @@ static int dvb_ca_ioctl(struct inode *inode, struct file *file,
 static ssize_t dvb_ca_write(struct file *file, const char __user *buf,
 			    size_t count, loff_t *ppos)
 {
-	struct dvb_device *dvbdev = (struct dvb_device *) file->private_data;
-	struct av7110 *av7110 = (struct av7110 *) dvbdev->priv;
+	struct dvb_device *dvbdev = file->private_data;
+	struct av7110 *av7110 = dvbdev->priv;
 
 	dprintk(8, "av7110:%p\n",av7110);
 	return ci_ll_write(&av7110->ci_wbuffer, file, buf, count, ppos);
@@ -340,23 +338,22 @@ static ssize_t dvb_ca_write(struct file *file, const char __user *buf,
 static ssize_t dvb_ca_read(struct file *file, char __user *buf,
 			   size_t count, loff_t *ppos)
 {
-	struct dvb_device *dvbdev = (struct dvb_device *) file->private_data;
-	struct av7110 *av7110 = (struct av7110 *) dvbdev->priv;
+	struct dvb_device *dvbdev = file->private_data;
+	struct av7110 *av7110 = dvbdev->priv;
 
 	dprintk(8, "av7110:%p\n",av7110);
 	return ci_ll_read(&av7110->ci_rbuffer, file, buf, count, ppos);
 }
 
-
-
-static struct file_operations dvb_ca_fops = {
+static const struct file_operations dvb_ca_fops = {
 	.owner		= THIS_MODULE,
 	.read		= dvb_ca_read,
 	.write		= dvb_ca_write,
-	.ioctl		= dvb_generic_ioctl,
+	.unlocked_ioctl	= dvb_generic_ioctl,
 	.open		= dvb_ca_open,
 	.release	= dvb_generic_release,
 	.poll		= dvb_ca_poll,
+	.llseek		= default_llseek,
 };
 
 static struct dvb_device dvbdev_ca = {
@@ -370,7 +367,7 @@ static struct dvb_device dvbdev_ca = {
 
 int av7110_ca_register(struct av7110 *av7110)
 {
-	return dvb_register_device(av7110->dvb_adapter, &av7110->ca_dev,
+	return dvb_register_device(&av7110->dvb_adapter, &av7110->ca_dev,
 				   &dvbdev_ca, av7110, DVB_DEVICE_CA);
 }
 

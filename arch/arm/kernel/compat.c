@@ -15,7 +15,6 @@
  *  the kernel for 5 years from now (2001). This will allow boot loaders
  *  to convert to the new struct tag way.
  */
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
@@ -26,6 +25,8 @@
 #include <asm/page.h>
 
 #include <asm/mach/arch.h>
+
+#include "compat.h"
 
 /*
  * Usage:
@@ -215,11 +216,4 @@ void __init convert_to_tag_list(struct tag *tags)
 {
 	struct param_struct *params = (struct param_struct *)tags;
 	build_tag_list(params, &params->u2);
-}
-
-void __init squash_mem_tags(struct tag *tag)
-{
-	for (; tag->hdr.size; tag = tag_next(tag))
-		if (tag->hdr.tag == ATAG_MEM)
-			tag->hdr.tag = ATAG_NONE;
 }

@@ -1,10 +1,8 @@
 
 /*
- * drivers/mtd/maps/svme182.c
- * 
+ * drivers/mtd/maps/dmv182.c
+ *
  * Flash map driver for the Dy4 SVME182 board
- * 
- * $Id: dmv182.c,v 1.5 2004/11/04 13:24:14 gleixner Exp $
  *
  * Copyright 2003-2004, TimeSys Corporation
  *
@@ -16,7 +14,6 @@
  * option) any later version.
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/types.h>
@@ -99,12 +96,12 @@ static struct mtd_info *this_mtd;
 static int __init init_svme182(void)
 {
 	struct mtd_partition *partitions;
-	int num_parts = sizeof(svme182_partitions) / sizeof(struct mtd_partition);
+	int num_parts = ARRAY_SIZE(svme182_partitions);
 
 	partitions = svme182_partitions;
 
 	svme182_map.virt = ioremap(FLASH_BASE_ADDR, svme182_map.size);
-		
+
 	if (svme182_map.virt == 0) {
 		printk("Failed to ioremap FLASH memory area.\n");
 		return -EIO;
@@ -123,7 +120,7 @@ static int __init init_svme182(void)
 		   this_mtd->size >> 20, FLASH_BASE_ADDR);
 
 	this_mtd->owner = THIS_MODULE;
-	add_mtd_partitions(this_mtd, partitions, num_parts);
+	mtd_device_register(this_mtd, partitions, num_parts);
 
 	return 0;
 }
@@ -132,7 +129,7 @@ static void __exit cleanup_svme182(void)
 {
 	if (this_mtd)
 	{
-		del_mtd_partitions(this_mtd);
+		mtd_device_unregister(this_mtd);
 		map_destroy(this_mtd);
 	}
 

@@ -3,7 +3,7 @@
  *
  * Driver for a little io fencing timer.
  *
- * Copyright (C) 2002 Oracle Corporation.  All rights reserved.
+ * Copyright (C) 2002, 2003 Oracle.  All rights reserved.
  *
  * Author: Joel Becker <joel.becker@oracle.com>
  *
@@ -26,7 +26,7 @@
  * The hangcheck-timer driver uses the TSC to catch delays that
  * jiffies does not notice.  A timer is set.  When the timer fires, it
  * checks whether it was delayed and if that delay exceeds a given
- * margin of error.  The hangcheck_tick module paramter takes the timer
+ * margin of error.  The hangcheck_tick module parameter takes the timer
  * duration in seconds.  The hangcheck_margin parameter defines the
  * margin of error, in seconds.  The defaults are 60 seconds for the
  * timer and 180 seconds for the margin of error.  IOW, a timer is set
@@ -45,10 +45,13 @@
 #include <linux/mm.h>
 #include <linux/reboot.h>
 #include <linux/init.h>
+#include <linux/delay.h>
 #include <asm/uaccess.h>
+#include <linux/sysrq.h>
+#include <linux/timer.h>
+#include <linux/time.h>
 
-
-#define VERSION_STR "0.5.0"
+#define VERSION_STR "0.9.1"
 
 #define DEFAULT_IOFENCE_MARGIN 60	/* Default fudge factor, in seconds */
 #define DEFAULT_IOFENCE_TICK 180	/* Default timer timeout, in seconds */
@@ -56,18 +59,81 @@
 static int hangcheck_tick = DEFAULT_IOFENCE_TICK;
 static int hangcheck_margin = DEFAULT_IOFENCE_MARGIN;
 static int hangcheck_reboot;  /* Defaults to not reboot */
+static int hangcheck_dump_tasks;  /* Defaults to not dumping SysRQ T */
 
-/* Driver options */
+/* options - modular */
 module_param(hangcheck_tick, int, 0);
 MODULE_PARM_DESC(hangcheck_tick, "Timer delay.");
 module_param(hangcheck_margin, int, 0);
 MODULE_PARM_DESC(hangcheck_margin, "If the hangcheck timer has been delayed more than hangcheck_margin seconds, the driver will fire.");
 module_param(hangcheck_reboot, int, 0);
 MODULE_PARM_DESC(hangcheck_reboot, "If nonzero, the machine will reboot when the timer margin is exceeded.");
+module_param(hangcheck_dump_tasks, int, 0);
+MODULE_PARM_DESC(hangcheck_dump_tasks, "If nonzero, the machine will dump the system task state when the timer margin is exceeded.");
 
-MODULE_AUTHOR("Joel Becker");
+MODULE_AUTHOR("Oracle");
 MODULE_DESCRIPTION("Hangcheck-timer detects when the system has gone out to lunch past a certain margin.");
 MODULE_LICENSE("GPL");
+MODULE_VERSION(VERSION_STR);
+
+/* options - nonmodular */
+#ifndef MODULE
+
+static int __init hangcheck_parse_tick(char *str)
+{
+	int par;
+	if (get_option(&str,&par))
+		hangcheck_tick = par;
+	return 1;
+}
+
+static int __init hangcheck_parse_margin(char *str)
+{
+	int par;
+	if (get_option(&str,&par))
+		hangcheck_margin = par;
+	return 1;
+}
+
+static int __init hangcheck_parse_reboot(char *str)
+{
+	int par;
+	if (get_option(&str,&par))
+		hangcheck_reboot = par;
+	return 1;
+}
+
+static int __init hangcheck_parse_dump_tasks(char *str)
+{
+	int par;
+	if (get_option(&str,&par))
+		hangcheck_dump_tasks = par;
+	return 1;
+}
+
+__setup("hcheck_tick", hangcheck_parse_tick);
+__setup("hcheck_margin", hangcheck_parse_margin);
+__setup("hcheck_reboot", hangcheck_parse_reboot);
+__setup("hcheck_dump_tasks", hangcheck_parse_dump_tasks);
+#endif /* not MODULE */
+
+#if defined(CONFIG_S390)
+# define HAVE_MONOTONIC
+# define TIMER_FREQ 1000000000ULL
+#else
+# define TIMER_FREQ 1000000000ULL
+#endif
+
+#ifdef HAVE_MONOTONIC
+extern unsigned long long monotonic_clock(void);
+#else
+static inline unsigned long long monotonic_clock(void)
+{
+	struct timespec ts;
+	getrawmonotonic(&ts);
+	return timespec_to_ns(&ts);
+}
+#endif  /* HAVE_MONOTONIC */
 
 
 /* Last time scheduled */
@@ -75,10 +141,8 @@ static unsigned long long hangcheck_tsc, hangcheck_tsc_margin;
 
 static void hangcheck_fire(unsigned long);
 
-static struct timer_list hangcheck_ticktock =
-		TIMER_INITIALIZER(hangcheck_fire, 0, 0);
+static DEFINE_TIMER(hangcheck_ticktock, hangcheck_fire, 0, 0);
 
-extern unsigned long long monotonic_clock(void);
 
 static void hangcheck_fire(unsigned long data)
 {
@@ -92,13 +156,26 @@ static void hangcheck_fire(unsigned long data)
 		tsc_diff = (cur_tsc + (~0ULL - hangcheck_tsc)); /* or something */
 
 	if (tsc_diff > hangcheck_tsc_margin) {
+		if (hangcheck_dump_tasks) {
+			printk(KERN_CRIT "Hangcheck: Task state:\n");
+#ifdef CONFIG_MAGIC_SYSRQ
+			handle_sysrq('t');
+#endif  /* CONFIG_MAGIC_SYSRQ */
+		}
 		if (hangcheck_reboot) {
 			printk(KERN_CRIT "Hangcheck: hangcheck is restarting the machine.\n");
-			machine_restart(NULL);
+			emergency_restart();
 		} else {
 			printk(KERN_CRIT "Hangcheck: hangcheck value past margin!\n");
 		}
 	}
+#if 0
+	/*
+	 * Enable to investigate delays in detail
+	 */
+	printk("Hangcheck: called %Ld ns since last time (%Ld ns overshoot)\n",
+			tsc_diff, tsc_diff - hangcheck_tick*TIMER_FREQ);
+#endif
 	mod_timer(&hangcheck_ticktock, jiffies + (hangcheck_tick*HZ));
 	hangcheck_tsc = monotonic_clock();
 }
@@ -108,10 +185,14 @@ static int __init hangcheck_init(void)
 {
 	printk("Hangcheck: starting hangcheck timer %s (tick is %d seconds, margin is %d seconds).\n",
 	       VERSION_STR, hangcheck_tick, hangcheck_margin);
-
-	hangcheck_tsc_margin = hangcheck_margin + hangcheck_tick;
-	hangcheck_tsc_margin *= 1000000000;
-
+#if defined (HAVE_MONOTONIC)
+	printk("Hangcheck: Using monotonic_clock().\n");
+#else
+	printk("Hangcheck: Using getrawmonotonic().\n");
+#endif  /* HAVE_MONOTONIC */
+	hangcheck_tsc_margin =
+		(unsigned long long)(hangcheck_margin + hangcheck_tick);
+	hangcheck_tsc_margin *= (unsigned long long)TIMER_FREQ;
 
 	hangcheck_tsc = monotonic_clock();
 	mod_timer(&hangcheck_ticktock, jiffies + (hangcheck_tick*HZ));
@@ -123,6 +204,7 @@ static int __init hangcheck_init(void)
 static void __exit hangcheck_exit(void)
 {
 	del_timer_sync(&hangcheck_ticktock);
+        printk("Hangcheck: Stopped hangcheck timer.\n");
 }
 
 module_init(hangcheck_init);

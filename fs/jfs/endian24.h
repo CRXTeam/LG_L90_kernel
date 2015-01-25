@@ -1,5 +1,5 @@
 /*
- *   Copyright (c) International Business Machines Corp., 2001
+ *   Copyright (C) International Business Machines Corp., 2001
  *
  *   This program is free software;  you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -29,7 +29,7 @@
 	__u32 __x = (x); \
 	((__u32)( \
 		((__x & (__u32)0x000000ffUL) << 16) | \
-		 (__x & (__u32)0x0000ff00UL)        | \
+		 (__x & (__u32)0x0000ff00UL)	    | \
 		((__x & (__u32)0x00ff0000UL) >> 16) )); \
 })
 

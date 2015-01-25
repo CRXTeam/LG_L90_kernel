@@ -8,12 +8,12 @@
  * Copyright (C) 1996, 97, 98, 99, 2000, 01, 03, 04, 05 by Ralf Baechle
  * Copyright (C) 1999, 2000, 01 Silicon Graphics, Inc.
  */
-#include <linux/config.h>
 #include <linux/interrupt.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <asm/checksum.h>
 #include <asm/pgtable.h>
 #include <asm/uaccess.h>
+#include <asm/ftrace.h>
 
 extern void *__bzero(void *__s, size_t __count);
 extern long __strncpy_from_user_nocheck_asm(char *__to,
@@ -28,22 +28,9 @@ extern long __strnlen_user_asm(const char *s);
 /*
  * String functions
  */
-EXPORT_SYMBOL(memchr);
-EXPORT_SYMBOL(memcmp);
 EXPORT_SYMBOL(memset);
 EXPORT_SYMBOL(memcpy);
 EXPORT_SYMBOL(memmove);
-EXPORT_SYMBOL(strcat);
-EXPORT_SYMBOL(strchr);
-#ifdef CONFIG_MIPS64
-EXPORT_SYMBOL(strncmp);
-#endif
-EXPORT_SYMBOL(strlen);
-EXPORT_SYMBOL(strpbrk);
-EXPORT_SYMBOL(strncat);
-EXPORT_SYMBOL(strnlen);
-EXPORT_SYMBOL(strrchr);
-EXPORT_SYMBOL(strstr);
 
 EXPORT_SYMBOL(kernel_thread);
 
@@ -51,6 +38,7 @@ EXPORT_SYMBOL(kernel_thread);
  * Userspace access stuff.
  */
 EXPORT_SYMBOL(__copy_user);
+EXPORT_SYMBOL(__copy_user_inatomic);
 EXPORT_SYMBOL(__bzero);
 EXPORT_SYMBOL(__strncpy_from_user_nocheck_asm);
 EXPORT_SYMBOL(__strncpy_from_user_asm);
@@ -60,8 +48,11 @@ EXPORT_SYMBOL(__strnlen_user_nocheck_asm);
 EXPORT_SYMBOL(__strnlen_user_asm);
 
 EXPORT_SYMBOL(csum_partial);
+EXPORT_SYMBOL(csum_partial_copy_nocheck);
+EXPORT_SYMBOL(__csum_partial_copy_user);
 
 EXPORT_SYMBOL(invalid_pte_table);
-#ifdef CONFIG_GENERIC_IRQ_PROBE
-EXPORT_SYMBOL(probe_irq_mask);
+#ifdef CONFIG_FUNCTION_TRACER
+/* _mcount is defined in arch/mips/kernel/mcount.S */
+EXPORT_SYMBOL(_mcount);
 #endif

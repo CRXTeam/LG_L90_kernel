@@ -24,7 +24,6 @@
 * 1998/08/08	acme		Version 0.0.1
 */
 
-#include <linux/config.h>
 #include <linux/wanrouter.h>
 #include <linux/spinlock.h>
 
@@ -36,8 +35,6 @@
 #ifdef CONFIG_CYCLOMX_X25
 #include <linux/cycx_x25.h>
 #endif
-
-#define	is_digit(ch) (((ch)>=(unsigned)'0'&&(ch)<=(unsigned)'9')?1:0)
 
 /* Adapter Data Space.
  * This structure is needed because we handle multiple cards, otherwise

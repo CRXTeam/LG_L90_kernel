@@ -20,13 +20,11 @@
 
 #include <linux/module.h>
 #include <linux/signal.h>
-#include <linux/sched.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
 #include <linux/blkdev.h>
 
 #include <asm/io.h>
-#include <asm/system.h>
 
 #include <asm/sun3ints.h>
 #include <asm/dvma.h>
@@ -40,18 +38,22 @@
 /* dma on! */
 #define REAL_DMA
 
+#define NDEBUG 0
+
+#define NDEBUG_ABORT		0x00100000
+#define NDEBUG_TAGS		0x00200000
+#define NDEBUG_MERGING		0x00400000
+
 #include "scsi.h"
+#include "initio.h"
 #include <scsi/scsi_host.h>
 #include "sun3_scsi.h"
-#include "NCR5380.h"
 
 extern int sun3_map_test(unsigned long, char *);
 
 #define USE_WRAPPER
 /*#define RESET_BOOT */
 #define DRIVER_SETUP
-
-#define NDEBUG 0
 
 /*
  * BUG can be used to trigger a strange code-size related hang on 2.1 kernels
@@ -67,7 +69,7 @@ extern int sun3_map_test(unsigned long, char *);
 #define ENABLE_IRQ()
 
 
-static irqreturn_t scsi_sun3_intr(int irq, void *dummy, struct pt_regs *fp);
+static irqreturn_t scsi_sun3_intr(int irq, void *dummy);
 static inline unsigned char sun3scsi_read(int reg);
 static inline void sun3scsi_write(int reg, int value);
 
@@ -84,7 +86,7 @@ module_param(setup_use_tagged_queuing, int, 0);
 static int setup_hostid = -1;
 module_param(setup_hostid, int, 0);
 
-static Scsi_Cmnd *sun3_dma_setup_done = NULL;
+static struct scsi_cmnd *sun3_dma_setup_done = NULL;
 
 #define	AFTER_RESET_DELAY	(HZ/2)
 
@@ -127,7 +129,7 @@ static inline void sun3scsi_write(int reg, int value)
 static struct Scsi_Host *default_instance;
 
 /*
- * Function : int sun3scsi_detect(Scsi_Host_Template * tpnt)
+ * Function : int sun3scsi_detect(struct scsi_host_template * tpnt)
  *
  * Purpose : initializes mac NCR5380 driver based on the
  *	command line / compile time port and irq definitions.
@@ -138,7 +140,7 @@ static struct Scsi_Host *default_instance;
  *
  */
  
-static int sun3scsi_detect(Scsi_Host_Template * tpnt)
+static int __init sun3scsi_detect(struct scsi_host_template * tpnt)
 {
 	unsigned long ioaddr, irq = 0;
 	static int called = 0;
@@ -231,7 +233,7 @@ static int sun3scsi_detect(Scsi_Host_Template * tpnt)
         ((struct NCR5380_hostdata *)instance->hostdata)->ctrl = 0;
 
 	if (request_irq(instance->irq, scsi_sun3_intr,
-			     0, "Sun3SCSI-5380VME", NULL)) {
+			0, "Sun3SCSI-5380VME", instance)) {
 #ifndef REAL_DMA
 		printk("scsi%d: IRQ%d not free, interrupts disabled\n",
 		       instance->host_no, instance->irq);
@@ -280,10 +282,11 @@ static int sun3scsi_detect(Scsi_Host_Template * tpnt)
 int sun3scsi_release (struct Scsi_Host *shpnt)
 {
 	if (shpnt->irq != SCSI_IRQ_NONE)
-		free_irq (shpnt->irq, NULL);
+		free_irq(shpnt->irq, shpnt);
 
 	iounmap((void *)sun3_scsi_regp);
 
+	NCR5380_exit(shpnt);
 	return 0;
 }
 
@@ -340,7 +343,7 @@ static const char * sun3scsi_info (struct Scsi_Host *spnt) {
 // safe bits for the CSR
 #define CSR_GOOD 0x060f
 
-static irqreturn_t scsi_sun3_intr(int irq, void *dummy, struct pt_regs *fp)
+static irqreturn_t scsi_sun3_intr(int irq, void *dummy)
 {
 	unsigned short csr = dregs->csr;
 	int handled = 0;
@@ -371,7 +374,7 @@ static irqreturn_t scsi_sun3_intr(int irq, void *dummy, struct pt_regs *fp)
 	}
 
 	if(csr & (CSR_SDB_INT | CSR_DMA_INT)) {
-		NCR5380_intr(irq, dummy, fp);
+		NCR5380_intr(irq, dummy);
 		handled = 1;
 	}
 
@@ -455,10 +458,11 @@ static inline unsigned long sun3scsi_dma_residual(struct Scsi_Host *instance)
 	return last_residual;
 }
 
-static inline unsigned long sun3scsi_dma_xfer_len(unsigned long wanted, Scsi_Cmnd *cmd,
-				    int write_flag)
+static inline unsigned long sun3scsi_dma_xfer_len(unsigned long wanted,
+						  struct scsi_cmnd *cmd,
+						  int write_flag)
 {
-	if(cmd->request->flags & REQ_CMD)
+	if (cmd->request->cmd_type == REQ_TYPE_FS)
  		return wanted;
 	else
 		return 0;
@@ -564,7 +568,7 @@ static int sun3scsi_dma_finish(int write_flag)
 
 #include "sun3_NCR5380.c"
 
-static Scsi_Host_Template driver_template = {
+static struct scsi_host_template driver_template = {
 	.name			= SUN3_SCSI_NAME,
 	.detect			= sun3scsi_detect,
 	.release		= sun3scsi_release,
@@ -582,3 +586,4 @@ static Scsi_Host_Template driver_template = {
 
 #include "scsi_module.c"
 
+MODULE_LICENSE("GPL");

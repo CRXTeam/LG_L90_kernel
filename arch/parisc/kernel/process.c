@@ -9,11 +9,11 @@
  *    Copyright (C) 2000-2003 Paul Bame <bame at parisc-linux.org>
  *    Copyright (C) 2000 Philipp Rumpf <prumpf with tux.org>
  *    Copyright (C) 2000 David Kennedy <dkennedy with linuxcare.com>
- *    Copyright (C) 2000 Richard Hirst <rhirst with parisc-lixux.org>
+ *    Copyright (C) 2000 Richard Hirst <rhirst with parisc-linux.org>
  *    Copyright (C) 2000 Grant Grundler <grundler with parisc-linux.org>
  *    Copyright (C) 2001 Alan Modra <amodra at parisc-linux.org>
  *    Copyright (C) 2001-2002 Ryan Bradetich <rbrad at parisc-linux.org>
- *    Copyright (C) 2001-2002 Helge Deller <deller at parisc-linux.org>
+ *    Copyright (C) 2001-2007 Helge Deller <deller at parisc-linux.org>
  *    Copyright (C) 2002 Randolph Chung <tausq with parisc-linux.org>
  *
  *
@@ -38,47 +38,24 @@
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/fs.h>
 #include <linux/module.h>
 #include <linux/personality.h>
 #include <linux/ptrace.h>
 #include <linux/sched.h>
+#include <linux/slab.h>
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/kallsyms.h>
+#include <linux/uaccess.h>
 
 #include <asm/io.h>
-#include <asm/offsets.h>
+#include <asm/asm-offsets.h>
 #include <asm/pdc.h>
 #include <asm/pdc_chassis.h>
 #include <asm/pgalloc.h>
-#include <asm/uaccess.h>
 #include <asm/unwind.h>
-
-static int hlt_counter;
-
-/*
- * Power off function, if any
- */ 
-void (*pm_power_off)(void);
-
-void disable_hlt(void)
-{
-	hlt_counter++;
-}
-
-EXPORT_SYMBOL(disable_hlt);
-
-void enable_hlt(void)
-{
-	hlt_counter--;
-}
-
-EXPORT_SYMBOL(enable_hlt);
-
-void default_idle(void)
-{
-	barrier();
-}
+#include <asm/sections.h>
 
 /*
  * The idle thread. There's no useful work to be
@@ -88,22 +65,19 @@ void default_idle(void)
  */
 void cpu_idle(void)
 {
+	set_thread_flag(TIF_POLLING_NRFLAG);
+
 	/* endless idle loop with no priority at all */
 	while (1) {
 		while (!need_resched())
 			barrier();
-		schedule();
+		schedule_preempt_disabled();
 		check_pgt_cache();
 	}
 }
 
 
-#ifdef __LP64__
-#define COMMAND_GLOBAL  0xfffffffffffe0030UL
-#else
-#define COMMAND_GLOBAL  0xfffe0030
-#endif
-
+#define COMMAND_GLOBAL  F_EXTEND(0xfffe0030)
 #define CMD_RESET       5       /* reset any module */
 
 /*
@@ -150,8 +124,6 @@ void machine_restart(char *cmd)
 
 }
 
-EXPORT_SYMBOL(machine_restart);
-
 void machine_halt(void)
 {
 	/*
@@ -160,8 +132,7 @@ void machine_halt(void)
 	*/
 }
 
-EXPORT_SYMBOL(machine_halt);
-
+void (*chassis_power_off)(void);
 
 /*
  * This routine is called from sys_reboot to actually turn off the
@@ -170,8 +141,8 @@ EXPORT_SYMBOL(machine_halt);
 void machine_power_off(void)
 {
 	/* If there is a registered power off handler, call it. */
-	if(pm_power_off)
-		pm_power_off();
+	if (chassis_power_off)
+		chassis_power_off();
 
 	/* Put the soft power button back under hardware control.
 	 * If the user had already pressed the power button, the
@@ -184,11 +155,11 @@ void machine_power_off(void)
 	 * software. The user has to press the button himself. */
 
 	printk(KERN_EMERG "System shut down completed.\n"
-	       KERN_EMERG "Please power this system off now.");
+	       "Please power this system off now.");
 }
 
-EXPORT_SYMBOL(machine_power_off);
-
+void (*pm_power_off)(void) = machine_power_off;
+EXPORT_SYMBOL(pm_power_off);
 
 /*
  * Create a kernel thread
@@ -219,7 +190,6 @@ void flush_thread(void)
 	/* Only needs to handle fpu stuff or perf monitors.
 	** REVISIT: several arches implement a "lazy fpu state".
 	*/
-	set_fs(USER_DS);
 }
 
 void release_thread(struct task_struct *dead_task)
@@ -251,7 +221,17 @@ int
 sys_clone(unsigned long clone_flags, unsigned long usp,
 	  struct pt_regs *regs)
 {
-	int __user *user_tid = (int __user *)regs->gr[26];
+  	/* Arugments from userspace are:
+	   r26 = Clone flags.
+	   r25 = Child stack.
+	   r24 = parent_tidptr.
+	   r23 = Is the TLS storage descriptor 
+	   r22 = child_tidptr 
+	   
+	   However, these last 3 args are only examined
+	   if the proper flags are set. */
+	int __user *parent_tidptr = (int __user *)regs->gr[24];
+	int __user *child_tidptr  = (int __user *)regs->gr[22];
 
 	/* usp must be word aligned.  This also prevents users from
 	 * passing in the value 1 (which is the signal for a special
@@ -259,10 +239,10 @@ sys_clone(unsigned long clone_flags, unsigned long usp,
 	usp = ALIGN(usp, 4);
 
 	/* A zero value for usp means use the current stack */
-	if(usp == 0)
-		usp = regs->gr[30];
+	if (usp == 0)
+	  usp = regs->gr[30];
 
-	return do_fork(clone_flags, usp, regs, 0, user_tid, NULL);
+	return do_fork(clone_flags, usp, regs, 0, parent_tidptr, child_tidptr);
 }
 
 int
@@ -272,12 +252,12 @@ sys_vfork(struct pt_regs *regs)
 }
 
 int
-copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
+copy_thread(unsigned long clone_flags, unsigned long usp,
 	    unsigned long unused,	/* in ia64 this is "user_stack_size" */
 	    struct task_struct * p, struct pt_regs * pregs)
 {
 	struct pt_regs * cregs = &(p->thread.regs);
-	struct thread_info *ti = p->thread_info;
+	void *stack = task_stack_page(p);
 	
 	/* We have to use void * instead of a function pointer, because
 	 * function pointers aren't a pointer to the function on 64-bit.
@@ -304,7 +284,7 @@ copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 	 */
 	if (usp == 1) {
 		/* kernel thread */
-		cregs->ksp = (((unsigned long)(ti)) + THREAD_SZ_ALGN);
+		cregs->ksp = (unsigned long)stack + THREAD_SZ_ALGN;
 		/* Must exit via ret_from_kernel_thread in order
 		 * to call schedule_tail()
 		 */
@@ -313,7 +293,7 @@ copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 		 * Copy function and argument to be called from
 		 * ret_from_kernel_thread.
 		 */
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 		cregs->gr[27] = pregs->gr[27];
 #endif
 		cregs->gr[26] = pregs->gr[26];
@@ -326,7 +306,7 @@ copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 		 */
 
 		/* Use same stack depth as parent */
-		cregs->ksp = ((unsigned long)(ti))
+		cregs->ksp = (unsigned long)stack
 			+ (pregs->gr[21] & (THREAD_SIZE - 1));
 		cregs->gr[30] = usp;
 		if (p->personality == PER_HPUX) {
@@ -338,6 +318,10 @@ copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 		} else {
 			cregs->kpc = (unsigned long) &child_return;
 		}
+		/* Setup thread TLS area from the 4th parameter in clone */
+		if (clone_flags & CLONE_SETTLS)
+		  cregs->cr27 = pregs->gr[23];
+	
 	}
 
 	return 0;
@@ -361,25 +345,36 @@ asmlinkage int sys_execve(struct pt_regs *regs)
 	error = PTR_ERR(filename);
 	if (IS_ERR(filename))
 		goto out;
-	error = do_execve(filename, (char __user **) regs->gr[25],
-		(char __user **) regs->gr[24], regs);
-	if (error == 0) {
-		task_lock(current);
-		current->ptrace &= ~PT_DTRACE;
-		task_unlock(current);
-	}
+	error = do_execve(filename,
+			  (const char __user *const __user *) regs->gr[25],
+			  (const char __user *const __user *) regs->gr[24],
+			  regs);
 	putname(filename);
 out:
 
 	return error;
 }
 
-unsigned long 
+extern int __execve(const char *filename,
+		    const char *const argv[],
+		    const char *const envp[], struct task_struct *task);
+int kernel_execve(const char *filename,
+		  const char *const argv[],
+		  const char *const envp[])
+{
+	return __execve(filename, argv, envp, current);
+}
+
+unsigned long
 get_wchan(struct task_struct *p)
 {
 	struct unwind_frame_info info;
 	unsigned long ip;
 	int count = 0;
+
+	if (!p || p == current || p->state == TASK_RUNNING)
+		return 0;
+
 	/*
 	 * These bracket the sleeping functions..
 	 */
@@ -394,3 +389,15 @@ get_wchan(struct task_struct *p)
 	} while (count++ < 16);
 	return 0;
 }
+
+#ifdef CONFIG_64BIT
+void *dereference_function_descriptor(void *ptr)
+{
+	Elf64_Fdesc *desc = ptr;
+	void *p;
+
+	if (!probe_kernel_address(&desc->addr, p))
+		ptr = p;
+	return ptr;
+}
+#endif

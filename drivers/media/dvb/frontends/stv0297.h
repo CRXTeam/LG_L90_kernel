@@ -29,16 +29,29 @@ struct stv0297_config
 	/* the demodulator's i2c address */
 	u8 demod_address;
 
+	/* inittab - array of pairs of values.
+	* First of each pair is the register, second is the value.
+	* List should be terminated with an 0xff, 0xff pair.
+	*/
+	u8* inittab;
+
 	/* does the "inversion" need inverted? */
 	u8 invert:1;
 
-	/* PLL maintenance */
-	int (*pll_init)(struct dvb_frontend* fe);
-	int (*pll_set)(struct dvb_frontend* fe, struct dvb_frontend_parameters* params);
+	/* set to 1 if the device requires an i2c STOP during reading */
+	u8 stop_during_read:1;
 };
 
+#if defined(CONFIG_DVB_STV0297) || (defined(CONFIG_DVB_STV0297_MODULE) && defined(MODULE))
 extern struct dvb_frontend* stv0297_attach(const struct stv0297_config* config,
-					   struct i2c_adapter* i2c, int pwm);
-extern int stv0297_enable_plli2c(struct dvb_frontend* fe);
+					   struct i2c_adapter* i2c);
+#else
+static inline struct dvb_frontend* stv0297_attach(const struct stv0297_config* config,
+					   struct i2c_adapter* i2c)
+{
+	printk(KERN_WARNING "%s: driver disabled by Kconfig\n", __func__);
+	return NULL;
+}
+#endif // CONFIG_DVB_STV0297
 
 #endif // STV0297_H

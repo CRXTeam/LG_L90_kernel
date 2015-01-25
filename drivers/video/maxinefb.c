@@ -25,12 +25,9 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/tty.h>
-#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/fb.h>
@@ -55,7 +52,7 @@ static struct fb_var_screeninfo maxinefb_defined = {
 };
 
 static struct fb_fix_screeninfo maxinefb_fix = {
-	.id =		"Maxine onboard graphics 1024x768x8",
+	.id =		"Maxine",
 	.smem_len =	(1024*768),
 	.type =		FB_TYPE_PACKED_PIXELS,
 	.visual =	FB_VISUAL_PSEUDOCOLOR,
@@ -94,6 +91,9 @@ static int maxinefb_setcolreg(unsigned regno, unsigned red, unsigned green,
 	/* value to be written into the palette reg. */
 	unsigned long hw_colorvalue = 0;
 
+	if (regno > 255)
+		return 1;
+
 	red   >>= 8;    /* The cmap fields are 16 bits    */
 	green >>= 8;    /* wide, but the harware colormap */
 	blue  >>= 8;    /* registers are only 8 bits wide */
@@ -107,13 +107,10 @@ static int maxinefb_setcolreg(unsigned regno, unsigned red, unsigned green,
 
 static struct fb_ops maxinefb_ops = {
 	.owner		= THIS_MODULE,
-	.fb_get_fix	= gen_get_fix,
-	.fb_get_var	= gen_get_var,
 	.fb_setcolreg	= maxinefb_setcolreg,
 	.fb_fillrect	= cfb_fillrect,
 	.fb_copyarea	= cfb_copyarea,
 	.fb_imageblit	= cfb_imageblit,
-	.fb_cursor	= soft_cursor,
 };
 
 int __init maxinefb_init(void)

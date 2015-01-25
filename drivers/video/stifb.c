@@ -3,7 +3,7 @@
  * Low level Frame buffer driver for HP workstations with 
  * STI (standard text interface) video firmware.
  *
- * Copyright (C) 2001-2004 Helge Deller <deller@gmx.de>
+ * Copyright (C) 2001-2006 Helge Deller <deller@gmx.de>
  * Portions Copyright (C) 2001 Thomas Bogendoerfer <tsbogend@alpha.franken.de>
  * 
  * Based on:
@@ -54,7 +54,6 @@
 #undef DEBUG_STIFB_REGS		/* debug sti register accesses */
 
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -65,7 +64,6 @@
 #include <linux/fb.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
-#include <linux/pci.h>
 
 #include <asm/grfioctl.h>	/* for HP-UX compatibility */
 #include <asm/uaccess.h>
@@ -73,15 +71,12 @@
 #include "sticore.h"
 
 /* REGION_BASE(fb_info, index) returns the virtual address for region <index> */
-#ifdef __LP64__
-  #define REGION_BASE(fb_info, index) \
-	(fb_info->sti->glob_cfg->region_ptrs[index] | 0xffffffff00000000)
-#else
-  #define REGION_BASE(fb_info, index) \
-	fb_info->sti->glob_cfg->region_ptrs[index]
-#endif
+#define REGION_BASE(fb_info, index) \
+	F_EXTEND(fb_info->sti->glob_cfg->region_ptrs[index])
 
 #define NGLEDEVDEPROM_CRT_REGION 1
+
+#define NR_PALETTE 256
 
 typedef struct {
 	__s32	video_config_reg;
@@ -112,7 +107,7 @@ struct stifb_info {
 	ngle_rom_t ngle_rom;
 	struct sti_struct *sti;
 	int deviceSpecificConfig;
-	u32 pseudo_palette[256];
+	u32 pseudo_palette[16];
 };
 
 static int __initdata stifb_bpp_pref[MAX_STI_ROMS];
@@ -169,11 +164,11 @@ static int __initdata stifb_bpp_pref[MAX_STI_ROMS];
 # define  DEBUG_ON()  debug_on=1
 # define WRITE_BYTE(value,fb,reg)	do { if (debug_on) \
 						printk(KERN_DEBUG "%30s: WRITE_BYTE(0x%06x) = 0x%02x (old=0x%02x)\n", \
-							__FUNCTION__, reg, value, READ_BYTE(fb,reg)); 		  \
+							__func__, reg, value, READ_BYTE(fb,reg)); 		  \
 					gsc_writeb((value),(fb)->info.fix.mmio_start + (reg)); } while (0)
 # define WRITE_WORD(value,fb,reg)	do { if (debug_on) \
 						printk(KERN_DEBUG "%30s: WRITE_WORD(0x%06x) = 0x%08x (old=0x%08x)\n", \
-							__FUNCTION__, reg, value, READ_WORD(fb,reg)); 		  \
+							__func__, reg, value, READ_WORD(fb,reg)); 		  \
 					gsc_writel((value),(fb)->info.fix.mmio_start + (reg)); } while (0)
 #endif /* DEBUG_STIFB_REGS */
 
@@ -352,10 +347,10 @@ ARTIST_ENABLE_DISABLE_DISPLAY(struct stifb_info *fb, int enable)
 #define IS_888_DEVICE(fb) \
 	(!(IS_24_DEVICE(fb)))
 
-#define GET_FIFO_SLOTS(fb, cnt, numslots)			\
-{	while (cnt < numslots) 					\
+#define GET_FIFO_SLOTS(fb, cnt, numslots)	\
+{	while (cnt < numslots) 			\
 		cnt = READ_WORD(fb, REG_34);	\
-	cnt -= numslots;					\
+	cnt -= numslots;			\
 }
 
 #define	    IndexedDcd	0	/* Pixel data is indexed (pseudo) color */
@@ -510,16 +505,24 @@ ngleSetupAttrPlanes(struct stifb_info *fb, int BufferNumber)
 static void
 rattlerSetupPlanes(struct stifb_info *fb)
 {
+	int saved_id, y;
+
+ 	/* Write RAMDAC pixel read mask register so all overlay
+	 * planes are display-enabled.  (CRX24 uses Bt462 pixel
+	 * read mask register for overlay planes, not image planes).
+	 */
 	CRX24_SETUP_RAMDAC(fb);
     
-	/* replacement for: SETUP_FB(fb, CRX24_OVERLAY_PLANES); */
-	WRITE_WORD(0x83000300, fb, REG_14);
-	SETUP_HW(fb);
-	WRITE_BYTE(1, fb, REG_16b1);
+	/* change fb->id temporarily to fool SETUP_FB() */
+	saved_id = fb->id;
+	fb->id = CRX24_OVERLAY_PLANES;
+	SETUP_FB(fb);
+	fb->id = saved_id;
 
-	fb_memset(fb->info.fix.smem_start, 0xff,
-		fb->info.var.yres*fb->info.fix.line_length);
-    
+	for (y = 0; y < fb->info.var.yres; ++y)
+		memset(fb->info.screen_base + y * fb->info.fix.line_length,
+			0xff, fb->info.var.xres * fb->info.var.bits_per_pixel/8);
+
 	CRX24_SET_OVLY_MASK(fb);
 	SETUP_FB(fb);
 }
@@ -753,9 +756,9 @@ hyperResetPlanes(struct stifb_info *fb, int enable)
 		if (fb->info.var.bits_per_pixel == 32)
 			controlPlaneReg = 0x04000F00;
 		else
-			controlPlaneReg = 0x00000F00;   /* 0x00000800 should be enought, but lets clear all 4 bits */
+			controlPlaneReg = 0x00000F00;   /* 0x00000800 should be enough, but lets clear all 4 bits */
 	else
-		controlPlaneReg = 0x00000F00; /* 0x00000100 should be enought, but lets clear all 4 bits */
+		controlPlaneReg = 0x00000F00; /* 0x00000100 should be enough, but lets clear all 4 bits */
 
 	switch (enable) {
 	case ENABLE:
@@ -911,83 +914,6 @@ SETUP_HCRX(struct stifb_info *fb)
 
 /* ------------------- driver specific functions --------------------------- */
 
-#define TMPBUFLEN 2048
-
-static ssize_t
-stifb_read(struct file *file, char *buf, size_t count, loff_t *ppos)
-{
-	unsigned long p = *ppos;
-	struct inode *inode = file->f_dentry->d_inode;
-	int fbidx = iminor(inode);
-	struct fb_info *info = registered_fb[fbidx];
-	char tmpbuf[TMPBUFLEN];
-
-	if (!info || ! info->screen_base)
-		return -ENODEV;
-
-	if (p >= info->fix.smem_len)
-	    return 0;
-	if (count >= info->fix.smem_len)
-	    count = info->fix.smem_len;
-	if (count + p > info->fix.smem_len)
-		count = info->fix.smem_len - p;
-	if (count > sizeof(tmpbuf))
-		count = sizeof(tmpbuf);
-	if (count) {
-	    char *base_addr;
-
-	    base_addr = info->screen_base;
-	    memcpy_fromio(&tmpbuf, base_addr+p, count);
-	    count -= copy_to_user(buf, &tmpbuf, count);
-	    if (!count)
-		return -EFAULT;
-	    *ppos += count;
-	}
-	return count;
-}
-
-static ssize_t
-stifb_write(struct file *file, const char *buf, size_t count, loff_t *ppos)
-{
-	struct inode *inode = file->f_dentry->d_inode;
-	int fbidx = iminor(inode);
-	struct fb_info *info = registered_fb[fbidx];
-	unsigned long p = *ppos;
-	size_t c;
-	int err;
-	char tmpbuf[TMPBUFLEN];
-
-	if (!info || !info->screen_base)
-		return -ENODEV;
-
-	if (p > info->fix.smem_len)
-	    return -ENOSPC;
-	if (count >= info->fix.smem_len)
-	    count = info->fix.smem_len;
-	err = 0;
-	if (count + p > info->fix.smem_len) {
-	    count = info->fix.smem_len - p;
-	    err = -ENOSPC;
-	}
-
-	p += (unsigned long)info->screen_base;
-	c = count;
-	while (c) {
-	    int len = c > sizeof(tmpbuf) ? sizeof(tmpbuf) : c;
-	    err = -EFAULT;
-	    if (copy_from_user(&tmpbuf, buf, len))
-		    break;
-	    memcpy_toio(p, &tmpbuf, len);
-	    c -= len;
-	    p += len;
-	    buf += len;
-	    *ppos += len;
-	}
-	if (count-c)
-		return (count-c);
-	return err;
-}
-
 static int
 stifb_setcolreg(u_int regno, u_int red, u_int green,
 	      u_int blue, u_int transp, struct fb_info *info)
@@ -995,7 +921,7 @@ stifb_setcolreg(u_int regno, u_int red, u_int green,
 	struct stifb_info *fb = (struct stifb_info *) info;
 	u32 color;
 
-	if (regno >= 256)  /* no. of hw registers */
+	if (regno >= NR_PALETTE)
 		return 1;
 
 	red   >>= 8;
@@ -1005,8 +931,8 @@ stifb_setcolreg(u_int regno, u_int red, u_int green,
 	DEBUG_OFF();
 
 	START_IMAGE_COLORMAP_ACCESS(fb);
-	
-	if (fb->info.var.grayscale) {
+
+	if (unlikely(fb->info.var.grayscale)) {
 		/* gray = 0.30*R + 0.59*G + 0.11*B */
 		color = ((red * 77) +
 			 (green * 151) +
@@ -1017,17 +943,17 @@ stifb_setcolreg(u_int regno, u_int red, u_int green,
 			 (blue));
 	}
 
-	if (info->var.bits_per_pixel == 32) {
-		((u32 *)(info->pseudo_palette))[regno] =
-			(red   << info->var.red.offset)   |
-			(green << info->var.green.offset) |
-			(blue  << info->var.blue.offset);
-	} else {
-		((u32 *)(info->pseudo_palette))[regno] = regno;
+	if (fb->info.fix.visual == FB_VISUAL_DIRECTCOLOR) {
+		struct fb_var_screeninfo *var = &fb->info.var;
+		if (regno < 16)
+			((u32 *)fb->info.pseudo_palette)[regno] =
+				regno << var->red.offset |
+				regno << var->green.offset |
+				regno << var->blue.offset;
 	}
 
 	WRITE_IMAGE_COLOR(fb, regno, color);
-	
+
 	if (fb->id == S9000_ID_HCRX) {
 		NgleLutBltCtl lutBltCtl;
 
@@ -1066,9 +992,9 @@ stifb_blank(int blank_mode, struct fb_info *info)
 	case S9000_ID_HCRX:
 		HYPER_ENABLE_DISABLE_DISPLAY(fb, enable);
 		break;
-	case S9000_ID_A1659A:;	/* fall through */
-	case S9000_ID_TIMBER:;
-	case CRX24_OVERLAY_PLANES:;
+	case S9000_ID_A1659A:	/* fall through */
+	case S9000_ID_TIMBER:
+	case CRX24_OVERLAY_PLANES:
 	default:
 		ENABLE_DISABLE_DISPLAY(fb, enable);
 		break;
@@ -1140,14 +1066,11 @@ stifb_init_display(struct stifb_info *fb)
 
 static struct fb_ops stifb_ops = {
 	.owner		= THIS_MODULE,
-	.fb_read	= stifb_read,
-	.fb_write	= stifb_write,
 	.fb_setcolreg	= stifb_setcolreg,
 	.fb_blank	= stifb_blank,
 	.fb_fillrect	= cfb_fillrect,
 	.fb_copyarea	= cfb_copyarea,
 	.fb_imageblit	= cfb_imageblit,
-	.fb_cursor      = soft_cursor,
 };
 
 
@@ -1155,8 +1078,7 @@ static struct fb_ops stifb_ops = {
  *  Initialization
  */
 
-int __init
-stifb_init_fb(struct sti_struct *sti, int bpp_pref)
+static int __init stifb_init_fb(struct sti_struct *sti, int bpp_pref)
 {
 	struct fb_fix_screeninfo *fix;
 	struct fb_var_screeninfo *var;
@@ -1166,7 +1088,7 @@ stifb_init_fb(struct sti_struct *sti, int bpp_pref)
 	char *dev_name;
 	int bpp, xres, yres;
 
-	fb = kmalloc(sizeof(*fb), GFP_ATOMIC);
+	fb = kzalloc(sizeof(*fb), GFP_ATOMIC);
 	if (!fb) {
 		printk(KERN_ERR "stifb: Could not allocate stifb structure\n");
 		return -ENODEV;
@@ -1175,7 +1097,6 @@ stifb_init_fb(struct sti_struct *sti, int bpp_pref)
 	info = &fb->info;
 
 	/* set struct to a known state */
-	memset(fb, 0, sizeof(*fb));
 	fix = &info->fix;
 	var = &info->var;
 
@@ -1186,13 +1107,17 @@ stifb_init_fb(struct sti_struct *sti, int bpp_pref)
 	/* only supported cards are allowed */
 	switch (fb->id) {
 	case CRT_ID_VISUALIZE_EG:
-		/* look for a double buffering device like e.g. the 
-		   "INTERNAL_EG_DX1024" in the RDI precisionbook laptop
-		   which won't work. The same device in non-double 
-		   buffering mode returns "INTERNAL_EG_X1024". */
-		if (strstr(sti->outptr.dev_name, "EG_DX")) {
-		   printk(KERN_WARNING 
-			"stifb: ignoring '%s'. Disable double buffering in IPL menu.\n",
+		/* Visualize cards can run either in "double buffer" or
+ 		  "standard" mode. Depending on the mode, the card reports
+		  a different device name, e.g. "INTERNAL_EG_DX1024" in double
+		  buffer mode and "INTERNAL_EG_X1024" in standard mode.
+		  Since this driver only supports standard mode, we check
+		  if the device name contains the string "DX" and tell the
+		  user how to reconfigure the card. */
+		if (strstr(sti->outptr.dev_name, "DX")) {
+		   printk(KERN_WARNING
+"WARNING: stifb framebuffer driver does not support '%s' in double-buffer mode.\n"
+"WARNING: Please disable the double-buffer mode in IPL menu (the PARISC-BIOS).\n",
 			sti->outptr.dev_name);
 		   goto out_err0;
 		}
@@ -1238,7 +1163,7 @@ stifb_init_fb(struct sti_struct *sti, int bpp_pref)
 	case S9000_ID_TOMCAT:	/* Dual CRX, behaves else like a CRX */
 		/* FIXME: TomCat supports two heads:
 		 * fb.iobase = REGION_BASE(fb_info,3);
-		 * fb.screen_base = (void*) REGION_BASE(fb_info,2);
+		 * fb.screen_base = ioremap_nocache(REGION_BASE(fb_info,2),xxx);
 		 * for now we only support the left one ! */
 		xres = fb->ngle_rom.x_size_visible;
 		yres = fb->ngle_rom.y_size_visible;
@@ -1251,12 +1176,10 @@ stifb_init_fb(struct sti_struct *sti, int bpp_pref)
 		memset(&fb->ngle_rom, 0, sizeof(fb->ngle_rom));
 		if ((fb->sti->regions_phys[0] & 0xfc000000) ==
 		    (fb->sti->regions_phys[2] & 0xfc000000))
-			sti_rom_address = fb->sti->regions_phys[0];
+			sti_rom_address = F_EXTEND(fb->sti->regions_phys[0]);
 		else
-			sti_rom_address = fb->sti->regions_phys[1];
-#ifdef __LP64__
-	        sti_rom_address |= 0xffffffff00000000;
-#endif
+			sti_rom_address = F_EXTEND(fb->sti->regions_phys[1]);
+
 		fb->deviceSpecificConfig = gsc_readl(sti_rom_address);
 		if (IS_24_DEVICE(fb)) {
 			if (bpp_pref == 8 || bpp_pref == 32)
@@ -1316,7 +1239,7 @@ stifb_init_fb(struct sti_struct *sti, int bpp_pref)
 		break;
 	    case 32:
 		fix->type = FB_TYPE_PACKED_PIXELS;
-		fix->visual = FB_VISUAL_TRUECOLOR;
+		fix->visual = FB_VISUAL_DIRECTCOLOR;
 		var->red.length = var->green.length = var->blue.length = var->transp.length = 8;
 		var->blue.offset = 0;
 		var->green.offset = 8;
@@ -1333,28 +1256,30 @@ stifb_init_fb(struct sti_struct *sti, int bpp_pref)
 
 	strcpy(fix->id, "stifb");
 	info->fbops = &stifb_ops;
-	info->screen_base = (void*) REGION_BASE(fb,1);
+	info->screen_base = ioremap_nocache(REGION_BASE(fb,1), fix->smem_len);
+	info->screen_size = fix->smem_len;
 	info->flags = FBINFO_DEFAULT;
 	info->pseudo_palette = &fb->pseudo_palette;
 
-	/* This has to been done !!! */
-	fb_alloc_cmap(&info->cmap, 256, 0);
+	/* This has to be done !!! */
+	if (fb_alloc_cmap(&info->cmap, NR_PALETTE, 0))
+		goto out_err1;
 	stifb_init_display(fb);
 
 	if (!request_mem_region(fix->smem_start, fix->smem_len, "stifb fb")) {
 		printk(KERN_ERR "stifb: cannot reserve fb region 0x%04lx-0x%04lx\n",
 				fix->smem_start, fix->smem_start+fix->smem_len);
-		goto out_err1;
+		goto out_err2;
 	}
 		
 	if (!request_mem_region(fix->mmio_start, fix->mmio_len, "stifb mmio")) {
 		printk(KERN_ERR "stifb: cannot reserve sti mmio region 0x%04lx-0x%04lx\n",
 				fix->mmio_start, fix->mmio_start+fix->mmio_len);
-		goto out_err2;
+		goto out_err3;
 	}
 
 	if (register_framebuffer(&fb->info) < 0)
-		goto out_err3;
+		goto out_err4;
 
 	sti->info = info; /* save for unregister_framebuffer() */
 
@@ -1372,12 +1297,14 @@ stifb_init_fb(struct sti_struct *sti, int bpp_pref)
 	return 0;
 
 
-out_err3:
+out_err4:
 	release_mem_region(fix->mmio_start, fix->mmio_len);
-out_err2:
+out_err3:
 	release_mem_region(fix->smem_start, fix->smem_len);
-out_err1:
+out_err2:
 	fb_dealloc_cmap(&info->cmap);
+out_err1:
+	iounmap(info->screen_base);
 out_err0:
 	kfree(fb);
 	return -ENXIO;
@@ -1388,8 +1315,7 @@ static int stifb_disabled __initdata;
 int __init
 stifb_setup(char *options);
 
-int __init
-stifb_init(void)
+static int __init stifb_init(void)
 {
 	struct sti_struct *sti;
 	struct sti_struct *def_sti;
@@ -1450,8 +1376,10 @@ stifb_cleanup(void)
 			unregister_framebuffer(sti->info);
 			release_mem_region(info->fix.mmio_start, info->fix.mmio_len);
 		        release_mem_region(info->fix.smem_start, info->fix.smem_len);
+				if (info->screen_base)
+					iounmap(info->screen_base);
 		        fb_dealloc_cmap(&info->cmap);
-		        kfree(info); 
+		        framebuffer_release(info);
 		}
 		sti->info = NULL;
 	}
@@ -1463,7 +1391,7 @@ stifb_setup(char *options)
 	int i;
 	
 	if (!options || !*options)
-		return 0;
+		return 1;
 	
 	if (strncmp(options, "off", 3) == 0) {
 		stifb_disabled = 1;
@@ -1478,7 +1406,7 @@ stifb_setup(char *options)
 			stifb_bpp_pref[i] = simple_strtoul(options, &options, 10);
 		}
 	}
-	return 0;
+	return 1;
 }
 
 __setup("stifb=", stifb_setup);
@@ -1489,7 +1417,3 @@ module_exit(stifb_cleanup);
 MODULE_AUTHOR("Helge Deller <deller@gmx.de>, Thomas Bogendoerfer <tsbogend@alpha.franken.de>");
 MODULE_DESCRIPTION("Framebuffer driver for HP's NGLE series graphics cards in HP PARISC machines");
 MODULE_LICENSE("GPL v2");
-
-MODULE_PARM(bpp, "i");
-MODULE_PARM_DESC(mem, "Bits per pixel (default: 8)");
-

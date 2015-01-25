@@ -14,7 +14,7 @@
  *      - 3Com 3C339 Token Link Velocity
  *
  *  Maintainer(s):
- *    AF	Adam Fritzler		mid@auk.cx
+ *    AF	Adam Fritzler
  *
  *  Modification History:
  *	30-Dec-99	AF	Split off from the tms380tr driver.
@@ -34,7 +34,6 @@
 #include <linux/netdevice.h>
 #include <linux/trdevice.h>
 
-#include <asm/system.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 
@@ -57,7 +56,7 @@ static struct card_info card_info_table[] = {
 	{ {0x03, 0x01}, "3Com Token Link Velocity"},
 };
 
-static struct pci_device_id tmspci_pci_tbl[] = {
+static DEFINE_PCI_DEVICE_TABLE(tmspci_pci_tbl) = {
 	{ PCI_VENDOR_ID_COMPAQ, PCI_DEVICE_ID_COMPAQ_TOKENRING, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_SYSKONNECT, PCI_DEVICE_ID_SYSKONNECT_TR, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 1 },
 	{ PCI_VENDOR_ID_TCONRAD, PCI_DEVICE_ID_TCONRAD_TOKENRING, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 2 },
@@ -96,11 +95,11 @@ static int __devinit tms_pci_attach(struct pci_dev *pdev, const struct pci_devic
 	static int versionprinted;
 	struct net_device *dev;
 	struct net_local *tp;
-	int i, ret;
+	int ret;
 	unsigned int pci_irq_line;
 	unsigned long pci_ioaddr;
 	struct card_info *cardinfo = &card_info_table[ent->driver_data];
-		
+
 	if (versionprinted++ == 0)
 		printk("%s", version);
 
@@ -115,41 +114,30 @@ static int __devinit tms_pci_attach(struct pci_dev *pdev, const struct pci_devic
 	dev = alloc_trdev(sizeof(struct net_local));
 	if (!dev)
 		return -ENOMEM;
-	SET_MODULE_OWNER(dev);
 
 	if (!request_region(pci_ioaddr, TMS_PCI_IO_EXTENT, dev->name)) {
 		ret = -EBUSY;
 		goto err_out_trdev;
 	}
 
-	ret = request_irq(pdev->irq, tms380tr_interrupt, SA_SHIRQ,
-			  dev->name, dev);
-	if (ret)
-		goto err_out_region;
-
 	dev->base_addr	= pci_ioaddr;
 	dev->irq 	= pci_irq_line;
 	dev->dma	= 0;
 
-	printk("%s: %s\n", dev->name, cardinfo->name);
-	printk("%s:    IO: %#4lx  IRQ: %d\n",
-	       dev->name, dev->base_addr, dev->irq);
+	dev_info(&pdev->dev, "%s\n", cardinfo->name);
+	dev_info(&pdev->dev, "    IO: %#4lx  IRQ: %d\n", dev->base_addr, dev->irq);
 		
 	tms_pci_read_eeprom(dev);
 
-	printk("%s:    Ring Station Address: ", dev->name);
-	printk("%2.2x", dev->dev_addr[0]);
-	for (i = 1; i < 6; i++)
-		printk(":%2.2x", dev->dev_addr[i]);
-	printk("\n");
+	dev_info(&pdev->dev, "    Ring Station Address: %pM\n", dev->dev_addr);
 		
-	ret = tmsdev_init(dev, PCI_MAX_ADDRESS, pdev);
+	ret = tmsdev_init(dev, &pdev->dev);
 	if (ret) {
-		printk("%s: unable to get memory for dev->priv.\n", dev->name);
-		goto err_out_irq;
+		dev_info(&pdev->dev, "unable to get memory for dev->priv.\n");
+		goto err_out_region;
 	}
 
-	tp = dev->priv;
+	tp = netdev_priv(dev);
 	tp->setnselout = tms_pci_setnselout_pins;
 		
 	tp->sifreadb = tms_pci_sifreadb;
@@ -161,22 +149,27 @@ static int __devinit tms_pci_attach(struct pci_dev *pdev, const struct pci_devic
 
 	tp->tmspriv = cardinfo;
 
-	dev->open = tms380tr_open;
-	dev->stop = tms380tr_close;
+	dev->netdev_ops = &tms380tr_netdev_ops;
+
+	ret = request_irq(pdev->irq, tms380tr_interrupt, IRQF_SHARED,
+			  dev->name, dev);
+	if (ret)
+		goto err_out_tmsdev;
+
 	pci_set_drvdata(pdev, dev);
 	SET_NETDEV_DEV(dev, &pdev->dev);
 
 	ret = register_netdev(dev);
 	if (ret)
-		goto err_out_tmsdev;
+		goto err_out_irq;
 	
 	return 0;
 
+err_out_irq:
+	free_irq(pdev->irq, dev);
 err_out_tmsdev:
 	pci_set_drvdata(pdev, NULL);
 	tmsdev_term(dev);
-err_out_irq:
-	free_irq(pdev->irq, dev);
 err_out_region:
 	release_region(pci_ioaddr, TMS_PCI_IO_EXTENT);
 err_out_trdev:
@@ -210,7 +203,7 @@ static void tms_pci_read_eeprom(struct net_device *dev)
 static unsigned short tms_pci_setnselout_pins(struct net_device *dev)
 {
 	unsigned short val = 0;
-	struct net_local *tp = dev->priv;
+	struct net_local *tp = netdev_priv(dev);
 	struct card_info *cardinfo = tp->tmspriv;
   
 	if(tp->DataRate == SPEED_4)
@@ -224,8 +217,7 @@ static void __devexit tms_pci_detach (struct pci_dev *pdev)
 {
 	struct net_device *dev = pci_get_drvdata(pdev);
 
-	if (!dev)
-		BUG();
+	BUG_ON(!dev);
 	unregister_netdev(dev);
 	release_region(dev->base_addr, TMS_PCI_IO_EXTENT);
 	free_irq(dev->irq, dev);
@@ -254,14 +246,3 @@ static void __exit tms_pci_rmmod (void)
 module_init(tms_pci_init);
 module_exit(tms_pci_rmmod);
 
-
-/*
- * Local variables:
- *  compile-command: "gcc -DMODVERSIONS  -DMODULE -D__KERNEL__ -Wall -Wstrict-prototypes -O6 -fomit-frame-pointer -I/usr/src/linux/drivers/net/tokenring/ -c tmspci.c"
- *  alt-compile-command: "gcc -DMODULE -D__KERNEL__ -Wall -Wstrict-prototypes -O6 -fomit-frame-pointer -I/usr/src/linux/drivers/net/tokenring/ -c tmspci.c"
- *  c-set-style "K&R"
- *  c-indent-level: 8
- *  c-basic-offset: 8
- *  tab-width: 8
- * End:
- */

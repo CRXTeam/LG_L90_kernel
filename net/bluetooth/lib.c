@@ -1,4 +1,4 @@
-/* 
+/*
    BlueZ - Bluetooth protocol stack for Linux
    Copyright (C) 2000-2001 Qualcomm Incorporated
 
@@ -12,19 +12,18 @@
    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF THIRD PARTY RIGHTS.
    IN NO EVENT SHALL THE COPYRIGHT HOLDER(S) AND AUTHOR(S) BE LIABLE FOR ANY
-   CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES 
-   WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN 
-   ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF 
+   CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES
+   WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+   ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
    OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-   ALL LIABILITY, INCLUDING LIABILITY FOR INFRINGEMENT OF ANY PATENTS, 
-   COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS, RELATING TO USE OF THIS 
+   ALL LIABILITY, INCLUDING LIABILITY FOR INFRINGEMENT OF ANY PATENTS,
+   COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS, RELATING TO USE OF THIS
    SOFTWARE IS DISCLAIMED.
 */
 
 /* Bluetooth kernel library. */
 
-#include <linux/config.h>
 #include <linux/module.h>
 
 #include <linux/kernel.h>
@@ -33,31 +32,6 @@
 #include <asm/errno.h>
 
 #include <net/bluetooth/bluetooth.h>
-
-void bt_dump(char *pref, __u8 *buf, int count)
-{
-	char *ptr;
-	char line[100];
-	unsigned int i;
-
-	printk(KERN_INFO "%s: dump, len %d\n", pref, count);
-
-	ptr = line;
-	*ptr = 0;
-	for (i = 0; i < count; i++) {
-		ptr += sprintf(ptr, " %2.2X", buf[i]);
-
-		if (i && !((i + 1) % 20)) {
-			printk(KERN_INFO "%s:%s\n", pref, line);
-			ptr = line;
-			*ptr = 0;
-		}
-	}
-
-	if (line[0])
-		printk(KERN_INFO "%s:%s\n", pref, line);
-}
-EXPORT_SYMBOL(bt_dump);
 
 void baswap(bdaddr_t *dst, bdaddr_t *src)
 {
@@ -77,8 +51,8 @@ char *batostr(bdaddr_t *ba)
 
 	i ^= 1;
 	sprintf(str[i], "%2.2X:%2.2X:%2.2X:%2.2X:%2.2X:%2.2X",
-		ba->b[0], ba->b[1], ba->b[2],
-		ba->b[3], ba->b[4], ba->b[5]);
+		ba->b[5], ba->b[4], ba->b[3],
+		ba->b[2], ba->b[1], ba->b[0]);
 
 	return str[i];
 }

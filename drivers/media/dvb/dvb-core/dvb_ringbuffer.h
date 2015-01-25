@@ -5,6 +5,8 @@
  * Copyright (C) 2003 Oliver Endriss
  * Copyright (C) 2004 Andrew de Quincey
  *
+ * Copyright (c) 2012, The Linux Foundation. All rights reserved.
+ *
  * based on code originally found in av7110.c & dvb_ci.c:
  * Copyright (C) 1999-2003 Ralph Metzler & Marcus Metzler
  *                         for convergence integrated media GmbH
@@ -31,13 +33,14 @@
 #include <linux/wait.h>
 
 struct dvb_ringbuffer {
-        u8               *data;
-        ssize_t           size;
-        ssize_t           pread;
-        ssize_t           pwrite;
+	u8               *data;
+	ssize_t           size;
+	ssize_t           pread;
+	ssize_t           pwrite;
+	int               error;
 
-        wait_queue_head_t queue;
-        spinlock_t        lock;
+	wait_queue_head_t queue;
+	spinlock_t        lock;
 };
 
 #define DVB_RINGBUFFER_PKTHDRSIZE 3
@@ -60,7 +63,7 @@ struct dvb_ringbuffer {
 **     *** read min. 1000, max. <bufsize> bytes ***
 **     avail = dvb_ringbuffer_avail(rbuf);
 **     if (avail >= 1000)
-**         count = dvb_ringbuffer_read(rbuf, buffer, min(avail, bufsize), 0);
+**         count = dvb_ringbuffer_read(rbuf, buffer, min(avail, bufsize));
 **     else
 **         ...
 **
@@ -68,6 +71,7 @@ struct dvb_ringbuffer {
 **     to lock read or write operations.
 **     Two or more readers must be locked against each other.
 **     Flushing the buffer counts as a read operation.
+**     Resetting the buffer counts as a read and write operation.
 **     Two or more writers must be locked against each other.
 */
 
@@ -82,6 +86,13 @@ extern ssize_t dvb_ringbuffer_free(struct dvb_ringbuffer *rbuf);
 
 /* return the number of bytes waiting in the buffer */
 extern ssize_t dvb_ringbuffer_avail(struct dvb_ringbuffer *rbuf);
+
+
+/*
+** Reset the read and write pointers to zero and flush the buffer
+** This counts as a read and write operation
+*/
+extern void dvb_ringbuffer_reset(struct dvb_ringbuffer *rbuf);
 
 
 /* read routines & macros */
@@ -100,13 +111,19 @@ extern void dvb_ringbuffer_flush_spinlock_wakeup(struct dvb_ringbuffer *rbuf);
 #define DVB_RINGBUFFER_SKIP(rbuf,num)	\
 			(rbuf)->pread=((rbuf)->pread+(num))%(rbuf)->size
 
+/* advance write ptr by <num> bytes */
+#define DVB_RINGBUFFER_PUSH(rbuf, num)	\
+			((rbuf)->pwrite = (((rbuf)->pwrite+(num))%(rbuf)->size))
+
 /*
 ** read <len> bytes from ring buffer into <buf>
 ** <usermem> specifies whether <buf> resides in user space
 ** returns number of bytes transferred or -EFAULT
 */
-extern ssize_t dvb_ringbuffer_read(struct dvb_ringbuffer *rbuf, u8 *buf,
-                                   size_t len, int usermem);
+extern ssize_t dvb_ringbuffer_read_user(struct dvb_ringbuffer *rbuf,
+				   u8 __user *buf, size_t len);
+extern void dvb_ringbuffer_read(struct dvb_ringbuffer *rbuf,
+				   u8 *buf, size_t len);
 
 
 /* write routines & macros */
@@ -121,8 +138,10 @@ extern ssize_t dvb_ringbuffer_read(struct dvb_ringbuffer *rbuf, u8 *buf,
 ** returns number of bytes transferred or -EFAULT
 */
 extern ssize_t dvb_ringbuffer_write(struct dvb_ringbuffer *rbuf, const u8 *buf,
-                                    size_t len);
+				    size_t len);
 
+extern ssize_t dvb_ringbuffer_write_user(struct dvb_ringbuffer *rbuf,
+					const u8 *buf, size_t len);
 
 /**
  * Write a packet into the ringbuffer.
@@ -133,7 +152,7 @@ extern ssize_t dvb_ringbuffer_write(struct dvb_ringbuffer *rbuf, const u8 *buf,
  * returns Number of bytes written, or -EFAULT, -ENOMEM, -EVINAL.
  */
 extern ssize_t dvb_ringbuffer_pkt_write(struct dvb_ringbuffer *rbuf, u8* buf,
-                                        size_t len);
+					size_t len);
 
 /**
  * Read from a packet in the ringbuffer. Note: unlike dvb_ringbuffer_read(), this
@@ -148,8 +167,10 @@ extern ssize_t dvb_ringbuffer_pkt_write(struct dvb_ringbuffer *rbuf, u8* buf,
  * <usermem> Set to 1 if <buf> is in userspace.
  * returns Number of bytes read, or -EFAULT.
  */
+extern ssize_t dvb_ringbuffer_pkt_read_user(struct dvb_ringbuffer *rbuf, size_t idx,
+				       int offset, u8 __user *buf, size_t len);
 extern ssize_t dvb_ringbuffer_pkt_read(struct dvb_ringbuffer *rbuf, size_t idx,
-                                       int offset, u8* buf, size_t len, int usermem);
+				       int offset, u8 *buf, size_t len);
 
 /**
  * Dispose of a packet in the ring buffer.
@@ -168,6 +189,32 @@ extern void dvb_ringbuffer_pkt_dispose(struct dvb_ringbuffer *rbuf, size_t idx);
  * returns Packet index (if >=0), or -1 if no packets available.
  */
 extern ssize_t dvb_ringbuffer_pkt_next(struct dvb_ringbuffer *rbuf, size_t idx, size_t* pktlen);
+
+
+/**
+ * Start a new packet that will be written directly by the user to the packet buffer.
+ * The function only writes the header of the packet into the packet buffer,
+ * and the packet is in pending state (can't be read by the reader) until it is
+ * closed using dvb_ringbuffer_pkt_close. You must write the data into the
+ * packet buffer using dvb_ringbuffer_write followed by
+ * dvb_ringbuffer_pkt_close.
+ *
+ * <rbuf> Ringbuffer concerned.
+ * <len> Size of the packet's data
+ * returns Index of the packet's header that was started.
+ */
+extern ssize_t dvb_ringbuffer_pkt_start(struct dvb_ringbuffer *rbuf,
+						size_t len);
+
+/**
+ * Close a packet that was started using dvb_ringbuffer_pkt_start.
+ * The packet will be marked as ready to be ready.
+ *
+ * <rbuf> Ringbuffer concerned.
+ * <idx> Packet index that was returned by dvb_ringbuffer_pkt_start
+ * returns error status, -EINVAL if the provided index is invalid
+ */
+extern int dvb_ringbuffer_pkt_close(struct dvb_ringbuffer *rbuf, ssize_t idx);
 
 
 #endif /* _DVB_RINGBUFFER_H_ */

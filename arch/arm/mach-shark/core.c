@@ -6,25 +6,44 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
+#include <linux/irq.h>
 #include <linux/sched.h>
 #include <linux/serial_8250.h>
+#include <linux/io.h>
 
 #include <asm/setup.h>
 #include <asm/mach-types.h>
-#include <asm/io.h>
 #include <asm/leds.h>
 #include <asm/param.h>
+#include <asm/system_misc.h>
 
 #include <asm/mach/map.h>
 #include <asm/mach/arch.h>
 #include <asm/mach/time.h>
+
+#define IO_BASE                 0xe0000000
+#define IO_SIZE                 0x08000000
+#define IO_START                0x40000000
+#define ROMCARD_SIZE            0x08000000
+#define ROMCARD_START           0x10000000
+
+static void shark_restart(char mode, const char *cmd)
+{
+        short temp;
+        /* Reset the Machine via pc[3] of the sequoia chipset */
+        outw(0x09,0x24);
+        temp=inw(0x26);
+        temp = temp | (1<<3) | (1<<10);
+        outw(0x09,0x24);
+        outw(temp,0x26);
+}
 
 static struct plat_serial8250_port serial_platform_data[] = {
 	{
 		.iobase		= 0x3f8,
 		.irq		= 4,
 		.uartclk	= 1843200,
-		.regshift	= 2,
+		.regshift	= 0,
 		.iotype		= UPIO_PORT,
 		.flags		= UPF_BOOT_AUTOCONF | UPF_SKIP_TEST,
 	},
@@ -32,7 +51,7 @@ static struct plat_serial8250_port serial_platform_data[] = {
 		.iobase		= 0x2f8,
 		.irq		= 3,
 		.uartclk	= 1843200,
-		.regshift	= 2,
+		.regshift	= 0,
 		.iotype		= UPIO_PORT,
 		.flags		= UPF_BOOT_AUTOCONF | UPF_SKIP_TEST,
 	},
@@ -41,10 +60,30 @@ static struct plat_serial8250_port serial_platform_data[] = {
 
 static struct platform_device serial_device = {
 	.name			= "serial8250",
-	.id			= 0,
+	.id			= PLAT8250_DEV_PLATFORM,
 	.dev			= {
 		.platform_data	= serial_platform_data,
 	},
+};
+
+static struct resource rtc_resources[] = {
+	[0] = {
+		.start	= 0x70,
+		.end	= 0x73,
+		.flags	= IORESOURCE_IO,
+	},
+	[1] = {
+		.start	= IRQ_ISA_RTC_ALARM,
+		.end	= IRQ_ISA_RTC_ALARM,
+		.flags	= IORESOURCE_IRQ,
+	}
+};
+
+static struct platform_device rtc_device = {
+	.name		= "rtc_cmos",
+	.id		= -1,
+	.resource	= rtc_resources,
+	.num_resources	= ARRAY_SIZE(rtc_resources),
 };
 
 static int __init shark_init(void)
@@ -52,9 +91,13 @@ static int __init shark_init(void)
 	int ret;
 
 	if (machine_is_shark())
+	{
+	        ret = platform_device_register(&rtc_device);
+		if (ret) printk(KERN_ERR "Unable to register RTC device: %d\n", ret);
 		ret = platform_device_register(&serial_device);
-
-	return ret;
+		if (ret) printk(KERN_ERR "Unable to register Serial device: %d\n", ret);
+	}
+	return 0;
 }
 
 arch_initcall(shark_init);
@@ -62,7 +105,12 @@ arch_initcall(shark_init);
 extern void shark_init_irq(void);
 
 static struct map_desc shark_io_desc[] __initdata = {
-	{ IO_BASE	, IO_START	, IO_SIZE	, MT_DEVICE }
+	{
+		.virtual	= IO_BASE,
+		.pfn		= __phys_to_pfn(IO_START),
+		.length		= IO_SIZE,
+		.type		= MT_DEVICE
+	}
 };
 
 static void __init shark_map_io(void)
@@ -74,18 +122,16 @@ static void __init shark_map_io(void)
 #define HZ_TIME ((1193180 + HZ/2) / HZ)
 
 static irqreturn_t
-shark_timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+shark_timer_interrupt(int irq, void *dev_id)
 {
-	write_seqlock(&xtime_lock);
-	timer_tick(regs);
-	write_sequnlock(&xtime_lock);
+	timer_tick();
 	return IRQ_HANDLED;
 }
 
 static struct irqaction shark_timer_irq = {
 	.name		= "Shark Timer Tick",
-	.flags		= SA_INTERRUPT,
-	.handler	= shark_timer_interrupt
+	.flags		= IRQF_DISABLED | IRQF_TIMER | IRQF_IRQPOLL,
+	.handler	= shark_timer_interrupt,
 };
 
 /*
@@ -104,11 +150,18 @@ static struct sys_timer shark_timer = {
 	.init		= shark_timer_init,
 };
 
+static void shark_init_early(void)
+{
+	disable_hlt();
+}
+
 MACHINE_START(SHARK, "Shark")
-	MAINTAINER("Alexander Schulz")
-	BOOT_MEM(0x08000000, 0x40000000, 0xe0000000)
-	BOOT_PARAMS(0x08003000)
-	MAPIO(shark_map_io)
-	INITIRQ(shark_init_irq)
+	/* Maintainer: Alexander Schulz */
+	.atag_offset	= 0x3000,
+	.map_io		= shark_map_io,
+	.init_early	= shark_init_early,
+	.init_irq	= shark_init_irq,
 	.timer		= &shark_timer,
+	.dma_zone_size	= SZ_4M,
+	.restart	= shark_restart,
 MACHINE_END

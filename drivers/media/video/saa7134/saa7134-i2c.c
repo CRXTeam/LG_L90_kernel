@@ -1,5 +1,4 @@
 /*
- * $Id: saa7134-i2c.c,v 1.10 2005/01/24 17:37:23 kraxel Exp $
  *
  * device driver for philips saa7134 based TV cards
  * i2c interface support
@@ -24,21 +23,20 @@
 #include <linux/init.h>
 #include <linux/list.h>
 #include <linux/module.h>
-#include <linux/moduleparam.h>
 #include <linux/kernel.h>
-#include <linux/slab.h>
 #include <linux/delay.h>
 
 #include "saa7134-reg.h"
 #include "saa7134.h"
+#include <media/v4l2-common.h>
 
 /* ----------------------------------------------------------- */
 
-static unsigned int i2c_debug = 0;
+static unsigned int i2c_debug;
 module_param(i2c_debug, int, 0644);
 MODULE_PARM_DESC(i2c_debug,"enable debug messages [i2c]");
 
-static unsigned int i2c_scan = 0;
+static unsigned int i2c_scan;
 module_param(i2c_scan, int, 0444);
 MODULE_PARM_DESC(i2c_scan,"scan i2c bus at insmod time");
 
@@ -120,9 +118,9 @@ static inline int i2c_is_error(enum i2c_status status)
 	case ARB_LOST:
 	case SEQ_ERR:
 	case ST_ERR:
-		return TRUE;
+		return true;
 	default:
-		return FALSE;
+		return false;
 	}
 }
 
@@ -131,9 +129,9 @@ static inline int i2c_is_idle(enum i2c_status status)
 	switch (status) {
 	case IDLE:
 	case DONE_STOP:
-		return TRUE;
+		return true;
 	default:
-		return FALSE;
+		return false;
 	}
 }
 
@@ -141,9 +139,11 @@ static inline int i2c_is_busy(enum i2c_status status)
 {
 	switch (status) {
 	case BUSY:
-		return TRUE;
+	case TO_SCL:
+	case TO_ARB:
+		return true;
 	default:
-		return FALSE;
+		return false;
 	}
 }
 
@@ -159,8 +159,8 @@ static int i2c_is_busy_wait(struct saa7134_dev *dev)
 		saa_wait(I2C_WAIT_DELAY);
 	}
 	if (I2C_WAIT_RETRY == count)
-		return FALSE;
-	return TRUE;
+		return false;
+	return true;
 }
 
 static int i2c_reset(struct saa7134_dev *dev)
@@ -171,7 +171,7 @@ static int i2c_reset(struct saa7134_dev *dev)
 	d2printk(KERN_DEBUG "%s: i2c reset\n",dev->name);
 	status = i2c_get_status(dev);
 	if (!i2c_is_error(status))
-		return TRUE;
+		return true;
 	i2c_set_status(dev,status);
 
 	for (count = 0; count < I2C_WAIT_RETRY; count++) {
@@ -181,13 +181,13 @@ static int i2c_reset(struct saa7134_dev *dev)
 		udelay(I2C_WAIT_DELAY);
 	}
 	if (I2C_WAIT_RETRY == count)
-		return FALSE;
+		return false;
 
 	if (!i2c_is_idle(status))
-		return FALSE;
+		return false;
 
 	i2c_set_attr(dev,NOP);
-	return TRUE;
+	return true;
 }
 
 static inline int i2c_send_byte(struct saa7134_dev *dev,
@@ -197,10 +197,6 @@ static inline int i2c_send_byte(struct saa7134_dev *dev,
 	enum i2c_status status;
 	__u32 dword;
 
-#if 0
-	i2c_set_attr(dev,attr);
-	saa_writeb(SAA7134_I2C_DATA, data);
-#else
 	/* have to write both attr + data in one 32bit word */
 	dword  = saa_readl(SAA7134_I2C_ATTR_STATUS >> 2);
 	dword &= 0x0f;
@@ -210,7 +206,6 @@ static inline int i2c_send_byte(struct saa7134_dev *dev,
 //	dword |= 0x40 << 16;  /* 400 kHz */
 	dword |= 0xf0 << 24;
 	saa_writel(SAA7134_I2C_ATTR_STATUS >> 2, dword);
-#endif
 	d2printk(KERN_DEBUG "%s: i2c data => 0x%x\n",dev->name,data);
 
 	if (!i2c_is_busy_wait(dev))
@@ -245,7 +240,7 @@ static int saa7134_i2c_xfer(struct i2c_adapter *i2c_adap,
 	unsigned char data;
 	int addr,rc,i,byte;
 
-  	status = i2c_get_status(dev);
+	status = i2c_get_status(dev);
 	if (!i2c_is_idle(status))
 		if (!i2c_reset(dev))
 			return -EIO;
@@ -259,11 +254,13 @@ static int saa7134_i2c_xfer(struct i2c_adapter *i2c_adap,
 			addr  = msgs[i].addr << 1;
 			if (msgs[i].flags & I2C_M_RD)
 				addr |= 1;
-			if (i > 0 && msgs[i].flags & I2C_M_RD) {
+			if (i > 0 && msgs[i].flags &
+			    I2C_M_RD && msgs[i].addr != 0x40 &&
+			    msgs[i].addr != 0x19) {
 				/* workaround for a saa7134 i2c bug
 				 * needed to talk to the mt352 demux
 				 * thanks to pinnacle for the hint */
-				int quirk = 0xfd;
+				int quirk = 0xfe;
 				d1printk(" [%02x quirk]",quirk);
 				i2c_send_byte(dev,START,quirk);
 				i2c_recv_byte(dev);
@@ -284,6 +281,16 @@ static int saa7134_i2c_xfer(struct i2c_adapter *i2c_adap,
 				d1printk("%02x", rc);
 				msgs[i].buf[byte] = rc;
 			}
+			/* discard mysterious extra byte when reading
+			   from Samsung S5H1411.  i2c bus gets error
+			   if we do not. */
+			if (0x19 == msgs[i].addr) {
+				d1printk(" ?");
+				rc = i2c_recv_byte(dev);
+				if (rc < 0)
+					goto err;
+				d1printk("%02x", rc);
+			}
 		} else {
 			/* write bytes */
 			d2printk("write bytes\n");
@@ -302,9 +309,11 @@ static int saa7134_i2c_xfer(struct i2c_adapter *i2c_adap,
 	rc = -EIO;
 	if (!i2c_is_busy_wait(dev))
 		goto err;
-  	status = i2c_get_status(dev);
+	status = i2c_get_status(dev);
 	if (i2c_is_error(status))
 		goto err;
+	/* ensure that the bus is idle for at least one bit slot */
+	msleep(1);
 
 	d1printk("\n");
 	return num;
@@ -318,49 +327,24 @@ static int saa7134_i2c_xfer(struct i2c_adapter *i2c_adap,
 
 /* ----------------------------------------------------------- */
 
-static int algo_control(struct i2c_adapter *adapter,
-			unsigned int cmd, unsigned long arg)
-{
-	return 0;
-}
-
 static u32 functionality(struct i2c_adapter *adap)
 {
 	return I2C_FUNC_SMBUS_EMUL;
 }
 
-static int attach_inform(struct i2c_client *client)
-{
-        struct saa7134_dev *dev = client->adapter->algo_data;
-	int tuner = dev->tuner_type;
-	int conf  = dev->tda9887_conf;
-
-	saa7134_i2c_call_clients(dev,TUNER_SET_TYPE,&tuner);
-	saa7134_i2c_call_clients(dev,TDA9887_SET_CONFIG,&conf);
-        return 0;
-}
-
 static struct i2c_algorithm saa7134_algo = {
-	.name          = "saa7134",
-	.id            = I2C_ALGO_SAA7134,
 	.master_xfer   = saa7134_i2c_xfer,
-	.algo_control  = algo_control,
 	.functionality = functionality,
 };
 
 static struct i2c_adapter saa7134_adap_template = {
 	.owner         = THIS_MODULE,
-#ifdef I2C_CLASS_TV_ANALOG
-	.class         = I2C_CLASS_TV_ANALOG,
-#endif
-	I2C_DEVNAME("saa7134"),
-	.id            = I2C_ALGO_SAA7134,
+	.name          = "saa7134",
 	.algo          = &saa7134_algo,
-	.client_register = attach_inform,
 };
 
 static struct i2c_client saa7134_client_template = {
-	I2C_DEVNAME("saa7134 internal"),
+	.name	= "saa7134 internal",
 };
 
 /* ----------------------------------------------------------- */
@@ -398,6 +382,7 @@ static char *i2c_devs[128] = {
 	[ 0xa0 >> 1 ] = "eeprom",
 	[ 0xc0 >> 1 ] = "tuner (analog)",
 	[ 0x86 >> 1 ] = "tda9887",
+	[ 0x5a >> 1 ] = "remote control",
 };
 
 static void do_i2c_scan(char *name, struct i2c_client *c)
@@ -405,7 +390,7 @@ static void do_i2c_scan(char *name, struct i2c_client *c)
 	unsigned char buf;
 	int i,rc;
 
-	for (i = 0; i < 128; i++) {
+	for (i = 0; i < ARRAY_SIZE(i2c_devs); i++) {
 		c->addr = i;
 		rc = i2c_master_recv(c,&buf,0);
 		if (rc < 0)
@@ -415,19 +400,13 @@ static void do_i2c_scan(char *name, struct i2c_client *c)
 	}
 }
 
-void saa7134_i2c_call_clients(struct saa7134_dev *dev,
-			      unsigned int cmd, void *arg)
-{
-	BUG_ON(NULL == dev->i2c_adap.algo_data);
-	i2c_clients_command(&dev->i2c_adap, cmd, arg);
-}
-
 int saa7134_i2c_register(struct saa7134_dev *dev)
 {
 	dev->i2c_adap = saa7134_adap_template;
 	dev->i2c_adap.dev.parent = &dev->pci->dev;
 	strcpy(dev->i2c_adap.name,dev->name);
 	dev->i2c_adap.algo_data = dev;
+	i2c_set_adapdata(&dev->i2c_adap, &dev->v4l2_dev);
 	i2c_add_adapter(&dev->i2c_adap);
 
 	dev->i2c_client = saa7134_client_template;
@@ -436,6 +415,9 @@ int saa7134_i2c_register(struct saa7134_dev *dev)
 	saa7134_i2c_eeprom(dev,dev->eedata,sizeof(dev->eedata));
 	if (i2c_scan)
 		do_i2c_scan(dev->name,&dev->i2c_client);
+
+	/* Instantiate the IR receiver device, if present */
+	saa7134_probe_i2c_ir(dev);
 	return 0;
 }
 

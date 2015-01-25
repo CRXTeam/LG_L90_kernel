@@ -53,7 +53,6 @@
  */
 
 #ifdef __KERNEL__
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/compiler.h>
 #include <asm/uaccess.h>
@@ -92,35 +91,23 @@ DECLARE_PER_CPU(struct exception_data, exception_data);
 #define THRESHOLD	16
 
 #ifdef DEBUG_MEMCPY
-#define DPRINTF(fmt, args...) do { printk(KERN_DEBUG "%s:%d:%s ", __FILE__, __LINE__, __FUNCTION__ ); printk(KERN_DEBUG fmt, ##args ); } while (0)
+#define DPRINTF(fmt, args...) do { printk(KERN_DEBUG "%s:%d:%s ", __FILE__, __LINE__, __func__ ); printk(KERN_DEBUG fmt, ##args ); } while (0)
 #else
 #define DPRINTF(fmt, args...)
 #endif
 
-#ifndef __LP64__
-#define EXC_WORD ".word"
-#else
-#define EXC_WORD ".dword"
-#endif
-
 #define def_load_ai_insn(_insn,_sz,_tt,_s,_a,_t,_e)	\
 	__asm__ __volatile__ (				\
-	"1:\t" #_insn ",ma " #_sz "(" _s ",%1), %0\n" 	\
-	"\t.section __ex_table,\"aw\"\n"		\
-	"\t" EXC_WORD "\t1b\n"				\
-	"\t" EXC_WORD "\t" #_e "\n"			\
-	"\t.previous\n"					\
+	"1:\t" #_insn ",ma " #_sz "(" _s ",%1), %0\n\t"	\
+	ASM_EXCEPTIONTABLE_ENTRY(1b,_e)			\
 	: _tt(_t), "+r"(_a)				\
 	: 						\
 	: "r8")
 
 #define def_store_ai_insn(_insn,_sz,_tt,_s,_a,_t,_e) 	\
 	__asm__ __volatile__ (				\
-	"1:\t" #_insn ",ma %1, " #_sz "(" _s ",%0)\n" 	\
-	"\t.section __ex_table,\"aw\"\n"		\
-	"\t" EXC_WORD "\t1b\n"				\
-	"\t" EXC_WORD "\t" #_e "\n"			\
-	"\t.previous\n"					\
+	"1:\t" #_insn ",ma %1, " #_sz "(" _s ",%0)\n\t"	\
+	ASM_EXCEPTIONTABLE_ENTRY(1b,_e)			\
 	: "+r"(_a) 					\
 	: _tt(_t)					\
 	: "r8")
@@ -134,22 +121,16 @@ DECLARE_PER_CPU(struct exception_data, exception_data);
 
 #define def_load_insn(_insn,_tt,_s,_o,_a,_t,_e) 	\
 	__asm__ __volatile__ (				\
-	"1:\t" #_insn " " #_o "(" _s ",%1), %0\n"	\
-	"\t.section __ex_table,\"aw\"\n"		\
-	"\t" EXC_WORD "\t1b\n"				\
-	"\t" EXC_WORD "\t" #_e "\n"			\
-	"\t.previous\n"					\
+	"1:\t" #_insn " " #_o "(" _s ",%1), %0\n\t"	\
+	ASM_EXCEPTIONTABLE_ENTRY(1b,_e)			\
 	: _tt(_t) 					\
 	: "r"(_a)					\
 	: "r8")
 
 #define def_store_insn(_insn,_tt,_s,_t,_o,_a,_e) 	\
 	__asm__ __volatile__ (				\
-	"1:\t" #_insn " %0, " #_o "(" _s ",%1)\n" 	\
-	"\t.section __ex_table,\"aw\"\n"		\
-	"\t" EXC_WORD "\t1b\n"				\
-	"\t" EXC_WORD "\t" #_e "\n"			\
-	"\t.previous\n"					\
+	"1:\t" #_insn " %0, " #_o "(" _s ",%1)\n\t" 	\
+	ASM_EXCEPTIONTABLE_ENTRY(1b,_e)			\
 	: 						\
 	: _tt(_t), "r"(_a)				\
 	: "r8")
@@ -158,18 +139,18 @@ DECLARE_PER_CPU(struct exception_data, exception_data);
 #define stw(_s,_t,_o,_a,_e) 	def_store_insn(stw,"r",_s,_t,_o,_a,_e)
 
 #ifdef  CONFIG_PREFETCH
-extern inline void prefetch_src(const void *addr)
+static inline void prefetch_src(const void *addr)
 {
 	__asm__("ldw 0(" s_space ",%0), %%r0" : : "r" (addr));
 }
 
-extern inline void prefetch_dst(const void *addr)
+static inline void prefetch_dst(const void *addr)
 {
 	__asm__("ldd 0(" d_space ",%0), %%r0" : : "r" (addr));
 }
 #else
-#define prefetch_src(addr)
-#define prefetch_dst(addr)
+#define prefetch_src(addr) do { } while(0)
+#define prefetch_dst(addr) do { } while(0)
 #endif
 
 /* Copy from a not-aligned src to an aligned dst, using shifts. Handles 4 words
@@ -294,7 +275,7 @@ handle_store_error:
 
 
 /* Returns 0 for success, otherwise, returns number of bytes not transferred. */
-unsigned long pa_memcpy(void *dstp, const void *srcp, unsigned long len)
+static unsigned long pa_memcpy(void *dstp, const void *srcp, unsigned long len)
 {
 	register unsigned long src, dst, t1, t2, t3;
 	register unsigned char *pcs, *pcd;
@@ -339,6 +320,7 @@ unsigned long pa_memcpy(void *dstp, const void *srcp, unsigned long len)
 	pds = (double *)pcs;
 	pdd = (double *)pcd;
 
+#if 0
 	/* Copy 8 doubles at a time */
 	while (len >= 8*sizeof(double)) {
 		register double r1, r2, r3, r4, r5, r6, r7, r8;
@@ -366,6 +348,7 @@ unsigned long pa_memcpy(void *dstp, const void *srcp, unsigned long len)
 		fstdma(d_space, r8, pdd, pmc_store_exc);
 		len -= 8*sizeof(double);
 	}
+#endif
 
 	pws = (unsigned int *)pds;
 	pwd = (unsigned int *)pdd;
@@ -422,7 +405,7 @@ byte_copy:
 
 unaligned_copy:
 	/* possibly we are aligned on a word, but not on a double... */
-	if (likely(t1 & (sizeof(unsigned int)-1)) == 0) {
+	if (likely((t1 & (sizeof(unsigned int)-1)) == 0)) {
 		t2 = src & (sizeof(unsigned int) - 1);
 
 		if (unlikely(t2 != 0)) {
@@ -492,7 +475,8 @@ unsigned long copy_to_user(void __user *dst, const void *src, unsigned long len)
 	return pa_memcpy((void __force *)dst, src, len);
 }
 
-unsigned long copy_from_user(void *dst, const void __user *src, unsigned long len)
+EXPORT_SYMBOL(__copy_from_user);
+unsigned long __copy_from_user(void *dst, const void __user *src, unsigned long len)
 {
 	mtsp(get_user_space(), 1);
 	mtsp(get_kernel_space(), 2);

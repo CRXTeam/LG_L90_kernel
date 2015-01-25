@@ -10,14 +10,15 @@
  */
 
 #include <linux/types.h>
-#include <linux/slab.h>
 #include <linux/dma-mapping.h>
 #include <linux/list.h>
 #include <linux/pci.h>
+#include <linux/export.h>
 #include <linux/highmem.h>
+#include <linux/scatterlist.h>
 #include <asm/io.h>
 
-void *dma_alloc_coherent(struct device *hwdev, size_t size, dma_addr_t *dma_handle, int gfp)
+void *dma_alloc_coherent(struct device *hwdev, size_t size, dma_addr_t *dma_handle, gfp_t gfp)
 {
 	void *ret;
 
@@ -28,45 +29,27 @@ void *dma_alloc_coherent(struct device *hwdev, size_t size, dma_addr_t *dma_hand
 	return ret;
 }
 
+EXPORT_SYMBOL(dma_alloc_coherent);
+
 void dma_free_coherent(struct device *hwdev, size_t size, void *vaddr, dma_addr_t dma_handle)
 {
 	consistent_free(vaddr);
 }
 
-/*
- * Map a single buffer of the indicated size for DMA in streaming mode.
- * The 32-bit bus address to use is returned.
- *
- * Once the device is given the dma address, the device owns this memory
- * until either pci_unmap_single or pci_dma_sync_single is performed.
- */
+EXPORT_SYMBOL(dma_free_coherent);
+
 dma_addr_t dma_map_single(struct device *dev, void *ptr, size_t size,
 			  enum dma_data_direction direction)
 {
-	if (direction == DMA_NONE)
-                BUG();
+	BUG_ON(direction == DMA_NONE);
 
 	frv_cache_wback_inv((unsigned long) ptr, (unsigned long) ptr + size);
 
 	return virt_to_bus(ptr);
 }
 
-/*
- * Map a set of buffers described by scatterlist in streaming
- * mode for DMA.  This is the scather-gather version of the
- * above pci_map_single interface.  Here the scatter gather list
- * elements are each tagged with the appropriate dma address
- * and length.  They are obtained via sg_dma_{address,length}(SG).
- *
- * NOTE: An implementation may be able to use a smaller number of
- *       DMA address/length pairs than there are SG table elements.
- *       (for example via virtual mapping capabilities)
- *       The routine returns the number of addr/length pairs actually
- *       used, at most nents.
- *
- * Device ownership issues as mentioned above for pci_map_single are
- * the same here.
- */
+EXPORT_SYMBOL(dma_map_single);
+
 int dma_map_sg(struct device *dev, struct scatterlist *sg, int nents,
 	       enum dma_data_direction direction)
 {
@@ -74,20 +57,19 @@ int dma_map_sg(struct device *dev, struct scatterlist *sg, int nents,
 	void *vaddr;
 	int i;
 
-	if (direction == DMA_NONE)
-                BUG();
+	BUG_ON(direction == DMA_NONE);
 
 	dampr2 = __get_DAMPR(2);
 
 	for (i = 0; i < nents; i++) {
-		vaddr = kmap_atomic(sg[i].page, __KM_CACHE);
+		vaddr = kmap_atomic_primary(sg_page(&sg[i]), __KM_CACHE);
 
 		frv_dcache_writeback((unsigned long) vaddr,
 				     (unsigned long) vaddr + PAGE_SIZE);
 
 	}
 
-	kunmap_atomic(vaddr, __KM_CACHE);
+	kunmap_atomic_primary(vaddr, __KM_CACHE);
 	if (dampr2) {
 		__set_DAMPR(2, dampr2);
 		__set_IAMPR(2, dampr2);
@@ -96,6 +78,8 @@ int dma_map_sg(struct device *dev, struct scatterlist *sg, int nents,
 	return nents;
 }
 
+EXPORT_SYMBOL(dma_map_sg);
+
 dma_addr_t dma_map_page(struct device *dev, struct page *page, unsigned long offset,
 			size_t size, enum dma_data_direction direction)
 {
@@ -103,3 +87,5 @@ dma_addr_t dma_map_page(struct device *dev, struct page *page, unsigned long off
 	flush_dcache_page(page);
 	return (dma_addr_t) page_to_phys(page) + offset;
 }
+
+EXPORT_SYMBOL(dma_map_page);

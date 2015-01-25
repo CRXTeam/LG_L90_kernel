@@ -1,14 +1,11 @@
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/pci.h>
-#include <linux/ptrace.h>
 #include <linux/interrupt.h>
 #include <linux/mm.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
+#include <linux/io.h>
 
-#include <asm/io.h>
-#include <asm/system.h>
 
 #include <asm/mach/pci.h>
 
@@ -88,7 +85,8 @@ int __init via82c505_setup(int nr, struct pci_sys_data *sys)
 struct pci_bus * __init via82c505_scan_bus(int nr, struct pci_sys_data *sysdata)
 {
 	if (nr == 0)
-		return pci_scan_bus(0, &via82c505_ops, sysdata);
+		return pci_scan_root_bus(NULL, 0, &via82c505_ops, sysdata,
+					 &sysdata->resources);
 
 	return NULL;
 }

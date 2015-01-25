@@ -21,7 +21,6 @@
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
-#include <linux/sched.h>
 #include <linux/proc_fs.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -31,7 +30,6 @@
 #include <asm/dma.h>
 #include <asm/ecard.h>
 #include <asm/io.h>
-#include <asm/irq.h>
 #include <asm/pgtable.h>
 
 #include "../scsi.h"
@@ -138,10 +136,9 @@ cumanascsi_2_terminator_ctl(struct Scsi_Host *host, int on_off)
  * Purpose  : handle interrupts from Cumana SCSI 2 card
  * Params   : irq    - interrupt number
  *	      dev_id - user-defined (Scsi_Host structure)
- *	      regs   - processor registers at interrupt
  */
 static irqreturn_t
-cumanascsi_2_intr(int irq, void *dev_id, struct pt_regs *regs)
+cumanascsi_2_intr(int irq, void *dev_id)
 {
 	struct cumanascsi2_info *info = dev_id;
 
@@ -157,7 +154,7 @@ cumanascsi_2_intr(int irq, void *dev_id, struct pt_regs *regs)
  * Returns  : type of transfer to be performed
  */
 static fasdmatype_t
-cumanascsi_2_dma_setup(struct Scsi_Host *host, Scsi_Pointer *SCp,
+cumanascsi_2_dma_setup(struct Scsi_Host *host, struct scsi_pointer *SCp,
 		       fasdmadir_t direction, fasdmatype_t min_type)
 {
 	struct cumanascsi2_info *info = (struct cumanascsi2_info *)host->hostdata;
@@ -181,10 +178,10 @@ cumanascsi_2_dma_setup(struct Scsi_Host *host, Scsi_Pointer *SCp,
 			dma_dir = DMA_MODE_READ,
 			alatch_dir = ALATCH_DMA_IN;
 
-		dma_map_sg(dev, info->sg, bufs + 1, map_dir);
+		dma_map_sg(dev, info->sg, bufs, map_dir);
 
 		disable_dma(dmach);
-		set_dma_sg(dmach, info->sg, bufs + 1);
+		set_dma_sg(dmach, info->sg, bufs);
 		writeb(alatch_dir, info->base + CUMANASCSI2_ALATCH);
 		set_dma_mode(dmach, dma_dir);
 		enable_dma(dmach);
@@ -209,7 +206,7 @@ cumanascsi_2_dma_setup(struct Scsi_Host *host, Scsi_Pointer *SCp,
  *	      transfer  - minimum number of bytes we expect to transfer
  */
 static void
-cumanascsi_2_dma_pseudo(struct Scsi_Host *host, Scsi_Pointer *SCp,
+cumanascsi_2_dma_pseudo(struct Scsi_Host *host, struct scsi_pointer *SCp,
 			fasdmadir_t direction, int transfer)
 {
 	struct cumanascsi2_info *info = (struct cumanascsi2_info *)host->hostdata;
@@ -283,7 +280,7 @@ cumanascsi_2_dma_pseudo(struct Scsi_Host *host, Scsi_Pointer *SCp,
  *	      SCpnt - command
  */
 static void
-cumanascsi_2_dma_stop(struct Scsi_Host *host, Scsi_Pointer *SCp)
+cumanascsi_2_dma_stop(struct Scsi_Host *host, struct scsi_pointer *SCp)
 {
 	struct cumanascsi2_info *info = (struct cumanascsi2_info *)host->hostdata;
 	if (info->info.scsi.dma != NO_DMA) {
@@ -321,7 +318,7 @@ cumanascsi_2_set_proc_info(struct Scsi_Host *host, char *buffer, int length)
 {
 	int ret = length;
 
-	if (length >= 11 && strcmp(buffer, "CUMANASCSI2") == 0) {
+	if (length >= 11 && strncmp(buffer, "CUMANASCSI2", 11) == 0) {
 		buffer += 11;
 		length -= 11;
 
@@ -347,7 +344,7 @@ cumanascsi_2_set_proc_info(struct Scsi_Host *host, char *buffer, int length)
  * Params   : buffer - a buffer to write information to
  *	      start  - a pointer into this buffer set by this routine to the start
  *		       of the required information.
- *	      offset - offset into information that we have read upto.
+ *	      offset - offset into information that we have read up to.
  *	      length - length of buffer
  *	      host_no - host number to return information for
  *	      inout  - 0 for reading, 1 for writing.
@@ -381,7 +378,7 @@ int cumanascsi_2_proc_info (struct Scsi_Host *host, char *buffer, char **start, 
 	return pos;
 }
 
-static Scsi_Host_Template cumanascsi2_template = {
+static struct scsi_host_template cumanascsi2_template = {
 	.module				= THIS_MODULE,
 	.proc_info			= cumanascsi_2_proc_info,
 	.name				= "Cumana SCSI II",
@@ -393,7 +390,8 @@ static Scsi_Host_Template cumanascsi2_template = {
 	.eh_abort_handler		= fas216_eh_abort,
 	.can_queue			= 1,
 	.this_id			= 7,
-	.sg_tablesize			= SG_ALL,
+	.sg_tablesize			= SCSI_MAX_SG_CHAIN_SEGMENTS,
+	.dma_boundary			= IOMD_DMA_BOUNDARY,
 	.cmd_per_lun			= 1,
 	.use_clustering			= DISABLE_CLUSTERING,
 	.proc_name			= "cumanascsi2",
@@ -404,7 +402,6 @@ cumanascsi2_probe(struct expansion_card *ec, const struct ecard_id *id)
 {
 	struct Scsi_Host *host;
 	struct cumanascsi2_info *info;
-	unsigned long resbase, reslen;
 	void __iomem *base;
 	int ret;
 
@@ -412,9 +409,7 @@ cumanascsi2_probe(struct expansion_card *ec, const struct ecard_id *id)
 	if (ret)
 		goto out;
 
-	resbase = ecard_resource_start(ec, ECARD_RES_MEMC);
-	reslen = ecard_resource_len(ec, ECARD_RES_MEMC);
-	base = ioremap(resbase, reslen);
+	base = ecardm_iomap(ec, ECARD_RES_MEMC, 0, 0);
 	if (!base) {
 		ret = -ENOMEM;
 		goto out_region;
@@ -424,7 +419,7 @@ cumanascsi2_probe(struct expansion_card *ec, const struct ecard_id *id)
 			       sizeof(struct cumanascsi2_info));
 	if (!host) {
 		ret = -ENOMEM;
-		goto out_unmap;
+		goto out_region;
 	}
 
 	ecard_set_drvdata(ec, host);
@@ -453,15 +448,15 @@ cumanascsi2_probe(struct expansion_card *ec, const struct ecard_id *id)
 
 	ec->irqaddr	= info->base + CUMANASCSI2_STATUS;
 	ec->irqmask	= STATUS_INT;
-	ec->irq_data	= info;
-	ec->ops		= &cumanascsi_2_ops;
+
+	ecard_setirq(ec, &cumanascsi_2_ops, info);
 
 	ret = fas216_init(host);
 	if (ret)
 		goto out_free;
 
 	ret = request_irq(ec->irq, cumanascsi_2_intr,
-			  SA_INTERRUPT, "cumanascsi2", info);
+			  IRQF_DISABLED, "cumanascsi2", info);
 	if (ret) {
 		printk("scsi%d: IRQ%d not free: %d\n",
 		       host->host_no, ec->irq, ret);
@@ -493,9 +488,6 @@ cumanascsi2_probe(struct expansion_card *ec, const struct ecard_id *id)
  out_free:
 	scsi_host_put(host);
 
- out_unmap:
-	iounmap(base);
-
  out_region:
 	ecard_release_resources(ec);
 
@@ -514,8 +506,6 @@ static void __devexit cumanascsi2_remove(struct expansion_card *ec)
 	if (info->info.scsi.dma != NO_DMA)
 		free_dma(info->info.scsi.dma);
 	free_irq(ec->irq, info);
-
-	iounmap(info->base);
 
 	fas216_release(host);
 	scsi_host_put(host);
@@ -551,6 +541,6 @@ module_exit(cumanascsi2_exit);
 
 MODULE_AUTHOR("Russell King");
 MODULE_DESCRIPTION("Cumana SCSI-2 driver for Acorn machines");
-MODULE_PARM(term, "1-8i");
+module_param_array(term, int, NULL, 0);
 MODULE_PARM_DESC(term, "SCSI bus termination");
 MODULE_LICENSE("GPL");

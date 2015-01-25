@@ -13,7 +13,6 @@
  * archive for more details.  
  *
  */
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/fb.h>
@@ -51,23 +50,28 @@ static void save_vga_text(struct vgastate *state, void __iomem *fbbase)
 	struct regstate *saved = (struct regstate *) state->vidstate;
 	int i;
 	u8 misc, attr10, gr4, gr5, gr6, seq1, seq2, seq4;
+	unsigned short iobase;
 
 	/* if in graphics mode, no need to save */
+	misc = vga_r(state->vgabase, VGA_MIS_R);
+	iobase = (misc & 1) ? 0x3d0 : 0x3b0;
+
+	vga_r(state->vgabase, iobase + 0xa);
+	vga_w(state->vgabase, VGA_ATT_W, 0x00);
 	attr10 = vga_rattr(state->vgabase, 0x10);
+	vga_r(state->vgabase, iobase + 0xa);
+	vga_w(state->vgabase, VGA_ATT_W, 0x20);
+
 	if (attr10 & 1)
 		return;
-	
+
 	/* save regs */
-	misc = vga_r(state->vgabase, VGA_MIS_R);
 	gr4 = vga_rgfx(state->vgabase, VGA_GFX_PLANE_READ);
 	gr5 = vga_rgfx(state->vgabase, VGA_GFX_MODE);
 	gr6 = vga_rgfx(state->vgabase, VGA_GFX_MISC);
 	seq2 = vga_rseq(state->vgabase, VGA_SEQ_PLANE_WRITE);
 	seq4 = vga_rseq(state->vgabase, VGA_SEQ_MEMORY_MODE);
 	
-	/* force graphics mode */
-	vga_w(state->vgabase, VGA_MIS_W, misc | 1);
-
 	/* blank screen */
 	seq1 = vga_rseq(state->vgabase, VGA_SEQ_CLOCK_MODE);
 	vga_wseq(state->vgabase, VGA_SEQ_RESET, 0x1);
@@ -116,15 +120,12 @@ static void save_vga_text(struct vgastate *state, void __iomem *fbbase)
 	}
 
 	/* restore regs */
-	vga_wattr(state->vgabase, 0x10, attr10);
-
 	vga_wseq(state->vgabase, VGA_SEQ_PLANE_WRITE, seq2);
 	vga_wseq(state->vgabase, VGA_SEQ_MEMORY_MODE, seq4);
 
 	vga_wgfx(state->vgabase, VGA_GFX_PLANE_READ, gr4);
 	vga_wgfx(state->vgabase, VGA_GFX_MODE, gr5);
 	vga_wgfx(state->vgabase, VGA_GFX_MISC, gr6);
-	vga_w(state->vgabase, VGA_MIS_W, misc);
 
 	/* unblank screen */
 	vga_wseq(state->vgabase, VGA_SEQ_RESET, 0x1);
@@ -138,11 +139,10 @@ static void restore_vga_text(struct vgastate *state, void __iomem *fbbase)
 {
 	struct regstate *saved = (struct regstate *) state->vidstate;
 	int i;
-	u8 misc, gr1, gr3, gr4, gr5, gr6, gr8; 
+	u8 gr1, gr3, gr4, gr5, gr6, gr8;
 	u8 seq1, seq2, seq4;
 
 	/* save regs */
-	misc = vga_r(state->vgabase, VGA_MIS_R);
 	gr1 = vga_rgfx(state->vgabase, VGA_GFX_SR_ENABLE);
 	gr3 = vga_rgfx(state->vgabase, VGA_GFX_DATA_ROTATE);
 	gr4 = vga_rgfx(state->vgabase, VGA_GFX_PLANE_READ);
@@ -152,9 +152,6 @@ static void restore_vga_text(struct vgastate *state, void __iomem *fbbase)
 	seq2 = vga_rseq(state->vgabase, VGA_SEQ_PLANE_WRITE);
 	seq4 = vga_rseq(state->vgabase, VGA_SEQ_MEMORY_MODE);
 	
-	/* force graphics mode */
-	vga_w(state->vgabase, VGA_MIS_W, misc | 1);
-
 	/* blank screen */
 	seq1 = vga_rseq(state->vgabase, VGA_SEQ_CLOCK_MODE);
 	vga_wseq(state->vgabase, VGA_SEQ_RESET, 0x1);
@@ -214,8 +211,6 @@ static void restore_vga_text(struct vgastate *state, void __iomem *fbbase)
 	vga_wseq(state->vgabase, VGA_SEQ_RESET, 0x3);
 
 	/* restore regs */
-	vga_w(state->vgabase, VGA_MIS_W, misc);
-
 	vga_wgfx(state->vgabase, VGA_GFX_SR_ENABLE, gr1);
 	vga_wgfx(state->vgabase, VGA_GFX_DATA_ROTATE, gr3);
 	vga_wgfx(state->vgabase, VGA_GFX_PLANE_READ, gr4);
@@ -342,16 +337,11 @@ static void vga_cleanup(struct vgastate *state)
 	if (state->vidstate != NULL) {
 		struct regstate *saved = (struct regstate *) state->vidstate;
 
-		if (saved->vga_font0) 
-			vfree(saved->vga_font0);
-		if (saved->vga_font1) 
-			vfree(saved->vga_font1);
-		if (saved->vga_text)
-			vfree(saved->vga_text);
-		if (saved->vga_cmap)
-			vfree(saved->vga_cmap);
-		if (saved->attr)
-			vfree(saved->attr);
+		vfree(saved->vga_font0);
+		vfree(saved->vga_font1);
+		vfree(saved->vga_text);
+		vfree(saved->vga_cmap);
+		vfree(saved->attr);
 		kfree(saved);
 		state->vidstate = NULL;
 	}
@@ -361,10 +351,11 @@ int save_vga(struct vgastate *state)
 {
 	struct regstate *saved;
 
-	saved = kmalloc(sizeof(struct regstate), GFP_KERNEL);
+	saved = kzalloc(sizeof(struct regstate), GFP_KERNEL);
+
 	if (saved == NULL)
 		return 1;
-	memset (saved, 0, sizeof(struct regstate));
+
 	state->vidstate = (void *)saved;
 		
 	if (state->flags & VGA_SAVE_CMAP) {
@@ -489,11 +480,6 @@ int restore_vga (struct vgastate *state)
 	vga_cleanup(state);
 	return 0;
 }
-
-#ifdef MODULE
-int init_module(void) { return 0; };
-void cleanup_module(void) {};
-#endif
 
 EXPORT_SYMBOL(save_vga);
 EXPORT_SYMBOL(restore_vga);

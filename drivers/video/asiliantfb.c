@@ -29,14 +29,11 @@
  *  more details.
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/tty.h>
-#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -106,7 +103,6 @@ static struct fb_ops asiliantfb_ops = {
 	.fb_fillrect	= cfb_fillrect,
 	.fb_copyarea	= cfb_copyarea,
 	.fb_imageblit	= cfb_imageblit,
-	.fb_cursor	= soft_cursor,
 };
 
 /* Calculate the ratios for the dot clocks without using a single long long
@@ -143,7 +139,7 @@ static void asiliant_calc_dclk2(u32 *ppixclock, u8 *dclk2_m, u8 *dclk2_n, u8 *dc
 
 		/* 3 <= m <= 257 */
 		if (m >= 3 && m <= 257) {
-			unsigned new_error = ((Ftarget * n) - (Fref * m)) >= 0 ?
+			unsigned new_error = Ftarget * n >= Fref * m ?
 					       ((Ftarget * n) - (Fref * m)) : ((Fref * m) - (Ftarget * n));
 			if (new_error < best_error) {
 				best_n = n;
@@ -155,7 +151,7 @@ static void asiliant_calc_dclk2(u32 *ppixclock, u8 *dclk2_m, u8 *dclk2_n, u8 *dc
 		else if (m <= 1028) {
 			/* remember there are still only 8-bits of precision in m, so
 			 * avoid over-optimistic error calculations */
-			unsigned new_error = ((Ftarget * n) - (Fref * (m & ~3))) >= 0 ?
+			unsigned new_error = Ftarget * n >= Fref * (m & ~3) ?
 					       ((Ftarget * n) - (Fref * (m & ~3))) : ((Fref * (m & ~3)) - (Ftarget * n));
 			if (new_error < best_error) {
 				best_n = n;
@@ -323,32 +319,29 @@ static int asiliantfb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
 	writeb(green, mmio_base + 0x791);
 	writeb(blue, mmio_base + 0x791);
 
-	switch(p->var.bits_per_pixel) {
-	case 15:
-		if (regno < 16) {
+	if (regno < 16) {
+		switch(p->var.red.offset) {
+		case 10: /* RGB 555 */
 			((u32 *)(p->pseudo_palette))[regno] =
 				((red & 0xf8) << 7) |
 				((green & 0xf8) << 2) |
 				((blue & 0xf8) >> 3);
-		}
-		break;
-	case 16:
-		if (regno < 16) {
+			break;
+		case 11: /* RGB 565 */
 			((u32 *)(p->pseudo_palette))[regno] =
 				((red & 0xf8) << 8) |
 				((green & 0xfc) << 3) |
 				((blue & 0xf8) >> 3);
-		}
-		break;
-	case 24:
-		if (regno < 24) {
+			break;
+		case 16: /* RGB 888 */
 			((u32 *)(p->pseudo_palette))[regno] =
 				(red << 16)  |
 				(green << 8) |
 				(blue);
+			break;
 		}
-		break;
 	}
+
 	return 0;
 }
 
@@ -356,8 +349,6 @@ struct chips_init_reg {
 	unsigned char addr;
 	unsigned char data;
 };
-
-#define N_ELTS(x)	(sizeof(x) / sizeof(x[0]))
 
 static struct chips_init_reg chips_init_sr[] =
 {
@@ -464,22 +455,22 @@ static void __devinit chips_hw_init(struct fb_info *p)
 {
 	int i;
 
-	for (i = 0; i < N_ELTS(chips_init_xr); ++i)
+	for (i = 0; i < ARRAY_SIZE(chips_init_xr); ++i)
 		write_xr(chips_init_xr[i].addr, chips_init_xr[i].data);
 	write_xr(0x81, 0x12);
 	write_xr(0x82, 0x08);
 	write_xr(0x20, 0x00);
-	for (i = 0; i < N_ELTS(chips_init_sr); ++i)
+	for (i = 0; i < ARRAY_SIZE(chips_init_sr); ++i)
 		write_sr(chips_init_sr[i].addr, chips_init_sr[i].data);
-	for (i = 0; i < N_ELTS(chips_init_gr); ++i)
+	for (i = 0; i < ARRAY_SIZE(chips_init_gr); ++i)
 		write_gr(chips_init_gr[i].addr, chips_init_gr[i].data);
-	for (i = 0; i < N_ELTS(chips_init_ar); ++i)
+	for (i = 0; i < ARRAY_SIZE(chips_init_ar); ++i)
 		write_ar(chips_init_ar[i].addr, chips_init_ar[i].data);
 	/* Enable video output in attribute index register */
 	writeb(0x20, mmio_base + 0x780);
-	for (i = 0; i < N_ELTS(chips_init_cr); ++i)
+	for (i = 0; i < ARRAY_SIZE(chips_init_cr); ++i)
 		write_cr(chips_init_cr[i].addr, chips_init_cr[i].data);
-	for (i = 0; i < N_ELTS(chips_init_fr); ++i)
+	for (i = 0; i < ARRAY_SIZE(chips_init_fr); ++i)
 		write_fr(chips_init_fr[i].addr, chips_init_fr[i].data);
 }
 
@@ -513,19 +504,27 @@ static struct fb_var_screeninfo asiliantfb_var __devinitdata = {
 	.vsync_len 	= 2,
 };
 
-static void __devinit init_asiliant(struct fb_info *p, unsigned long addr)
+static int __devinit init_asiliant(struct fb_info *p, unsigned long addr)
 {
+	int err;
+
 	p->fix			= asiliantfb_fix;
 	p->fix.smem_start	= addr;
 	p->var			= asiliantfb_var;
 	p->fbops		= &asiliantfb_ops;
 	p->flags		= FBINFO_DEFAULT;
 
-	fb_alloc_cmap(&p->cmap, 256, 0);
+	err = fb_alloc_cmap(&p->cmap, 256, 0);
+	if (err) {
+		printk(KERN_ERR "C&T 69000 fb failed to alloc cmap memory\n");
+		return err;
+	}
 
-	if (register_framebuffer(p) < 0) {
+	err = register_framebuffer(p);
+	if (err < 0) {
 		printk(KERN_ERR "C&T 69000 framebuffer failed to register\n");
-		return;
+		fb_dealloc_cmap(&p->cmap);
+		return err;
 	}
 
 	printk(KERN_INFO "fb%d: Asiliant 69000 frame buffer (%dK RAM detected)\n",
@@ -533,6 +532,7 @@ static void __devinit init_asiliant(struct fb_info *p, unsigned long addr)
 
 	writeb(0xff, mmio_base + 0x78c);
 	chips_hw_init(p);
+	return 0;
 }
 
 static int __devinit
@@ -540,6 +540,7 @@ asiliantfb_pci_init(struct pci_dev *dp, const struct pci_device_id *ent)
 {
 	unsigned long addr, size;
 	struct fb_info *p;
+	int err;
 
 	if ((dp->resource[0].flags & IORESOURCE_MEM) == 0)
 		return -ENODEV;
@@ -550,7 +551,7 @@ asiliantfb_pci_init(struct pci_dev *dp, const struct pci_device_id *ent)
 	if (!request_mem_region(addr, size, "asiliantfb"))
 		return -EBUSY;
 
-	p = framebuffer_alloc(sizeof(u32) * 256, &dp->dev);
+	p = framebuffer_alloc(sizeof(u32) * 16, &dp->dev);
 	if (!p)	{
 		release_mem_region(addr, size);
 		return -ENOMEM;
@@ -568,7 +569,13 @@ asiliantfb_pci_init(struct pci_dev *dp, const struct pci_device_id *ent)
 	pci_write_config_dword(dp, 4, 0x02800083);
 	writeb(3, p->screen_base + 0x400784);
 
-	init_asiliant(p, addr);
+	err = init_asiliant(p, addr);
+	if (err) {
+		iounmap(p->screen_base);
+		release_mem_region(addr, size);
+		framebuffer_release(p);
+		return err;
+	}
 
 	pci_set_drvdata(dp, p);
 	return 0;
@@ -579,6 +586,7 @@ static void __devexit asiliantfb_remove(struct pci_dev *dp)
 	struct fb_info *p = pci_get_drvdata(dp);
 
 	unregister_framebuffer(p);
+	fb_dealloc_cmap(&p->cmap);
 	iounmap(p->screen_base);
 	release_mem_region(pci_resource_start(dp, 0), pci_resource_len(dp, 0));
 	pci_set_drvdata(dp, NULL);

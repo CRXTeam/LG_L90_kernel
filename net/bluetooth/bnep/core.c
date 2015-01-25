@@ -1,8 +1,8 @@
-/* 
+/*
    BNEP implementation for Linux Bluetooth stack (BlueZ).
    Copyright (C) 2001-2002 Inventel Systemes
    Written 2001-2002 by
-	Clément Moreau <clement.moreau@inventel.fr>
+	ClÃ©ment Moreau <clement.moreau@inventel.fr>
 	David Libault  <david.libault@inventel.fr>
 
    Copyright (C) 2002 Maxim Krasnyansky <maxk@qualcomm.com>
@@ -15,31 +15,29 @@
    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF THIRD PARTY RIGHTS.
    IN NO EVENT SHALL THE COPYRIGHT HOLDER(S) AND AUTHOR(S) BE LIABLE FOR ANY
-   CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES 
-   WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN 
-   ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF 
+   CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES
+   WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+   ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
    OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-   ALL LIABILITY, INCLUDING LIABILITY FOR INFRINGEMENT OF ANY PATENTS, 
-   COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS, RELATING TO USE OF THIS 
+   ALL LIABILITY, INCLUDING LIABILITY FOR INFRINGEMENT OF ANY PATENTS,
+   COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS, RELATING TO USE OF THIS
    SOFTWARE IS DISCLAIMED.
 */
 
-/*
- * $Id: core.c,v 1.20 2002/08/04 21:23:58 maxk Exp $
- */ 
-
-#include <linux/config.h>
 #include <linux/module.h>
+#include <linux/interrupt.h>
 
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/signal.h>
 #include <linux/init.h>
 #include <linux/wait.h>
+#include <linux/freezer.h>
 #include <linux/errno.h>
-#include <linux/smp_lock.h>
 #include <linux/net.h>
+#include <linux/slab.h>
+#include <linux/kthread.h>
 #include <net/sock.h>
 
 #include <linux/socket.h>
@@ -52,16 +50,15 @@
 #include <asm/unaligned.h>
 
 #include <net/bluetooth/bluetooth.h>
+#include <net/bluetooth/hci_core.h>
 #include <net/bluetooth/l2cap.h>
 
 #include "bnep.h"
 
-#ifndef CONFIG_BT_BNEP_DEBUG
-#undef  BT_DBG
-#define BT_DBG(D...)
-#endif
+#define VERSION "1.3"
 
-#define VERSION "1.2"
+static bool compress_src = 1;
+static bool compress_dst = 1;
 
 static LIST_HEAD(bnep_session_list);
 static DECLARE_RWSEM(bnep_session_sem);
@@ -74,8 +71,8 @@ static struct bnep_session *__bnep_get_session(u8 *dst)
 	BT_DBG("");
 
 	list_for_each(p, &bnep_session_list) {
-		s = list_entry(p, struct bnep_session, list);	
-		if (!memcmp(dst, s->eh.h_source, ETH_ALEN))
+		s = list_entry(p, struct bnep_session, list);
+		if (!compare_ether_addr(dst, s->eh.h_source))
 			return s;
 	}
 	return NULL;
@@ -84,10 +81,10 @@ static struct bnep_session *__bnep_get_session(u8 *dst)
 static void __bnep_link_session(struct bnep_session *s)
 {
 	/* It's safe to call __module_get() here because sessions are added
-	   by the socket layer which has to hold the refference to this module.
+	   by the socket layer which has to hold the reference to this module.
 	 */
 	__module_get(THIS_MODULE);
-	list_add(&s->list, &bnep_session_list);	
+	list_add(&s->list, &bnep_session_list);
 }
 
 static void __bnep_unlink_session(struct bnep_session *s)
@@ -117,26 +114,27 @@ static int bnep_send_rsp(struct bnep_session *s, u8 ctrl, u16 resp)
 static inline void bnep_set_default_proto_filter(struct bnep_session *s)
 {
 	/* (IPv4, ARP)  */
-	s->proto_filter[0].start = htons(0x0800);
-	s->proto_filter[0].end   = htons(0x0806);
+	s->proto_filter[0].start = ETH_P_IP;
+	s->proto_filter[0].end   = ETH_P_ARP;
 	/* (RARP, AppleTalk) */
-	s->proto_filter[1].start = htons(0x8035);
-	s->proto_filter[1].end   = htons(0x80F3);
+	s->proto_filter[1].start = ETH_P_RARP;
+	s->proto_filter[1].end   = ETH_P_AARP;
 	/* (IPX, IPv6) */
-	s->proto_filter[2].start = htons(0x8137);
-	s->proto_filter[2].end   = htons(0x86DD);
+	s->proto_filter[2].start = ETH_P_IPX;
+	s->proto_filter[2].end   = ETH_P_IPV6;
 }
 #endif
 
-static int bnep_ctrl_set_netfilter(struct bnep_session *s, u16 *data, int len)
+static int bnep_ctrl_set_netfilter(struct bnep_session *s, __be16 *data, int len)
 {
 	int n;
 
 	if (len < 2)
 		return -EILSEQ;
 
-	n = ntohs(get_unaligned(data));
-	data++; len -= 2;
+	n = get_unaligned_be16(data);
+	data++;
+	len -= 2;
 
 	if (len < n)
 		return -EILSEQ;
@@ -150,8 +148,8 @@ static int bnep_ctrl_set_netfilter(struct bnep_session *s, u16 *data, int len)
 		int i;
 
 		for (i = 0; i < n; i++) {
-			f[i].start = get_unaligned(data++);
-			f[i].end   = get_unaligned(data++);
+			f[i].start = get_unaligned_be16(data++);
+			f[i].end   = get_unaligned_be16(data++);
 
 			BT_DBG("proto filter start %d end %d",
 				f[i].start, f[i].end);
@@ -180,8 +178,9 @@ static int bnep_ctrl_set_mcfilter(struct bnep_session *s, u8 *data, int len)
 	if (len < 2)
 		return -EILSEQ;
 
-	n = ntohs(get_unaligned((u16 *) data)); 
-	data += 2; len -= 2;
+	n = get_unaligned_be16(data);
+	data += 2;
+	len -= 2;
 
 	if (len < n)
 		return -EILSEQ;
@@ -192,6 +191,8 @@ static int bnep_ctrl_set_mcfilter(struct bnep_session *s, u8 *data, int len)
 	n /= (ETH_ALEN * 2);
 
 	if (n > 0) {
+		int i;
+
 		s->mc_filter = 0;
 
 		/* Always send broadcast */
@@ -201,18 +202,22 @@ static int bnep_ctrl_set_mcfilter(struct bnep_session *s, u8 *data, int len)
 		for (; n > 0; n--) {
 			u8 a1[6], *a2;
 
-			memcpy(a1, data, ETH_ALEN); data += ETH_ALEN;
-			a2 = data; data += ETH_ALEN;
-	
+			memcpy(a1, data, ETH_ALEN);
+			data += ETH_ALEN;
+			a2 = data;
+			data += ETH_ALEN;
+
 			BT_DBG("mc filter %s -> %s",
 				batostr((void *) a1), batostr((void *) a2));
-
-			#define INCA(a) { int i = 5; while (i >=0 && ++a[i--] == 0); }
 
 			/* Iterate from a1 to a2 */
 			set_bit(bnep_mc_hash(a1), (ulong *) &s->mc_filter);
 			while (memcmp(a1, a2, 6) < 0 && s->mc_filter != ~0LL) {
-				INCA(a1);
+				/* Increment a1 */
+				i = 5;
+				while (i >= 0 && ++a1[i--] == 0)
+					;
+
 				set_bit(bnep_mc_hash(a1), (ulong *) &s->mc_filter);
 			}
 		}
@@ -232,11 +237,11 @@ static int bnep_rx_control(struct bnep_session *s, void *data, int len)
 	u8  cmd = *(u8 *)data;
 	int err = 0;
 
-	data++; len--;
+	data++;
+	len--;
 
 	switch (cmd) {
 	case BNEP_CMD_NOT_UNDERSTOOD:
-	case BNEP_SETUP_CONN_REQ:
 	case BNEP_SETUP_CONN_RSP:
 	case BNEP_FILTER_NET_TYPE_RSP:
 	case BNEP_FILTER_MULTI_ADDR_RSP:
@@ -249,6 +254,10 @@ static int bnep_rx_control(struct bnep_session *s, void *data, int len)
 
 	case BNEP_FILTER_MULTI_ADDR_SET:
 		err = bnep_ctrl_set_mcfilter(s, data, len);
+		break;
+
+	case BNEP_SETUP_CONN_REQ:
+		err = bnep_send_rsp(s, BNEP_SETUP_CONN_RSP, BNEP_CONN_NOT_ALLOWED);
 		break;
 
 	default: {
@@ -277,7 +286,7 @@ static int bnep_rx_extension(struct bnep_session *s, struct sk_buff *skb)
 		}
 
 		BT_DBG("type 0x%x len %d", h->type, h->len);
-	
+
 		switch (h->type & BNEP_TYPE_MASK) {
 		case BNEP_EXT_CONTROL:
 			bnep_rx_control(s, skb->data, skb->len);
@@ -293,7 +302,7 @@ static int bnep_rx_extension(struct bnep_session *s, struct sk_buff *skb)
 			break;
 		}
 	} while (!err && (h->type & BNEP_EXT_HEADER));
-	
+
 	return err;
 }
 
@@ -304,7 +313,6 @@ static u8 __bnep_rx_hlen[] = {
 	ETH_ALEN + 2, /* BNEP_COMPRESSED_SRC_ONLY */
 	ETH_ALEN + 2  /* BNEP_COMPRESSED_DST_ONLY */
 };
-#define BNEP_RX_TYPES	(sizeof(__bnep_rx_hlen) - 1)
 
 static inline int bnep_rx_frame(struct bnep_session *s, struct sk_buff *skb)
 {
@@ -312,27 +320,27 @@ static inline int bnep_rx_frame(struct bnep_session *s, struct sk_buff *skb)
 	struct sk_buff *nskb;
 	u8 type;
 
-	dev->last_rx = jiffies;
-	s->stats.rx_bytes += skb->len;
+	dev->stats.rx_bytes += skb->len;
 
-	type = *(u8 *) skb->data; skb_pull(skb, 1);
+	type = *(u8 *) skb->data;
+	skb_pull(skb, 1);
 
-	if ((type & BNEP_TYPE_MASK) > BNEP_RX_TYPES)
+	if ((type & BNEP_TYPE_MASK) >= sizeof(__bnep_rx_hlen))
 		goto badframe;
-	
+
 	if ((type & BNEP_TYPE_MASK) == BNEP_CONTROL) {
 		bnep_rx_control(s, skb->data, skb->len);
 		kfree_skb(skb);
 		return 0;
 	}
 
-	skb->mac.raw = skb->data;
+	skb_reset_mac_header(skb);
 
 	/* Verify and pull out header */
 	if (!skb_pull(skb, __bnep_rx_hlen[type & BNEP_TYPE_MASK]))
 		goto badframe;
 
-	s->eh.h_proto = get_unaligned((u16 *) (skb->data - 2));
+	s->eh.h_proto = get_unaligned((__be16 *) (skb->data - 2));
 
 	if (type & BNEP_EXT_HEADER) {
 		if (bnep_rx_extension(s, skb) < 0)
@@ -343,14 +351,14 @@ static inline int bnep_rx_frame(struct bnep_session *s, struct sk_buff *skb)
 	if (ntohs(s->eh.h_proto) == 0x8100) {
 		if (!skb_pull(skb, 4))
 			goto badframe;
-		s->eh.h_proto = get_unaligned((u16 *) (skb->data - 2));
+		s->eh.h_proto = get_unaligned((__be16 *) (skb->data - 2));
 	}
-	
+
 	/* We have to alloc new skb and copy data here :(. Because original skb
 	 * may not be modified and because of the alignment requirements. */
 	nskb = alloc_skb(2 + ETH_HLEN + skb->len, GFP_KERNEL);
 	if (!nskb) {
-		s->stats.rx_dropped++;
+		dev->stats.rx_dropped++;
 		kfree_skb(skb);
 		return -ENOMEM;
 	}
@@ -361,36 +369,38 @@ static inline int bnep_rx_frame(struct bnep_session *s, struct sk_buff *skb)
 	case BNEP_COMPRESSED:
 		memcpy(__skb_put(nskb, ETH_HLEN), &s->eh, ETH_HLEN);
 		break;
-	
+
 	case BNEP_COMPRESSED_SRC_ONLY:
 		memcpy(__skb_put(nskb, ETH_ALEN), s->eh.h_dest, ETH_ALEN);
-		memcpy(__skb_put(nskb, ETH_ALEN), skb->mac.raw, ETH_ALEN);
-		put_unaligned(s->eh.h_proto, (u16 *) __skb_put(nskb, 2));
+		memcpy(__skb_put(nskb, ETH_ALEN), skb_mac_header(skb), ETH_ALEN);
+		put_unaligned(s->eh.h_proto, (__be16 *) __skb_put(nskb, 2));
 		break;
 
 	case BNEP_COMPRESSED_DST_ONLY:
-		memcpy(__skb_put(nskb, ETH_ALEN), skb->mac.raw, ETH_ALEN);
-		memcpy(__skb_put(nskb, ETH_ALEN + 2), s->eh.h_source, ETH_ALEN + 2);
+		memcpy(__skb_put(nskb, ETH_ALEN), skb_mac_header(skb),
+								ETH_ALEN);
+		memcpy(__skb_put(nskb, ETH_ALEN + 2), s->eh.h_source,
+								ETH_ALEN + 2);
 		break;
 
 	case BNEP_GENERAL:
-		memcpy(__skb_put(nskb, ETH_ALEN * 2), skb->mac.raw, ETH_ALEN * 2);
-		put_unaligned(s->eh.h_proto, (u16 *) __skb_put(nskb, 2));
+		memcpy(__skb_put(nskb, ETH_ALEN * 2), skb_mac_header(skb),
+								ETH_ALEN * 2);
+		put_unaligned(s->eh.h_proto, (__be16 *) __skb_put(nskb, 2));
 		break;
 	}
 
-	memcpy(__skb_put(nskb, skb->len), skb->data, skb->len);
+	skb_copy_from_linear_data(skb, __skb_put(nskb, skb->len), skb->len);
 	kfree_skb(skb);
-	
-	s->stats.rx_packets++;
-	nskb->dev       = dev;
+
+	dev->stats.rx_packets++;
 	nskb->ip_summed = CHECKSUM_NONE;
 	nskb->protocol  = eth_type_trans(nskb, dev);
 	netif_rx_ni(nskb);
 	return 0;
 
 badframe:
-	s->stats.rx_errors++;
+	dev->stats.rx_errors++;
 	kfree_skb(skb);
 	return 0;
 }
@@ -420,10 +430,10 @@ static inline int bnep_tx_frame(struct bnep_session *s, struct sk_buff *skb)
 	iv[il++] = (struct kvec) { &type, 1 };
 	len++;
 
-	if (!memcmp(eh->h_dest, s->eh.h_source, ETH_ALEN))
+	if (compress_src && !compare_ether_addr(eh->h_dest, s->eh.h_source))
 		type |= 0x01;
 
-	if (!memcmp(eh->h_source, s->eh.h_dest, ETH_ALEN))
+	if (compress_dst && !compare_ether_addr(eh->h_source, s->eh.h_dest))
 		type |= 0x02;
 
 	if (type)
@@ -435,7 +445,7 @@ static inline int bnep_tx_frame(struct bnep_session *s, struct sk_buff *skb)
 		iv[il++] = (struct kvec) { eh->h_source, ETH_ALEN };
 		len += ETH_ALEN;
 		break;
-		
+
 	case BNEP_COMPRESSED_DST_ONLY:
 		iv[il++] = (struct kvec) { eh->h_dest, ETH_ALEN };
 		len += ETH_ALEN;
@@ -445,7 +455,7 @@ static inline int bnep_tx_frame(struct bnep_session *s, struct sk_buff *skb)
 send:
 	iv[il++] = (struct kvec) { skb->data, skb->len };
 	len += skb->len;
-	
+
 	/* FIXME: linearize skb */
 	{
 		len = kernel_sendmsg(sock, &s->msg, iv, il, len);
@@ -453,8 +463,8 @@ send:
 	kfree_skb(skb);
 
 	if (len > 0) {
-		s->stats.tx_bytes += len;
-		s->stats.tx_packets++;
+		s->dev->stats.tx_bytes += len;
+		s->dev->stats.tx_packets++;
 		return 0;
 	}
 
@@ -471,40 +481,48 @@ static int bnep_session(void *arg)
 
 	BT_DBG("");
 
-        daemonize("kbnepd %s", dev->name);
 	set_user_nice(current, -15);
-	current->flags |= PF_NOFREEZE;
 
 	init_waitqueue_entry(&wait, current);
-	add_wait_queue(sk->sk_sleep, &wait);
-	while (!atomic_read(&s->killed)) {
+	add_wait_queue(sk_sleep(sk), &wait);
+	while (1) {
 		set_current_state(TASK_INTERRUPTIBLE);
 
-		// RX
+		if (atomic_read(&s->terminate))
+			break;
+		/* RX */
 		while ((skb = skb_dequeue(&sk->sk_receive_queue))) {
 			skb_orphan(skb);
-			bnep_rx_frame(s, skb);
+			if (!skb_linearize(skb))
+				bnep_rx_frame(s, skb);
+			else
+				kfree_skb(skb);
 		}
 
 		if (sk->sk_state != BT_CONNECTED)
 			break;
-	
-		// TX
+
+		/* TX */
 		while ((skb = skb_dequeue(&sk->sk_write_queue)))
 			if (bnep_tx_frame(s, skb))
 				break;
 		netif_wake_queue(dev);
-	
+
 		schedule();
 	}
 	set_current_state(TASK_RUNNING);
-	remove_wait_queue(sk->sk_sleep, &wait);
+	remove_wait_queue(sk_sleep(sk), &wait);
 
 	/* Cleanup session */
 	down_write(&bnep_session_sem);
 
 	/* Delete network device */
 	unregister_netdev(dev);
+
+	/* Wakeup user-space polling for socket errors */
+	s->sock->sk->sk_err = EUNATCH;
+
+	wake_up_interruptible(sk_sleep(s->sock->sk));
 
 	/* Release the socket */
 	fput(s->sock->file);
@@ -515,6 +533,28 @@ static int bnep_session(void *arg)
 	free_netdev(dev);
 	return 0;
 }
+
+static struct device *bnep_get_device(struct bnep_session *session)
+{
+	bdaddr_t *src = &bt_sk(session->sock->sk)->src;
+	bdaddr_t *dst = &bt_sk(session->sock->sk)->dst;
+	struct hci_dev *hdev;
+	struct hci_conn *conn;
+
+	hdev = hci_get_route(dst, src);
+	if (!hdev)
+		return NULL;
+
+	conn = hci_conn_hash_lookup_ba(hdev, ACL_LINK, dst);
+
+	hci_dev_put(hdev);
+
+	return conn ? &conn->dev : NULL;
+}
+
+static struct device_type bnep_type = {
+	.name	= "bluetooth",
+};
 
 int bnep_add_connection(struct bnep_connadd_req *req, struct socket *sock)
 {
@@ -530,11 +570,10 @@ int bnep_add_connection(struct bnep_connadd_req *req, struct socket *sock)
 
 	/* session struct allocated as private part of net_device */
 	dev = alloc_netdev(sizeof(struct bnep_session),
-			   (*req->device) ? req->device : "bnep%d",
-			   bnep_net_setup);
-	if (!dev) 
-		return ENOMEM;
-
+				(*req->device) ? req->device : "bnep%d",
+				bnep_net_setup);
+	if (!dev)
+		return -ENOMEM;
 
 	down_write(&bnep_session_sem);
 
@@ -544,19 +583,19 @@ int bnep_add_connection(struct bnep_connadd_req *req, struct socket *sock)
 		goto failed;
 	}
 
-	s = dev->priv;
+	s = netdev_priv(dev);
 
 	/* This is rx header therefore addresses are swapped.
-	 * ie eh.h_dest is our local address. */
+	 * ie. eh.h_dest is our local address. */
 	memcpy(s->eh.h_dest,   &src, ETH_ALEN);
 	memcpy(s->eh.h_source, &dst, ETH_ALEN);
 	memcpy(dev->dev_addr, s->eh.h_dest, ETH_ALEN);
 
-	s->dev = dev;
+	s->dev   = dev;
 	s->sock  = sock;
 	s->role  = req->role;
 	s->state = BT_CONNECTED;
-	
+
 	s->msg.msg_flags = MSG_NOSIGNAL;
 
 #ifdef CONFIG_BT_BNEP_MC_FILTER
@@ -569,18 +608,21 @@ int bnep_add_connection(struct bnep_connadd_req *req, struct socket *sock)
 	bnep_set_default_proto_filter(s);
 #endif
 
+	SET_NETDEV_DEV(dev, bnep_get_device(s));
+	SET_NETDEV_DEVTYPE(dev, &bnep_type);
+
 	err = register_netdev(dev);
-	if (err) {
+	if (err)
 		goto failed;
-	}
 
 	__bnep_link_session(s);
-	
-	err = kernel_thread(bnep_session, s, CLONE_KERNEL);
-	if (err < 0) {
+
+	s->task = kthread_run(bnep_session, s, "kbnepd %s", dev->name);
+	if (IS_ERR(s->task)) {
 		/* Session thread start failed, gotta cleanup. */
 		unregister_netdev(dev);
 		__bnep_unlink_session(s);
+		err = PTR_ERR(s->task);
 		goto failed;
 	}
 
@@ -605,13 +647,8 @@ int bnep_del_connection(struct bnep_conndel_req *req)
 
 	s = __bnep_get_session(req->dst);
 	if (s) {
-		/* Wakeup user-space which is polling for socket errors.
-		 * This is temporary hack untill we have shutdown in L2CAP */
-		s->sock->sk->sk_err = EUNATCH;
-		
-		/* Kill session thread */
-		atomic_inc(&s->killed);
-		wake_up_interruptible(s->sock->sk->sk_sleep);
+		atomic_inc(&s->terminate);
+		wake_up_process(s->task);
 	} else
 		err = -ENOENT;
 
@@ -621,6 +658,7 @@ int bnep_del_connection(struct bnep_conndel_req *req)
 
 static void __bnep_copy_ci(struct bnep_conninfo *ci, struct bnep_session *s)
 {
+	memset(ci, 0, sizeof(*ci));
 	memcpy(ci->dst, s->eh.h_source, ETH_ALEN);
 	strcpy(ci->device, s->dev->name);
 	ci->flags = s->flags;
@@ -642,7 +680,7 @@ int bnep_get_connlist(struct bnep_connlist_req *req)
 		s = list_entry(p, struct bnep_session, list);
 
 		__bnep_copy_ci(&ci, s);
-		
+
 		if (copy_to_user(req->ci, &ci, sizeof(ci))) {
 			err = -EFAULT;
 			break;
@@ -677,10 +715,8 @@ int bnep_get_conninfo(struct bnep_conninfo *ci)
 }
 
 static int __init bnep_init(void)
-{	
+{
 	char flt[50] = "";
-
-	l2cap_load();
 
 #ifdef CONFIG_BT_BNEP_PROTO_FILTER
 	strcat(flt, "protocol ");
@@ -706,7 +742,13 @@ static void __exit bnep_exit(void)
 module_init(bnep_init);
 module_exit(bnep_exit);
 
-MODULE_AUTHOR("David Libault <david.libault@inventel.fr>, Maxim Krasnyansky <maxk@qualcomm.com>");
+module_param(compress_src, bool, 0644);
+MODULE_PARM_DESC(compress_src, "Compress sources headers");
+
+module_param(compress_dst, bool, 0644);
+MODULE_PARM_DESC(compress_dst, "Compress destination headers");
+
+MODULE_AUTHOR("Marcel Holtmann <marcel@holtmann.org>");
 MODULE_DESCRIPTION("Bluetooth BNEP ver " VERSION);
 MODULE_VERSION(VERSION);
 MODULE_LICENSE("GPL");

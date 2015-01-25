@@ -12,7 +12,6 @@
 #include <linux/smp.h>
 #include <linux/errno.h>
 #include <asm/ptrace.h>
-#include <asm/system.h>
 
 #include "op_impl.h"
 
@@ -65,7 +64,7 @@ op_axp_setup(void)
 	model->reg_setup(&reg, ctr, &sys);
 
 	/* Configure the registers on all cpus.  */
-	smp_call_function(model->cpu_setup, &reg, 0, 1);
+	(void)smp_call_function(model->cpu_setup, &reg, 1);
 	model->cpu_setup(&reg);
 	return 0;
 }
@@ -86,7 +85,7 @@ op_axp_cpu_start(void *dummy)
 static int
 op_axp_start(void)
 {
-	smp_call_function(op_axp_cpu_start, NULL, 0, 1);
+	(void)smp_call_function(op_axp_cpu_start, NULL, 1);
 	op_axp_cpu_start(NULL);
 	return 0;
 }
@@ -101,18 +100,18 @@ op_axp_cpu_stop(void *dummy)
 static void
 op_axp_stop(void)
 {
-	smp_call_function(op_axp_cpu_stop, NULL, 0, 1);
+	(void)smp_call_function(op_axp_cpu_stop, NULL, 1);
 	op_axp_cpu_stop(NULL);
 }
 
 static int
-op_axp_create_files(struct super_block * sb, struct dentry * root)
+op_axp_create_files(struct super_block *sb, struct dentry *root)
 {
 	int i;
 
 	for (i = 0; i < model->num_counters; ++i) {
 		struct dentry *dir;
-		char buf[3];
+		char buf[4];
 
 		snprintf(buf, sizeof buf, "%d", i);
 		dir = oprofilefs_mkdir(sb, root, buf);

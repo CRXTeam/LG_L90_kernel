@@ -1,4 +1,7 @@
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/kernel.h>
+#include <linux/export.h>
 #include <media/saa7146_vv.h>
 
 static void calculate_output_format_register(struct saa7146_dev* saa, u32 palette, u32* clip_format)
@@ -158,7 +161,7 @@ static int calculate_h_scale_registers(struct saa7146_dev *dev,
 	}
 
 	/* the horizontal scaling increment controls the UV filter
-	   to reduce the bandwith to improve the display quality,
+	   to reduce the bandwidth to improve the display quality,
 	   so set it ... */
 	if ( xsci == 0x400)
 		pfuv = 0x00;
@@ -312,7 +315,7 @@ static int sort_and_eliminate(u32* values, int* count)
 		return -EINVAL;
 	}
 
-	/* bubble sort the first ´count´ items of the array ´values´ */
+	/* bubble sort the first @count items of the array @values */
 	for( top = *count; top > 0; top--) {
 		for( low = 0, high = 1; high < top; low++, high++) {
 			if( values[low] > values[high] ) {
@@ -338,7 +341,7 @@ static void calculate_clipping_registers_rect(struct saa7146_dev *dev, struct sa
 	struct saa7146_video_dma *vdma2, u32* clip_format, u32* arbtr_ctrl, enum v4l2_field field)
 {
 	struct saa7146_vv *vv = dev->vv_data;
-	u32 *clipping = vv->d_clipping.cpu_addr;
+	__le32 *clipping = vv->d_clipping.cpu_addr;
 
 	int width = fh->ov.win.w.width;
 	int height =  fh->ov.win.w.height;
@@ -558,23 +561,30 @@ static void saa7146_set_window(struct saa7146_dev *dev, int width, int height, e
 static void saa7146_set_position(struct saa7146_dev *dev, int w_x, int w_y, int w_height, enum v4l2_field field, u32 pixelformat)
 {
 	struct saa7146_vv *vv = dev->vv_data;
-	struct saa7146_format *sfmt = format_by_fourcc(dev, pixelformat);
+	struct saa7146_format *sfmt = saa7146_format_by_fourcc(dev, pixelformat);
 
 	int b_depth = vv->ov_fmt->depth;
 	int b_bpl = vv->ov_fb.fmt.bytesperline;
-	u32 base = (u32)vv->ov_fb.base;
+	/* The unsigned long cast is to remove a 64-bit compile warning since
+	   it looks like a 64-bit address is cast to a 32-bit value, even
+	   though the base pointer is really a 32-bit physical address that
+	   goes into a 32-bit DMA register.
+	   FIXME: might not work on some 64-bit platforms, but see the FIXME
+	   in struct v4l2_framebuffer (videodev2.h) for that.
+	 */
+	u32 base = (u32)(unsigned long)vv->ov_fb.base;
 
 	struct	saa7146_video_dma vdma1;
 
 	/* calculate memory offsets for picture, look if we shall top-down-flip */
 	vdma1.pitch	= 2*b_bpl;
 	if ( 0 == vv->vflip ) {
-		vdma1.base_even = (u32)base + (w_y * (vdma1.pitch/2)) + (w_x * (b_depth / 8));
+		vdma1.base_even = base + (w_y * (vdma1.pitch/2)) + (w_x * (b_depth / 8));
 		vdma1.base_odd  = vdma1.base_even + (vdma1.pitch / 2);
 		vdma1.prot_addr = vdma1.base_even + (w_height * (vdma1.pitch / 2));
 	}
 	else {
-		vdma1.base_even = (u32)base + ((w_y+w_height) * (vdma1.pitch/2)) + (w_x * (b_depth / 8));
+		vdma1.base_even = base + ((w_y+w_height) * (vdma1.pitch/2)) + (w_x * (b_depth / 8));
 		vdma1.base_odd  = vdma1.base_even - (vdma1.pitch / 2);
 		vdma1.prot_addr = vdma1.base_odd - (w_height * (vdma1.pitch / 2));
 	}
@@ -634,6 +644,7 @@ void saa7146_set_hps_source_and_sync(struct saa7146_dev *dev, int source, int sy
 	vv->current_hps_source = source;
 	vv->current_hps_sync = sync;
 }
+EXPORT_SYMBOL_GPL(saa7146_set_hps_source_and_sync);
 
 int saa7146_enable_overlay(struct saa7146_fh *fh)
 {
@@ -694,7 +705,7 @@ static int calculate_video_dma_grab_packed(struct saa7146_dev* dev, struct saa71
 	struct saa7146_vv *vv = dev->vv_data;
 	struct saa7146_video_dma vdma1;
 
-	struct saa7146_format *sfmt = format_by_fourcc(dev,buf->fmt->pixelformat);
+	struct saa7146_format *sfmt = saa7146_format_by_fourcc(dev,buf->fmt->pixelformat);
 
 	int width = buf->fmt->width;
 	int height = buf->fmt->height;
@@ -703,8 +714,8 @@ static int calculate_video_dma_grab_packed(struct saa7146_dev* dev, struct saa71
 
 	int depth = sfmt->depth;
 
-	DEB_CAP(("[size=%dx%d,fields=%s]\n",
-		width,height,v4l2_field_names[field]));
+	DEB_CAP("[size=%dx%d,fields=%s]\n",
+		width, height, v4l2_field_names[field]);
 
 	if( bytesperline != 0) {
 		vdma1.pitch = bytesperline*2;
@@ -819,7 +830,7 @@ static int calculate_video_dma_grab_planar(struct saa7146_dev* dev, struct saa71
 	struct saa7146_video_dma vdma2;
 	struct saa7146_video_dma vdma3;
 
-	struct saa7146_format *sfmt = format_by_fourcc(dev,buf->fmt->pixelformat);
+	struct saa7146_format *sfmt = saa7146_format_by_fourcc(dev,buf->fmt->pixelformat);
 
 	int width = buf->fmt->width;
 	int height = buf->fmt->height;
@@ -829,8 +840,8 @@ static int calculate_video_dma_grab_planar(struct saa7146_dev* dev, struct saa71
 	BUG_ON(0 == buf->pt[1].dma);
 	BUG_ON(0 == buf->pt[2].dma);
 
-	DEB_CAP(("[size=%dx%d,fields=%s]\n",
-		width,height,v4l2_field_names[field]));
+	DEB_CAP("[size=%dx%d,fields=%s]\n",
+		width, height, v4l2_field_names[field]);
 
 	/* fixme: look at bytesperline! */
 
@@ -986,16 +997,16 @@ static void program_capture_engine(struct saa7146_dev *dev, int planar)
 
 void saa7146_set_capture(struct saa7146_dev *dev, struct saa7146_buf *buf, struct saa7146_buf *next)
 {
-	struct saa7146_format *sfmt = format_by_fourcc(dev,buf->fmt->pixelformat);
+	struct saa7146_format *sfmt = saa7146_format_by_fourcc(dev,buf->fmt->pixelformat);
 	struct saa7146_vv *vv = dev->vv_data;
 	u32 vdma1_prot_addr;
 
-	DEB_CAP(("buf:%p, next:%p\n",buf,next));
+	DEB_CAP("buf:%p, next:%p\n", buf, next);
 
 	vdma1_prot_addr = saa7146_read(dev, PROT_ADDR1);
 	if( 0 == vdma1_prot_addr ) {
 		/* clear out beginning of streaming bit (rps register 0)*/
-		DEB_CAP(("forcing sync to new frame\n"));
+		DEB_CAP("forcing sync to new frame\n");
 		saa7146_write(dev, MC2, MASK_27 );
 	}
 

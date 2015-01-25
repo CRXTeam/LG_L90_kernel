@@ -1,5 +1,4 @@
 /*
-    $Id: btcx-risc.c,v 1.6 2005/02/21 13:57:59 kraxel Exp $
 
     btcx-risc.c
 
@@ -24,7 +23,6 @@
 */
 
 #include <linux/module.h>
-#include <linux/moduleparam.h>
 #include <linux/init.h>
 #include <linux/pci.h>
 #include <linux/interrupt.h>
@@ -38,7 +36,7 @@ MODULE_DESCRIPTION("some code shared by bttv and cx88xx drivers");
 MODULE_AUTHOR("Gerd Knorr");
 MODULE_LICENSE("GPL");
 
-static unsigned int debug = 0;
+static unsigned int debug;
 module_param(debug, int, 0644);
 MODULE_PARM_DESC(debug,"debug messages, default is 0 (no)");
 
@@ -65,8 +63,8 @@ int btcx_riscmem_alloc(struct pci_dev *pci,
 		       struct btcx_riscmem *risc,
 		       unsigned int size)
 {
-	u32 *cpu;
-	dma_addr_t dma;
+	__le32 *cpu;
+	dma_addr_t dma = 0;
 
 	if (NULL != risc->cpu && risc->size < size)
 		btcx_riscmem_free(pci,risc);
@@ -186,12 +184,12 @@ btcx_sort_clips(struct v4l2_clip *clips, unsigned int nclips)
 }
 
 void
-btcx_calc_skips(int line, int width, unsigned int *maxy,
+btcx_calc_skips(int line, int width, int *maxy,
 		struct btcx_skiplist *skips, unsigned int *nskips,
 		const struct v4l2_clip *clips, unsigned int nclips)
 {
 	unsigned int clip,skip;
-	int end,maxline;
+	int end, maxline;
 
 	skip=0;
 	maxline = 9999;

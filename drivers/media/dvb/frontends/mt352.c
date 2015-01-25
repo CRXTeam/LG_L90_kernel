@@ -32,9 +32,10 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/moduleparam.h>
 #include <linux/init.h>
 #include <linux/delay.h>
+#include <linux/string.h>
+#include <linux/slab.h>
 
 #include "dvb_frontend.h"
 #include "mt352_priv.h"
@@ -43,10 +44,9 @@
 struct mt352_state {
 	struct i2c_adapter* i2c;
 	struct dvb_frontend frontend;
-	struct dvb_frontend_ops ops;
 
 	/* configuration settings */
-	const struct mt352_config* config;
+	struct mt352_config config;
 };
 
 static int debug;
@@ -59,7 +59,7 @@ static int mt352_single_write(struct dvb_frontend *fe, u8 reg, u8 val)
 {
 	struct mt352_state* state = fe->demodulator_priv;
 	u8 buf[2] = { reg, val };
-	struct i2c_msg msg = { .addr = state->config->demod_address, .flags = 0,
+	struct i2c_msg msg = { .addr = state->config.demod_address, .flags = 0,
 			       .buf = buf, .len = 2 };
 	int err = i2c_transfer(state->i2c, &msg, 1);
 	if (err != 1) {
@@ -69,7 +69,7 @@ static int mt352_single_write(struct dvb_frontend *fe, u8 reg, u8 val)
 	return 0;
 }
 
-int mt352_write(struct dvb_frontend* fe, u8* ibuf, int ilen)
+static int _mt352_write(struct dvb_frontend* fe, const u8 ibuf[], int ilen)
 {
 	int err,i;
 	for (i=0; i < ilen-1; i++)
@@ -84,10 +84,10 @@ static int mt352_read_register(struct mt352_state* state, u8 reg)
 	int ret;
 	u8 b0 [] = { reg };
 	u8 b1 [] = { 0 };
-	struct i2c_msg msg [] = { { .addr = state->config->demod_address,
+	struct i2c_msg msg [] = { { .addr = state->config.demod_address,
 				    .flags = 0,
 				    .buf = b0, .len = 1 },
-				  { .addr = state->config->demod_address,
+				  { .addr = state->config.demod_address,
 				    .flags = I2C_M_RD,
 				    .buf = b1, .len = 1 } };
 
@@ -95,52 +95,47 @@ static int mt352_read_register(struct mt352_state* state, u8 reg)
 
 	if (ret != 2) {
 		printk("%s: readreg error (reg=%d, ret==%i)\n",
-		       __FUNCTION__, reg, ret);
+		       __func__, reg, ret);
 		return ret;
 	}
 
 	return b1[0];
 }
 
-int mt352_read(struct dvb_frontend *fe, u8 reg)
-{
-	return mt352_read_register(fe->demodulator_priv,reg);
-}
-
 static int mt352_sleep(struct dvb_frontend* fe)
 {
 	static u8 mt352_softdown[] = { CLOCK_CTL, 0x20, 0x08 };
 
-	mt352_write(fe, mt352_softdown, sizeof(mt352_softdown));
+	_mt352_write(fe, mt352_softdown, sizeof(mt352_softdown));
 	return 0;
 }
 
 static void mt352_calc_nominal_rate(struct mt352_state* state,
-				    enum fe_bandwidth bandwidth,
+				    u32 bandwidth,
 				    unsigned char *buf)
 {
 	u32 adc_clock = 20480; /* 20.340 MHz */
 	u32 bw,value;
 
 	switch (bandwidth) {
-	case BANDWIDTH_6_MHZ:
+	case 6000000:
 		bw = 6;
 		break;
-	case BANDWIDTH_7_MHZ:
+	case 7000000:
 		bw = 7;
 		break;
-	case BANDWIDTH_8_MHZ:
+	case 8000000:
 	default:
 		bw = 8;
 		break;
 	}
-	if (state->config->adc_clock)
-		adc_clock = state->config->adc_clock;
+	if (state->config.adc_clock)
+		adc_clock = state->config.adc_clock;
 
 	value = 64 * bw * (1<<16) / (7 * 8);
 	value = value * 1000 / adc_clock;
 	dprintk("%s: bw %d, adc_clock %d => 0x%x\n",
-		__FUNCTION__, bw, adc_clock, value);
+		__func__, bw, adc_clock, value);
 	buf[0] = msb(value);
 	buf[1] = lsb(value);
 }
@@ -152,28 +147,33 @@ static void mt352_calc_input_freq(struct mt352_state* state,
 	int if2       = 36167; /* 36.166667 MHz */
 	int ife,value;
 
-	if (state->config->adc_clock)
-		adc_clock = state->config->adc_clock;
-	if (state->config->if2)
-		if2 = state->config->if2;
+	if (state->config.adc_clock)
+		adc_clock = state->config.adc_clock;
+	if (state->config.if2)
+		if2 = state->config.if2;
 
-	ife = (2*adc_clock - if2);
+	if (adc_clock >= if2 * 2)
+		ife = if2;
+	else {
+		ife = adc_clock - (if2 % adc_clock);
+		if (ife > adc_clock / 2)
+			ife = adc_clock - ife;
+	}
 	value = -16374 * ife / adc_clock;
 	dprintk("%s: if2 %d, ife %d, adc_clock %d => %d / 0x%x\n",
-		__FUNCTION__, if2, ife, adc_clock, value, value & 0x3fff);
+		__func__, if2, ife, adc_clock, value, value & 0x3fff);
 	buf[0] = msb(value);
 	buf[1] = lsb(value);
 }
 
-static int mt352_set_parameters(struct dvb_frontend* fe,
-				struct dvb_frontend_parameters *param)
+static int mt352_set_parameters(struct dvb_frontend *fe)
 {
+	struct dtv_frontend_properties *op = &fe->dtv_property_cache;
 	struct mt352_state* state = fe->demodulator_priv;
 	unsigned char buf[13];
 	static unsigned char tuner_go[] = { 0x5d, 0x01 };
 	static unsigned char fsm_go[]   = { 0x5e, 0x01 };
 	unsigned int tps = 0;
-	struct dvb_ofdm_parameters *op = &param->u.ofdm;
 
 	switch (op->code_rate_HP) {
 		case FEC_2_3:
@@ -212,14 +212,14 @@ static int mt352_set_parameters(struct dvb_frontend* fe,
 		case FEC_AUTO:
 			break;
 		case FEC_NONE:
-			if (op->hierarchy_information == HIERARCHY_AUTO ||
-			    op->hierarchy_information == HIERARCHY_NONE)
+			if (op->hierarchy == HIERARCHY_AUTO ||
+			    op->hierarchy == HIERARCHY_NONE)
 				break;
 		default:
 			return -EINVAL;
 	}
 
-	switch (op->constellation) {
+	switch (op->modulation) {
 		case QPSK:
 			break;
 		case QAM_AUTO:
@@ -261,7 +261,7 @@ static int mt352_set_parameters(struct dvb_frontend* fe,
 			return -EINVAL;
 	}
 
-	switch (op->hierarchy_information) {
+	switch (op->hierarchy) {
 		case HIERARCHY_AUTO:
 		case HIERARCHY_NONE:
 			break;
@@ -287,29 +287,37 @@ static int mt352_set_parameters(struct dvb_frontend* fe,
 	buf[3] = 0x50;  // old
 //	buf[3] = 0xf4;  // pinnacle
 
-	mt352_calc_nominal_rate(state, op->bandwidth, buf+4);
+	mt352_calc_nominal_rate(state, op->bandwidth_hz, buf+4);
 	mt352_calc_input_freq(state, buf+6);
-	state->config->pll_set(fe, param, buf+8);
 
-	mt352_write(fe, buf, sizeof(buf));
-	if (state->config->no_tuner) {
-		/* start decoding */
-		mt352_write(fe, fsm_go, 2);
+	if (state->config.no_tuner) {
+		if (fe->ops.tuner_ops.set_params) {
+			fe->ops.tuner_ops.set_params(fe);
+			if (fe->ops.i2c_gate_ctrl)
+				fe->ops.i2c_gate_ctrl(fe, 0);
+		}
+
+		_mt352_write(fe, buf, 8);
+		_mt352_write(fe, fsm_go, 2);
 	} else {
-		/* start tuning */
-		mt352_write(fe, tuner_go, 2);
+		if (fe->ops.tuner_ops.calc_regs) {
+			fe->ops.tuner_ops.calc_regs(fe, buf+8, 5);
+			buf[8] <<= 1;
+			_mt352_write(fe, buf, sizeof(buf));
+			_mt352_write(fe, tuner_go, 2);
+		}
 	}
+
 	return 0;
 }
 
-static int mt352_get_parameters(struct dvb_frontend* fe,
-				struct dvb_frontend_parameters *param)
+static int mt352_get_parameters(struct dvb_frontend* fe)
 {
+	struct dtv_frontend_properties *op = &fe->dtv_property_cache;
 	struct mt352_state* state = fe->demodulator_priv;
 	u16 tps;
 	u16 div;
 	u8 trl;
-	struct dvb_ofdm_parameters *op = &param->u.ofdm;
 	static const u8 tps_fec_to_api[8] =
 	{
 		FEC_1_2,
@@ -338,16 +346,16 @@ static int mt352_get_parameters(struct dvb_frontend* fe,
 	switch ( (tps >> 13) & 3)
 	{
 		case 0:
-			op->constellation = QPSK;
+			op->modulation = QPSK;
 			break;
 		case 1:
-			op->constellation = QAM_16;
+			op->modulation = QAM_16;
 			break;
 		case 2:
-			op->constellation = QAM_64;
+			op->modulation = QAM_64;
 			break;
 		default:
-			op->constellation = QAM_AUTO;
+			op->modulation = QAM_AUTO;
 			break;
 	}
 
@@ -375,36 +383,36 @@ static int mt352_get_parameters(struct dvb_frontend* fe,
 	switch ( (tps >> 10) & 7)
 	{
 		case 0:
-			op->hierarchy_information = HIERARCHY_NONE;
+			op->hierarchy = HIERARCHY_NONE;
 			break;
 		case 1:
-			op->hierarchy_information = HIERARCHY_1;
+			op->hierarchy = HIERARCHY_1;
 			break;
 		case 2:
-			op->hierarchy_information = HIERARCHY_2;
+			op->hierarchy = HIERARCHY_2;
 			break;
 		case 3:
-			op->hierarchy_information = HIERARCHY_4;
+			op->hierarchy = HIERARCHY_4;
 			break;
 		default:
-			op->hierarchy_information = HIERARCHY_AUTO;
+			op->hierarchy = HIERARCHY_AUTO;
 			break;
 	}
 
-	param->frequency = ( 500 * (div - IF_FREQUENCYx6) ) / 3 * 1000;
+	op->frequency = (500 * (div - IF_FREQUENCYx6)) / 3 * 1000;
 
 	if (trl == 0x72)
-		op->bandwidth = BANDWIDTH_8_MHZ;
+		op->bandwidth_hz = 8000000;
 	else if (trl == 0x64)
-		op->bandwidth = BANDWIDTH_7_MHZ;
+		op->bandwidth_hz = 7000000;
 	else
-		op->bandwidth = BANDWIDTH_6_MHZ;
+		op->bandwidth_hz = 6000000;
 
 
 	if (mt352_read_register(state, STATUS_2) & 0x02)
-		param->inversion = INVERSION_OFF;
+		op->inversion = INVERSION_OFF;
 	else
-		param->inversion = INVERSION_ON;
+		op->inversion = INVERSION_ON;
 
 	return 0;
 }
@@ -467,9 +475,11 @@ static int mt352_read_signal_strength(struct dvb_frontend* fe, u16* strength)
 {
 	struct mt352_state* state = fe->demodulator_priv;
 
-	u16 signal = ((mt352_read_register(state, AGC_GAIN_1) << 8) & 0x0f) |
-		      (mt352_read_register(state, AGC_GAIN_0));
+	/* align the 12 bit AGC gain with the most significant bits */
+	u16 signal = ((mt352_read_register(state, AGC_GAIN_1) & 0x0f) << 12) |
+		(mt352_read_register(state, AGC_GAIN_0) << 4);
 
+	/* inverse of gain is signal strength */
 	*strength = ~signal;
 	return 0;
 }
@@ -509,14 +519,14 @@ static int mt352_init(struct dvb_frontend* fe)
 
 	static u8 mt352_reset_attach [] = { RESET, 0xC0 };
 
-	dprintk("%s: hello\n",__FUNCTION__);
+	dprintk("%s: hello\n",__func__);
 
 	if ((mt352_read_register(state, CLOCK_CTL) & 0x10) == 0 ||
 	    (mt352_read_register(state, CONFIG) & 0x20) == 0) {
 
 		/* Do a "hard" reset */
-		mt352_write(fe, mt352_reset_attach, sizeof(mt352_reset_attach));
-		return state->config->demod_init(fe);
+		_mt352_write(fe, mt352_reset_attach, sizeof(mt352_reset_attach));
+		return state->config.demod_init(fe);
 	}
 
 	return 0;
@@ -536,20 +546,18 @@ struct dvb_frontend* mt352_attach(const struct mt352_config* config,
 	struct mt352_state* state = NULL;
 
 	/* allocate memory for the internal state */
-	state = kmalloc(sizeof(struct mt352_state), GFP_KERNEL);
+	state = kzalloc(sizeof(struct mt352_state), GFP_KERNEL);
 	if (state == NULL) goto error;
-	memset(state,0,sizeof(*state));
 
 	/* setup the state */
-	state->config = config;
 	state->i2c = i2c;
-	memcpy(&state->ops, &mt352_ops, sizeof(struct dvb_frontend_ops));
+	memcpy(&state->config,config,sizeof(struct mt352_config));
 
 	/* check if the demod is there */
 	if (mt352_read_register(state, CHIP_ID) != ID_MT352) goto error;
 
 	/* create dvb_frontend */
-	state->frontend.ops = &state->ops;
+	memcpy(&state->frontend.ops, &mt352_ops, sizeof(struct dvb_frontend_ops));
 	state->frontend.demodulator_priv = state;
 	return &state->frontend;
 
@@ -559,10 +567,9 @@ error:
 }
 
 static struct dvb_frontend_ops mt352_ops = {
-
+	.delsys = { SYS_DVBT },
 	.info = {
 		.name			= "Zarlink MT352 DVB-T",
-		.type			= FE_OFDM,
 		.frequency_min		= 174000000,
 		.frequency_max		= 862000000,
 		.frequency_stepsize	= 166667,
@@ -580,6 +587,7 @@ static struct dvb_frontend_ops mt352_ops = {
 
 	.init = mt352_init,
 	.sleep = mt352_sleep,
+	.write = _mt352_write,
 
 	.set_frontend = mt352_set_parameters,
 	.get_frontend = mt352_get_parameters,
@@ -600,11 +608,3 @@ MODULE_AUTHOR("Holger Waechtler, Daniel Mack, Antonio Mancuso");
 MODULE_LICENSE("GPL");
 
 EXPORT_SYMBOL(mt352_attach);
-EXPORT_SYMBOL(mt352_write);
-EXPORT_SYMBOL(mt352_read);
-/*
- * Local variables:
- * c-basic-offset: 8
- * compile-command: "make DVB=1"
- * End:
- */

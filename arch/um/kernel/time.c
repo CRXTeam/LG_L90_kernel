@@ -1,167 +1,115 @@
-/* 
- * Copyright (C) 2000, 2001, 2002 Jeff Dike (jdike@karaya.com)
+/*
+ * Copyright (C) 2000 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  * Licensed under the GPL
  */
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <time.h>
-#include <sys/time.h>
-#include <signal.h>
-#include <errno.h>
-#include "user_util.h"
+#include <linux/clockchips.h>
+#include <linux/init.h>
+#include <linux/interrupt.h>
+#include <linux/jiffies.h>
+#include <linux/threads.h>
+#include <asm/irq.h>
+#include <asm/param.h>
 #include "kern_util.h"
-#include "user.h"
-#include "process.h"
-#include "signal_user.h"
-#include "time_user.h"
-#include "kern_constants.h"
+#include "os.h"
 
-/* XXX This really needs to be declared and initialized in a kernel file since
- * it's in <linux/time.h>
- */
-extern struct timespec wall_to_monotonic;
-
-extern struct timeval xtime;
-
-struct timeval local_offset = { 0, 0 };
-
-void timer(void)
-{
-	gettimeofday(&xtime, NULL);
-	timeradd(&xtime, &local_offset, &xtime);
-}
-
-void set_interval(int timer_type)
-{
-	int usec = 1000000/hz();
-	struct itimerval interval = ((struct itimerval) { { 0, usec },
-							  { 0, usec } });
-
-	if(setitimer(timer_type, &interval, NULL) == -1)
-		panic("setitimer failed - errno = %d\n", errno);
-}
-
-void enable_timer(void)
-{
-	int usec = 1000000/hz();
-	struct itimerval enable = ((struct itimerval) { { 0, usec },
-							{ 0, usec }});
-	if(setitimer(ITIMER_VIRTUAL, &enable, NULL))
-		printk("enable_timer - setitimer failed, errno = %d\n",
-		       errno);
-}
-
-void disable_timer(void)
-{
-	struct itimerval disable = ((struct itimerval) { { 0, 0 }, { 0, 0 }});
-	if((setitimer(ITIMER_VIRTUAL, &disable, NULL) < 0) ||
-	   (setitimer(ITIMER_REAL, &disable, NULL) < 0))
-		printk("disnable_timer - setitimer failed, errno = %d\n",
-		       errno);
-	/* If there are signals already queued, after unblocking ignore them */
-	set_handler(SIGALRM, SIG_IGN, 0, -1);
-	set_handler(SIGVTALRM, SIG_IGN, 0, -1);
-}
-
-void switch_timers(int to_real)
-{
-	struct itimerval disable = ((struct itimerval) { { 0, 0 }, { 0, 0 }});
-	struct itimerval enable = ((struct itimerval) { { 0, 1000000/hz() },
-							{ 0, 1000000/hz() }});
-	int old, new;
-
-	if(to_real){
-		old = ITIMER_VIRTUAL;
-		new = ITIMER_REAL;
-	}
-	else {
-		old = ITIMER_REAL;
-		new = ITIMER_VIRTUAL;
-	}
-
-	if((setitimer(old, &disable, NULL) < 0) ||
-	   (setitimer(new, &enable, NULL)))
-		printk("switch_timers - setitimer failed, errno = %d\n",
-		       errno);
-}
-
-void uml_idle_timer(void)
-{
-	if(signal(SIGVTALRM, SIG_IGN) == SIG_ERR)
-		panic("Couldn't unset SIGVTALRM handler");
-	
-	set_handler(SIGALRM, (__sighandler_t) alarm_handler, 
-		    SA_RESTART, SIGUSR1, SIGIO, SIGWINCH, SIGVTALRM, -1);
-	set_interval(ITIMER_REAL);
-}
-
-extern int do_posix_clock_monotonic_gettime(struct timespec *tp);
-
-void time_init(void)
-{
-	struct timespec now;
-
-	if(signal(SIGVTALRM, boot_timer_handler) == SIG_ERR)
-		panic("Couldn't set SIGVTALRM handler");
-	set_interval(ITIMER_VIRTUAL);
-
-	do_posix_clock_monotonic_gettime(&now);
-	wall_to_monotonic.tv_sec = -now.tv_sec;
-	wall_to_monotonic.tv_nsec = -now.tv_nsec;
-}
-
-/* Declared in linux/time.h, which can't be included here */
-extern void clock_was_set(void);
-
-void do_gettimeofday(struct timeval *tv)
+void timer_handler(int sig, struct uml_pt_regs *regs)
 {
 	unsigned long flags;
 
-	flags = time_lock();
-	gettimeofday(tv, NULL);
-	timeradd(tv, &local_offset, tv);
-	time_unlock(flags);
-	clock_was_set();
+	local_irq_save(flags);
+	do_IRQ(TIMER_IRQ, regs);
+	local_irq_restore(flags);
 }
 
-int do_settimeofday(struct timespec *tv)
+static void itimer_set_mode(enum clock_event_mode mode,
+			    struct clock_event_device *evt)
 {
-	struct timeval now;
-	unsigned long flags;
-	struct timeval tv_in;
+	switch (mode) {
+	case CLOCK_EVT_MODE_PERIODIC:
+		set_interval();
+		break;
 
-	if ((unsigned long) tv->tv_nsec >= UM_NSEC_PER_SEC)
-		return -EINVAL;
+	case CLOCK_EVT_MODE_SHUTDOWN:
+	case CLOCK_EVT_MODE_UNUSED:
+	case CLOCK_EVT_MODE_ONESHOT:
+		disable_timer();
+		break;
 
-	tv_in.tv_sec = tv->tv_sec;
-	tv_in.tv_usec = tv->tv_nsec / 1000;
-
-	flags = time_lock();
-	gettimeofday(&now, NULL);
-	timersub(&tv_in, &now, &local_offset);
-	time_unlock(flags);
-
-	return(0);
+	case CLOCK_EVT_MODE_RESUME:
+		break;
+	}
 }
 
-void idle_sleep(int secs)
+static int itimer_next_event(unsigned long delta,
+			     struct clock_event_device *evt)
 {
-	struct timespec ts;
-
-	ts.tv_sec = secs;
-	ts.tv_nsec = 0;
-	nanosleep(&ts, NULL);
+	return timer_one_shot(delta + 1);
 }
 
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-file-style: "linux"
- * End:
- */
+static struct clock_event_device itimer_clockevent = {
+	.name		= "itimer",
+	.rating		= 250,
+	.cpumask	= cpu_all_mask,
+	.features	= CLOCK_EVT_FEAT_PERIODIC | CLOCK_EVT_FEAT_ONESHOT,
+	.set_mode	= itimer_set_mode,
+	.set_next_event = itimer_next_event,
+	.shift		= 32,
+	.irq		= 0,
+};
+
+static irqreturn_t um_timer(int irq, void *dev)
+{
+	(*itimer_clockevent.event_handler)(&itimer_clockevent);
+
+	return IRQ_HANDLED;
+}
+
+static cycle_t itimer_read(struct clocksource *cs)
+{
+	return os_nsecs() / 1000;
+}
+
+static struct clocksource itimer_clocksource = {
+	.name		= "itimer",
+	.rating		= 300,
+	.read		= itimer_read,
+	.mask		= CLOCKSOURCE_MASK(64),
+	.flags		= CLOCK_SOURCE_IS_CONTINUOUS,
+};
+
+static void __init setup_itimer(void)
+{
+	int err;
+
+	err = request_irq(TIMER_IRQ, um_timer, 0, "timer", NULL);
+	if (err != 0)
+		printk(KERN_ERR "register_timer : request_irq failed - "
+		       "errno = %d\n", -err);
+
+	itimer_clockevent.mult = div_sc(HZ, NSEC_PER_SEC, 32);
+	itimer_clockevent.max_delta_ns =
+		clockevent_delta2ns(60 * HZ, &itimer_clockevent);
+	itimer_clockevent.min_delta_ns =
+		clockevent_delta2ns(1, &itimer_clockevent);
+	err = clocksource_register_hz(&itimer_clocksource, USEC_PER_SEC);
+	if (err) {
+		printk(KERN_ERR "clocksource_register_hz returned %d\n", err);
+		return;
+	}
+	clockevents_register_device(&itimer_clockevent);
+}
+
+void read_persistent_clock(struct timespec *ts)
+{
+	long long nsecs = os_nsecs();
+
+	set_normalized_timespec(ts, nsecs / NSEC_PER_SEC,
+				nsecs % NSEC_PER_SEC);
+}
+
+void __init time_init(void)
+{
+	timer_init();
+	late_time_init = setup_itimer;
+}

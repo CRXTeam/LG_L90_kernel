@@ -7,7 +7,7 @@ Date: 041221
 
 Enable CONFIG_NET_PKTGEN to compile and build pktgen.o either in kernel
 or as module. Module is preferred. insmod pktgen if needed. Once running
-pktgen creates a thread on each CPU where each thread has affinty it's CPU.
+pktgen creates a thread on each CPU where each thread has affinity to its CPU.
 Monitoring and controlling is done via /proc. Easiest to select a suitable 
 a sample script and configure.
 
@@ -18,7 +18,7 @@ root       129  0.3  0.0     0    0 ?        SW    2003 523:20 [pktgen/0]
 root       130  0.3  0.0     0    0 ?        SW    2003 509:50 [pktgen/1]
 
 
-For montoring and control pktgen creates:
+For monitoring and control pktgen creates:
 	/proc/net/pktgen/pgctrl
 	/proc/net/pktgen/kpktgend_X
         /proc/net/pktgen/ethX
@@ -32,7 +32,7 @@ Running:
 Stopped: eth1 
 Result: OK: max_before_softirq=10000
 
-Most important the devices assigend to thread. Note! A device can only belong 
+Most important the devices assigned to thread. Note! A device can only belong 
 to one thread.
 
 
@@ -63,8 +63,8 @@ Current:
 Result: OK: 13101142(c12220741+d880401) usec, 10000000 (60byte,0frags)
   763292pps 390Mb/sec (390805504bps) errors: 39664
 
-Confguring threads and devices
-==============================
+Configuring threads and devices
+================================
 This is done via the /proc interface easiest done via pgset in the scripts
 
 Examples:
@@ -74,7 +74,7 @@ Examples:
  pgset "pkt_size 9014"   sets packet size to 9014
  pgset "frags 5"         packet will consist of 5 fragments
  pgset "count 200000"    sets number of packets to send, set to zero
-                         for continious sends untill explicitl stopped.
+                         for continuous sends until explicitly stopped.
 
  pgset "delay 5000"      adds delay to hard_start_xmit(). nanoseconds
 
@@ -90,6 +90,11 @@ Examples:
  pgset "dstmac 00:00:00:00:00:00"    sets MAC destination address
  pgset "srcmac 00:00:00:00:00:00"    sets MAC source address
 
+ pgset "queue_map_min 0" Sets the min value of tx queue interval
+ pgset "queue_map_max 7" Sets the max value of tx queue interval, for multiqueue devices
+                         To select queue 1 of a given device,
+                         use queue_map_min=1 and queue_map_max=1
+
  pgset "src_mac_count 1" Sets the number of MACs we'll range through.  
                          The 'minimum' MAC is what you set with srcmac.
 
@@ -100,6 +105,10 @@ Examples:
                          are: IPSRC_RND #IP Source is random (between min/max),
                               IPDST_RND, UDPSRC_RND,
                               UDPDST_RND, MACSRC_RND, MACDST_RND 
+                              MPLS_RND, VID_RND, SVID_RND
+                              QUEUE_MAP_RND # queue map random
+                              QUEUE_MAP_CPU # queue map mirrors smp_processor_id()
+
 
  pgset "udp_src_min 9"   set UDP source port min, If < udp_src_max, then
                          cycle through the port range.
@@ -109,13 +118,46 @@ Examples:
                          cycle through the port range.
  pgset "udp_dst_max 9"   set UDP destination port max.
 
+ pgset "mpls 0001000a,0002000a,0000000a" set MPLS labels (in this example
+                                         outer label=16,middle label=32,
+					 inner label=0 (IPv4 NULL)) Note that
+					 there must be no spaces between the
+					 arguments. Leading zeros are required.
+					 Do not set the bottom of stack bit,
+					 that's done automatically. If you do
+					 set the bottom of stack bit, that
+					 indicates that you want to randomly
+					 generate that address and the flag
+					 MPLS_RND will be turned on. You
+					 can have any mix of random and fixed
+					 labels in the label stack.
+
+ pgset "mpls 0"		  turn off mpls (or any invalid argument works too!)
+
+ pgset "vlan_id 77"       set VLAN ID 0-4095
+ pgset "vlan_p 3"         set priority bit 0-7 (default 0)
+ pgset "vlan_cfi 0"       set canonical format identifier 0-1 (default 0)
+
+ pgset "svlan_id 22"      set SVLAN ID 0-4095
+ pgset "svlan_p 3"        set priority bit 0-7 (default 0)
+ pgset "svlan_cfi 0"      set canonical format identifier 0-1 (default 0)
+
+ pgset "vlan_id 9999"     > 4095 remove vlan and svlan tags
+ pgset "svlan 9999"       > 4095 remove svlan tag
+
+
+ pgset "tos XX"           set former IPv4 TOS field (e.g. "tos 28" for AF11 no ECN, default 00)
+ pgset "traffic_class XX" set former IPv6 TRAFFIC CLASS (e.g. "traffic_class B8" for EF no ECN, default 00)
+
  pgset stop    	          aborts injection. Also, ^C aborts generator.
 
+ pgset "rate 300M"        set rate to 300 Mb/s
+ pgset "ratep 1000000"    set rate to 1Mpps
 
 Example scripts
 ===============
 
-A collection of small tutorial scripts for pktgen is in expamples dir.
+A collection of small tutorial scripts for pktgen is in examples dir.
 
 pktgen.conf-1-1                  # 1 CPU 1 dev 
 pktgen.conf-1-2                  # 1 CPU 2 dev
@@ -167,6 +209,8 @@ pkt_size
 min_pkt_size
 max_pkt_size
 
+mpls
+
 udp_src_min
 udp_src_max
 
@@ -198,6 +242,9 @@ src6
 
 flows
 flowlen
+
+rate
+ratep
 
 References:
 ftp://robur.slu.se/pub/Linux/net-development/pktgen-testing/

@@ -18,6 +18,8 @@
 #include <linux/highmem.h>
 #include <linux/bitops.h>
 #include <linux/nodemask.h>
+#include <linux/pfn.h>
+#include <linux/gfp.h>
 #include <asm/types.h>
 #include <asm/processor.h>
 #include <asm/page.h>
@@ -32,41 +34,6 @@ extern char _text, _etext, _edata;
 extern char __init_begin, __init_end;
 
 pgd_t swapper_pg_dir[1024];
-
-DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
-
-void show_mem(void)
-{
-	int total = 0, reserved = 0;
-	int shared = 0, cached = 0;
-	int highmem = 0;
-	struct page *page;
-	pg_data_t *pgdat;
-	unsigned long i;
-
-	printk("Mem-info:\n");
-	show_free_areas();
-	printk("Free swap:       %6ldkB\n",nr_swap_pages<<(PAGE_SHIFT-10));
-	for_each_pgdat(pgdat) {
-		for (i = 0; i < pgdat->node_spanned_pages; ++i) {
-			page = pgdat->node_mem_map + i;
-			total++;
-			if (PageHighMem(page))
-				highmem++;
-			if (PageReserved(page))
-				reserved++;
-			else if (PageSwapCache(page))
-				cached++;
-			else if (page_count(page))
-				shared += page_count(page) - 1;
-		}
-	}
-	printk("%d pages of RAM\n", total);
-	printk("%d pages of HIGHMEM\n",highmem);
-	printk("%d reserved pages\n",reserved);
-	printk("%d pages shared\n",shared);
-	printk("%d pages swap cached\n",cached);
-}
 
 /*
  * Cache of MMU context last used.
@@ -89,14 +56,13 @@ void free_initrd_mem(unsigned long, unsigned long);
 #endif
 
 /* It'd be good if these lines were in the standard header file. */
-#define START_PFN(nid)	\
-	(NODE_DATA(nid)->bdata->node_boot_start >> PAGE_SHIFT)
+#define START_PFN(nid)		(NODE_DATA(nid)->bdata->node_min_pfn)
 #define MAX_LOW_PFN(nid)	(NODE_DATA(nid)->bdata->node_low_pfn)
 
 #ifndef CONFIG_DISCONTIGMEM
 unsigned long __init zone_sizes_init(void)
 {
-	unsigned long  zones_size[MAX_NR_ZONES] = {0, 0, 0};
+	unsigned long  zones_size[MAX_NR_ZONES] = {0, };
 	unsigned long  max_dma;
 	unsigned long  low;
 	unsigned long  start_pfn;
@@ -119,7 +85,7 @@ unsigned long __init zone_sizes_init(void)
 	start_pfn = __MEMORY_START >> PAGE_SHIFT;
 #endif /* CONFIG_MMU */
 
-	free_area_init_node(0, NODE_DATA(0), zones_size, start_pfn, 0);
+	free_area_init_node(0, zones_size, start_pfn, 0);
 
 	return 0;
 }
@@ -150,10 +116,14 @@ int __init reservedpages_count(void)
 	int reservedpages, nid, i;
 
 	reservedpages = 0;
-	for_each_online_node(nid)
+	for_each_online_node(nid) {
+		unsigned long flags;
+		pgdat_resize_lock(NODE_DATA(nid), &flags);
 		for (i = 0 ; i < MAX_LOW_PFN(nid) - START_PFN(nid) ; i++)
-			if (PageReserved(NODE_DATA(nid)->node_mem_map + i))
+			if (PageReserved(nid_page_nr(nid, i)))
 				reservedpages++;
+		pgdat_resize_unlock(NODE_DATA(nid), &flags);
+	}
 
 	return reservedpages;
 }
@@ -200,7 +170,7 @@ void __init mem_init(void)
 
 	printk(KERN_INFO "Memory: %luk/%luk available (%dk kernel code, "
 		"%dk reserved, %dk data, %dk init)\n",
-		(unsigned long) nr_free_pages() << (PAGE_SHIFT-10),
+		nr_free_pages() << (PAGE_SHIFT-10),
 		num_physpages << (PAGE_SHIFT-10),
 		codesize >> 10,
 		reservedpages << (PAGE_SHIFT-10),
@@ -219,7 +189,7 @@ void free_initmem(void)
 	addr = (unsigned long)(&__init_begin);
 	for (; addr < (unsigned long)(&__init_end); addr += PAGE_SIZE) {
 		ClearPageReserved(virt_to_page(addr));
-		set_page_count(virt_to_page(addr), 1);
+		init_page_count(virt_to_page(addr));
 		free_page(addr);
 		totalram_pages++;
 	}
@@ -237,11 +207,10 @@ void free_initrd_mem(unsigned long start, unsigned long end)
 	unsigned long p;
 	for (p = start; p < end; p += PAGE_SIZE) {
 		ClearPageReserved(virt_to_page(p));
-		set_page_count(virt_to_page(p), 1);
+		init_page_count(virt_to_page(p));
 		free_page(p);
 		totalram_pages++;
 	}
 	printk (KERN_INFO "Freeing initrd memory: %ldk freed\n", (end - start) >> 10);
 }
 #endif
-

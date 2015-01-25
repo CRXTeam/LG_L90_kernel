@@ -9,7 +9,6 @@
  *  more details.
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -18,8 +17,11 @@
 #include <linux/fb.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
+#include <linux/platform_device.h>
+
 #include <asm/io.h>
 #include <asm/mtrr.h>
+#include <asm/visws/sgivw.h>
 
 #define INCLUDE_TIMING_TABLE_DATA
 #define DBE_REG_BASE par->regs
@@ -40,16 +42,12 @@ struct sgivw_par {
  *  The default can be overridden if the driver is compiled as a module
  */
 
-/* set by arch/i386/kernel/setup.c */
-extern unsigned long sgivwfb_mem_phys;
-extern unsigned long sgivwfb_mem_size;
-
 static int ypan = 0;
 static int ywrap = 0;
 
 static int flatpanel_id = -1;
 
-static struct fb_fix_screeninfo sgivwfb_fix __initdata = {
+static struct fb_fix_screeninfo sgivwfb_fix __devinitdata = {
 	.id		= "SGI Vis WS FB",
 	.type		= FB_TYPE_PACKED_PIXELS,
         .visual		= FB_VISUAL_PSEUDOCOLOR,
@@ -59,7 +57,7 @@ static struct fb_fix_screeninfo sgivwfb_fix __initdata = {
 	.line_length	= 640,
 };
 
-static struct fb_var_screeninfo sgivwfb_var __initdata = {
+static struct fb_var_screeninfo sgivwfb_var __devinitdata = {
 	/* 640x480, 8 bpp */
 	.xres		= 640,
 	.yres		= 480,
@@ -81,7 +79,7 @@ static struct fb_var_screeninfo sgivwfb_var __initdata = {
 	.vmode		= FB_VMODE_NONINTERLACED
 };
 
-static struct fb_var_screeninfo sgivwfb_var1600sw __initdata = {
+static struct fb_var_screeninfo sgivwfb_var1600sw __devinitdata = {
 	/* 1600x1024, 8 bpp */
 	.xres		= 1600,
 	.yres		= 1024,
@@ -113,7 +111,7 @@ static int sgivwfb_set_par(struct fb_info *info);
 static int sgivwfb_setcolreg(u_int regno, u_int red, u_int green,
 			     u_int blue, u_int transp,
 			     struct fb_info *info);
-static int sgivwfb_mmap(struct fb_info *info, struct file *file,
+static int sgivwfb_mmap(struct fb_info *info,
 			struct vm_area_struct *vma);
 
 static struct fb_ops sgivwfb_ops = {
@@ -124,7 +122,6 @@ static struct fb_ops sgivwfb_ops = {
 	.fb_fillrect	= cfb_fillrect,
 	.fb_copyarea	= cfb_copyarea,
 	.fb_imageblit	= cfb_imageblit,
-	.fb_cursor	= soft_cursor,
 	.fb_mmap	= sgivwfb_mmap,
 };
 
@@ -263,13 +260,13 @@ static int sgivwfb_check_var(struct fb_var_screeninfo *var,
 	var->grayscale = 0;	/* No grayscale for now */
 
 	/* determine valid resolution and timing */
-	for (min_mode = 0; min_mode < DBE_VT_SIZE; min_mode++) {
+	for (min_mode = 0; min_mode < ARRAY_SIZE(dbeVTimings); min_mode++) {
 		if (dbeVTimings[min_mode].width >= var->xres &&
 		    dbeVTimings[min_mode].height >= var->yres)
 			break;
 	}
 
-	if (min_mode == DBE_VT_SIZE)
+	if (min_mode == ARRAY_SIZE(dbeVTimings))
 		return -EINVAL;	/* Resolution to high */
 
 	/* XXX FIXME - should try to pick best refresh rate */
@@ -705,7 +702,7 @@ static int sgivwfb_setcolreg(u_int regno, u_int red, u_int green,
 	return 0;
 }
 
-static int sgivwfb_mmap(struct fb_info *info, struct file *file,
+static int sgivwfb_mmap(struct fb_info *info,
 			struct vm_area_struct *vma)
 {
 	unsigned long size = vma->vm_end - vma->vm_start;
@@ -722,7 +719,6 @@ static int sgivwfb_mmap(struct fb_info *info, struct file *file,
 	if (remap_pfn_range(vma, vma->vm_start, offset >> PAGE_SHIFT,
 						size, vma->vm_page_prot))
 		return -EAGAIN;
-	vma->vm_file = file;
 	printk(KERN_DEBUG "sgivwfb: mmap framebuffer P(%lx)->V(%lx)\n",
 	       offset, vma->vm_start);
 	return 0;
@@ -749,18 +745,13 @@ int __init sgivwfb_setup(char *options)
 /*
  *  Initialisation
  */
-static void sgivwfb_release(struct device *device)
+static int __devinit sgivwfb_probe(struct platform_device *dev)
 {
-}
-
-static int __init sgivwfb_probe(struct device *device)
-{
-	struct platform_device *dev = to_platform_device(device);
 	struct sgivw_par *par;
 	struct fb_info *info;
 	char *monitor;
 
-	info = framebuffer_alloc(sizeof(struct sgivw_par) + sizeof(u32) * 256, &dev->dev);
+	info = framebuffer_alloc(sizeof(struct sgivw_par) + sizeof(u32) * 16, &dev->dev);
 	if (!info)
 		return -ENOMEM;
 	par = info->par;
@@ -816,7 +807,7 @@ static int __init sgivwfb_probe(struct device *device)
 		goto fail_register_framebuffer;
 	}
 
-	dev_set_drvdata(&dev->dev, info);
+	platform_set_drvdata(dev, info);
 
 	printk(KERN_INFO "fb%d: SGI DBE frame buffer device, using %ldK of video memory at %#lx\n",      
 		info->node, sgivwfb_mem_size >> 10, sgivwfb_mem_phys);
@@ -834,9 +825,9 @@ fail_ioremap_regs:
 	return -ENXIO;
 }
 
-static int sgivwfb_remove(struct device *device)
+static int __devexit sgivwfb_remove(struct platform_device *dev)
 {
-	struct fb_info *info = dev_get_drvdata(device);
+	struct fb_info *info = platform_get_drvdata(dev);
 
 	if (info) {
 		struct sgivw_par *par = info->par;
@@ -846,24 +837,21 @@ static int sgivwfb_remove(struct device *device)
 		iounmap(par->regs);
 		iounmap(info->screen_base);
 		release_mem_region(DBE_REG_PHYS, DBE_REG_SIZE);
+		fb_dealloc_cmap(&info->cmap);
+		framebuffer_release(info);
 	}
 	return 0;
 }
 
-static struct device_driver sgivwfb_driver = {
-	.name	= "sgivwfb",
-	.bus	= &platform_bus_type,
+static struct platform_driver sgivwfb_driver = {
 	.probe	= sgivwfb_probe,
-	.remove	= sgivwfb_remove,
+	.remove	= __devexit_p(sgivwfb_remove),
+	.driver	= {
+		.name	= "sgivwfb",
+	},
 };
 
-static struct platform_device sgivwfb_device = {
-	.name	= "sgivwfb",
-	.id	= 0,
-	.dev	= {
-		.release = sgivwfb_release,
-	}
-};
+static struct platform_device *sgivwfb_device;
 
 int __init sgivwfb_init(void)
 {
@@ -876,11 +864,17 @@ int __init sgivwfb_init(void)
 		return -ENODEV;
 	sgivwfb_setup(option);
 #endif
-	ret = driver_register(&sgivwfb_driver);
+	ret = platform_driver_register(&sgivwfb_driver);
 	if (!ret) {
-		ret = platform_device_register(&sgivwfb_device);
-		if (ret)
-			driver_unregister(&sgivwfb_driver);
+		sgivwfb_device = platform_device_alloc("sgivwfb", 0);
+		if (sgivwfb_device) {
+			ret = platform_device_add(sgivwfb_device);
+		} else
+			ret = -ENOMEM;
+		if (ret) {
+			platform_driver_unregister(&sgivwfb_driver);
+			platform_device_put(sgivwfb_device);
+		}
 	}
 	return ret;
 }
@@ -892,8 +886,8 @@ MODULE_LICENSE("GPL");
 
 static void __exit sgivwfb_exit(void)
 {
-	platform_device_unregister(&sgivwfb_device);
-	driver_unregister(&sgivwfb_driver);
+	platform_device_unregister(sgivwfb_device);
+	platform_driver_unregister(&sgivwfb_driver);
 }
 
 module_exit(sgivwfb_exit);

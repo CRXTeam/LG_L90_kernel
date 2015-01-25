@@ -135,7 +135,7 @@ static const config configuration_table[10] = {
 
 /* ===========================================================================
  * Update a hash value with the given input byte
- * IN  assertion: all calls to to UPDATE_HASH are made with consecutive
+ * IN  assertion: all calls to UPDATE_HASH are made with consecutive
  *    input characters, so that a running hash key can be computed from the
  *    previous key instead of complete recalculation each time.
  */
@@ -146,7 +146,7 @@ static const config configuration_table[10] = {
  * Insert string str in the dictionary and set match_head to the previous head
  * of the hash chain (the most recent string with same hash key). Return
  * the previous length of the hash chain.
- * IN  assertion: all calls to to INSERT_STRING are made with consecutive
+ * IN  assertion: all calls to INSERT_STRING are made with consecutive
  *    input characters and the first MIN_MATCH bytes of str are valid
  *    (except for the last MIN_MATCH-1 bytes of the input file).
  */
@@ -164,45 +164,25 @@ static const config configuration_table[10] = {
     memset((char *)s->head, 0, (unsigned)(s->hash_size-1)*sizeof(*s->head));
 
 /* ========================================================================= */
-int zlib_deflateInit_(
-	z_streamp strm,
-	int level,
-	const char *version,
-	int stream_size
-)
-{
-    return zlib_deflateInit2_(strm, level, Z_DEFLATED, MAX_WBITS,
-			      DEF_MEM_LEVEL,
-			      Z_DEFAULT_STRATEGY, version, stream_size);
-    /* To do: ignore strm->next_in if we use it as window */
-}
-
-/* ========================================================================= */
-int zlib_deflateInit2_(
+int zlib_deflateInit2(
 	z_streamp strm,
 	int  level,
 	int  method,
 	int  windowBits,
 	int  memLevel,
-	int  strategy,
-	const char *version,
-	int stream_size
+	int  strategy
 )
 {
     deflate_state *s;
     int noheader = 0;
-    static char* my_version = ZLIB_VERSION;
     deflate_workspace *mem;
+    char *next;
 
     ush *overlay;
     /* We overlay pending_buf and d_buf+l_buf. This works since the average
      * output size for (length,distance) codes is <= 24 bits.
      */
 
-    if (version == NULL || version[0] != my_version[0] ||
-        stream_size != sizeof(z_stream)) {
-	return Z_VERSION_ERROR;
-    }
     if (strm == NULL) return Z_STREAM_ERROR;
 
     strm->msg = NULL;
@@ -220,6 +200,21 @@ int zlib_deflateInit2_(
 	strategy < 0 || strategy > Z_HUFFMAN_ONLY) {
         return Z_STREAM_ERROR;
     }
+
+    /*
+     * Direct the workspace's pointers to the chunks that were allocated
+     * along with the deflate_workspace struct.
+     */
+    next = (char *) mem;
+    next += sizeof(*mem);
+    mem->window_memory = (Byte *) next;
+    next += zlib_deflate_window_memsize(windowBits);
+    mem->prev_memory = (Pos *) next;
+    next += zlib_deflate_prev_memsize(windowBits);
+    mem->head_memory = (Pos *) next;
+    next += zlib_deflate_head_memsize(memLevel);
+    mem->overlay_memory = next;
+
     s = (deflate_state *) &(mem->deflate_memory);
     strm->state = (struct internal_state *)s;
     s->strm = strm;
@@ -255,6 +250,7 @@ int zlib_deflateInit2_(
 }
 
 /* ========================================================================= */
+#if 0
 int zlib_deflateSetDictionary(
 	z_streamp strm,
 	const Byte *dictionary,
@@ -297,6 +293,7 @@ int zlib_deflateSetDictionary(
     if (hash_head) hash_head = 0;  /* to make compiler happy */
     return Z_OK;
 }
+#endif  /*  0  */
 
 /* ========================================================================= */
 int zlib_deflateReset(
@@ -330,6 +327,7 @@ int zlib_deflateReset(
 }
 
 /* ========================================================================= */
+#if 0
 int zlib_deflateParams(
 	z_streamp strm,
 	int level,
@@ -365,6 +363,7 @@ int zlib_deflateParams(
     s->strategy = strategy;
     return err;
 }
+#endif  /*  0  */
 
 /* =========================================================================
  * Put a short in the pending buffer. The 16-bit value is put in MSB order.
@@ -572,6 +571,7 @@ int zlib_deflateEnd(
 /* =========================================================================
  * Copy the source state to the destination state.
  */
+#if 0
 int zlib_deflateCopy (
 	z_streamp dest,
 	z_streamp source
@@ -624,6 +624,7 @@ int zlib_deflateCopy (
     return Z_OK;
 #endif
 }
+#endif  /*  0  */
 
 /* ===========================================================================
  * Read a new buffer from the current input stream, update the adler32
@@ -1262,7 +1263,18 @@ static block_state deflate_slow(
     return flush == Z_FINISH ? finish_done : block_done;
 }
 
-int zlib_deflate_workspacesize(void)
+int zlib_deflate_workspacesize(int windowBits, int memLevel)
 {
-    return sizeof(deflate_workspace);
+    if (windowBits < 0) /* undocumented feature: suppress zlib header */
+        windowBits = -windowBits;
+
+    /* Since the return value is typically passed to vmalloc() unchecked... */
+    BUG_ON(memLevel < 1 || memLevel > MAX_MEM_LEVEL || windowBits < 9 ||
+							windowBits > 15);
+
+    return sizeof(deflate_workspace)
+        + zlib_deflate_window_memsize(windowBits)
+        + zlib_deflate_prev_memsize(windowBits)
+        + zlib_deflate_head_memsize(memLevel)
+        + zlib_deflate_overlay_memsize(memLevel);
 }

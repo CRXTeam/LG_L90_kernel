@@ -15,10 +15,10 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
  */
+#include <linux/cache.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
 #include <linux/errno.h>
@@ -28,24 +28,28 @@
 #include <linux/compat.h>
 #include <linux/bitops.h>
 
+#include <asm/abi.h>
 #include <asm/asm.h>
 #include <asm/cacheflush.h>
+#include <asm/compat-signal.h>
 #include <asm/sim.h>
 #include <asm/uaccess.h>
 #include <asm/ucontext.h>
-#include <asm/system.h>
 #include <asm/fpu.h>
 #include <asm/cpu-features.h>
+#include <asm/war.h>
+#include <asm/vdso.h>
 
 #include "signal-common.h"
 
 /*
  * Including <asm/unistd.h> would give use the 64-bit syscall numbers ...
  */
-#define __NR_N32_rt_sigreturn		6211
 #define __NR_N32_restart_syscall	6214
 
-#define _BLOCKABLE (~(sigmask(SIGKILL) | sigmask(SIGSTOP)))
+extern int setup_sigcontext(struct pt_regs *, struct sigcontext __user *);
+extern int restore_sigcontext(struct pt_regs *, struct sigcontext __user *);
+
 
 /* IRIX compatible stack_t  */
 typedef struct sigaltstack32 {
@@ -59,50 +63,73 @@ struct ucontextn32 {
 	s32                 uc_link;
 	stack32_t           uc_stack;
 	struct sigcontext   uc_mcontext;
-	sigset_t            uc_sigmask;   /* mask last for extensibility */
+	compat_sigset_t     uc_sigmask;   /* mask last for extensibility */
 };
-
-#if PLAT_TRAMPOLINE_STUFF_LINE
-#define __tramp __attribute__((aligned(PLAT_TRAMPOLINE_STUFF_LINE)))
-#else
-#define __tramp
-#endif
 
 struct rt_sigframe_n32 {
 	u32 rs_ass[4];			/* argument save space for o32 */
-	u32 rs_code[2] __tramp;		/* signal trampoline */
-	struct siginfo rs_info __tramp;
+	u32 rs_pad[2];			/* Was: signal trampoline */
+	struct compat_siginfo rs_info;
 	struct ucontextn32 rs_uc;
 };
 
-save_static_function(sysn32_rt_sigreturn);
-__attribute_used__ noinline static void
-_sysn32_rt_sigreturn(nabi_no_regargs struct pt_regs regs)
+extern void sigset_from_compat(sigset_t *set, compat_sigset_t *compat);
+
+asmlinkage int sysn32_rt_sigsuspend(nabi_no_regargs struct pt_regs regs)
 {
-	struct rt_sigframe_n32 *frame;
+	compat_sigset_t __user *unewset;
+	compat_sigset_t uset;
+	size_t sigsetsize;
+	sigset_t newset;
+
+	/* XXX Don't preclude handling different sized sigset_t's.  */
+	sigsetsize = regs.regs[5];
+	if (sigsetsize != sizeof(sigset_t))
+		return -EINVAL;
+
+	unewset = (compat_sigset_t __user *) regs.regs[4];
+	if (copy_from_user(&uset, unewset, sizeof(uset)))
+		return -EFAULT;
+	sigset_from_compat(&newset, &uset);
+	sigdelsetmask(&newset, ~_BLOCKABLE);
+
+	current->saved_sigmask = current->blocked;
+	set_current_blocked(&newset);
+
+	current->state = TASK_INTERRUPTIBLE;
+	schedule();
+	set_thread_flag(TIF_RESTORE_SIGMASK);
+	return -ERESTARTNOHAND;
+}
+
+asmlinkage void sysn32_rt_sigreturn(nabi_no_regargs struct pt_regs regs)
+{
+	struct rt_sigframe_n32 __user *frame;
+	mm_segment_t old_fs;
 	sigset_t set;
 	stack_t st;
 	s32 sp;
+	int sig;
 
-	frame = (struct rt_sigframe_n32 *) regs.regs[29];
+	frame = (struct rt_sigframe_n32 __user *) regs.regs[29];
 	if (!access_ok(VERIFY_READ, frame, sizeof(*frame)))
 		goto badframe;
-	if (__copy_from_user(&set, &frame->rs_uc.uc_sigmask, sizeof(set)))
+	if (__copy_conv_sigset_from_user(&set, &frame->rs_uc.uc_sigmask))
 		goto badframe;
 
 	sigdelsetmask(&set, ~_BLOCKABLE);
-	spin_lock_irq(&current->sighand->siglock);
-	current->blocked = set;
-	recalc_sigpending();
-	spin_unlock_irq(&current->sighand->siglock);
+	set_current_blocked(&set);
 
-	if (restore_sigcontext(&regs, &frame->rs_uc.uc_mcontext))
+	sig = restore_sigcontext(&regs, &frame->rs_uc.uc_mcontext);
+	if (sig < 0)
 		goto badframe;
+	else if (sig)
+		force_sig(sig, current);
 
 	/* The ucontext contains a stack32_t, so we must convert!  */
 	if (__get_user(sp, &frame->rs_uc.uc_stack.ss_sp))
 		goto badframe;
-	st.ss_size = (long) sp;
+	st.ss_sp = (void __user *)(long) sp;
 	if (__get_user(st.ss_size, &frame->rs_uc.uc_stack.ss_size))
 		goto badframe;
 	if (__get_user(st.ss_flags, &frame->rs_uc.uc_stack.ss_flags))
@@ -110,7 +137,11 @@ _sysn32_rt_sigreturn(nabi_no_regargs struct pt_regs regs)
 
 	/* It is more difficult to avoid calling this function than to
 	   call it and ignore errors.  */
-	do_sigaltstack(&st, NULL, regs.regs[29]);
+	old_fs = get_fs();
+	set_fs(KERNEL_DS);
+	do_sigaltstack((stack_t __user *)&st, NULL, regs.regs[29]);
+	set_fs(old_fs);
+
 
 	/*
 	 * Don't let your children do this ...
@@ -126,10 +157,10 @@ badframe:
 	force_sig(SIGSEGV, current);
 }
 
-void setup_rt_frame_n32(struct k_sigaction * ka,
+static int setup_rt_frame_n32(void *sig_return, struct k_sigaction *ka,
 	struct pt_regs *regs, int signr, sigset_t *set, siginfo_t *info)
 {
-	struct rt_sigframe_n32 *frame;
+	struct rt_sigframe_n32 __user *frame;
 	int err = 0;
 	s32 sp;
 
@@ -137,25 +168,13 @@ void setup_rt_frame_n32(struct k_sigaction * ka,
 	if (!access_ok(VERIFY_WRITE, frame, sizeof (*frame)))
 		goto give_sigsegv;
 
-	/*
-	 * Set up the return code ...
-	 *
-	 *         li      v0, __NR_rt_sigreturn
-	 *         syscall
-	 */
-	if (PLAT_TRAMPOLINE_STUFF_LINE)
-		__clear_user(frame->rs_code, PLAT_TRAMPOLINE_STUFF_LINE);
-	err |= __put_user(0x24020000 + __NR_N32_rt_sigreturn, frame->rs_code + 0);
-	err |= __put_user(0x0000000c                        , frame->rs_code + 1);
-	flush_cache_sigtramp((unsigned long) frame->rs_code);
-
 	/* Create siginfo.  */
-	err |= copy_siginfo_to_user(&frame->rs_info, info);
+	err |= copy_siginfo_to_user32(&frame->rs_info, info);
 
 	/* Create the ucontext.  */
 	err |= __put_user(0, &frame->rs_uc.uc_flags);
 	err |= __put_user(0, &frame->rs_uc.uc_link);
-        sp = (int) (long) current->sas_ss_sp;
+	sp = (int) (long) current->sas_ss_sp;
 	err |= __put_user(sp,
 	                  &frame->rs_uc.uc_stack.ss_sp);
 	err |= __put_user(sas_ss_flags(regs->regs[29]),
@@ -163,7 +182,7 @@ void setup_rt_frame_n32(struct k_sigaction * ka,
 	err |= __put_user(current->sas_ss_size,
 	                  &frame->rs_uc.uc_stack.ss_size);
 	err |= setup_sigcontext(regs, &frame->rs_uc.uc_mcontext);
-	err |= __copy_to_user(&frame->rs_uc.uc_sigmask, set, sizeof(*set));
+	err |= __copy_conv_sigset_to_user(&frame->rs_uc.uc_sigmask, set);
 
 	if (err)
 		goto give_sigsegv;
@@ -182,16 +201,23 @@ void setup_rt_frame_n32(struct k_sigaction * ka,
 	regs->regs[ 5] = (unsigned long) &frame->rs_info;
 	regs->regs[ 6] = (unsigned long) &frame->rs_uc;
 	regs->regs[29] = (unsigned long) frame;
-	regs->regs[31] = (unsigned long) frame->rs_code;
+	regs->regs[31] = (unsigned long) sig_return;
 	regs->cp0_epc = regs->regs[25] = (unsigned long) ka->sa.sa_handler;
 
-#if DEBUG_SIG
-	printk("SIG deliver (%s:%d): sp=0x%p pc=0x%lx ra=0x%p\n",
+	DEBUGP("SIG deliver (%s:%d): sp=0x%p pc=0x%lx ra=0x%lx\n",
 	       current->comm, current->pid,
 	       frame, regs->cp0_epc, regs->regs[31]);
-#endif
-	return;
+
+	return 0;
 
 give_sigsegv:
 	force_sigsegv(signr, current);
+	return -EFAULT;
 }
+
+struct mips_abi mips_abi_n32 = {
+	.setup_rt_frame	= setup_rt_frame_n32,
+	.rt_signal_return_offset =
+		offsetof(struct mips_vdso, n32_rt_signal_trampoline),
+	.restart	= __NR_N32_restart_syscall
+};

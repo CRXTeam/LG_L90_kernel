@@ -74,44 +74,71 @@ struct discovery_t;
 
 #define PF_BIT    0x10 /* Poll/final bit */
 
+/* Some IrLAP field lengths */
+/*
+ * Only baud rate triplet is 4 bytes (PV can be 2 bytes).
+ * All others params (7) are 3 bytes, so that's 7*3 + 1*4 bytes.
+ */
+#define IRLAP_NEGOCIATION_PARAMS_LEN 25
+#define IRLAP_DISCOVERY_INFO_LEN     32
+
+struct disc_frame {
+	__u8 caddr;          /* Connection address */
+	__u8 control;
+} __packed;
+
 struct xid_frame {
 	__u8  caddr; /* Connection address */
 	__u8  control;
 	__u8  ident; /* Should always be XID_FORMAT */ 
-	__u32 saddr; /* Source device address */
-	__u32 daddr; /* Destination device address */
+	__le32 saddr; /* Source device address */
+	__le32 daddr; /* Destination device address */
 	__u8  flags; /* Discovery flags */
 	__u8  slotnr;
 	__u8  version;
-} IRDA_PACK;
+} __packed;
 
 struct test_frame {
 	__u8 caddr;          /* Connection address */
 	__u8 control;
-	__u32 saddr;         /* Source device address */
-	__u32 daddr;         /* Destination device address */
-} IRDA_PACK;
+	__le32 saddr;         /* Source device address */
+	__le32 daddr;         /* Destination device address */
+} __packed;
 
 struct ua_frame {
 	__u8 caddr;
 	__u8 control;
+	__le32 saddr; /* Source device address */
+	__le32 daddr; /* Dest device address */
+} __packed;
 
-	__u32 saddr; /* Source device address */
-	__u32 daddr; /* Dest device address */
-} IRDA_PACK;
-	
+struct dm_frame {
+	__u8 caddr;          /* Connection address */
+	__u8 control;
+} __packed;
+
+struct rd_frame {
+	__u8 caddr;          /* Connection address */
+	__u8 control;
+} __packed;
+
+struct rr_frame {
+	__u8 caddr;          /* Connection address */
+	__u8 control;
+} __packed;
+
 struct i_frame {
 	__u8 caddr;
 	__u8 control;
-} IRDA_PACK;
+} __packed;
 
 struct snrm_frame {
 	__u8  caddr;
 	__u8  control;
-	__u32 saddr;
-	__u32 daddr;
+	__le32 saddr;
+	__le32 daddr;
 	__u8  ncaddr;
-} IRDA_PACK;
+} __packed;
 
 void irlap_queue_xmit(struct irlap_cb *self, struct sk_buff *skb);
 void irlap_send_discovery_xid_frame(struct irlap_cb *, int S, __u8 s, 

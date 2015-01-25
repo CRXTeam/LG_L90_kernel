@@ -13,12 +13,13 @@
 #ifndef _ULTRASTOR_H
 #define _ULTRASTOR_H
 
-static int ultrastor_detect(Scsi_Host_Template *);
-static const char *ultrastor_info(struct Scsi_Host * shpnt);
-static int ultrastor_queuecommand(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
-static int ultrastor_abort(Scsi_Cmnd *);
-static int ultrastor_host_reset(Scsi_Cmnd *);
-static int ultrastor_biosparam(struct scsi_device *, struct block_device *, sector_t, int *);
+static int ultrastor_detect(struct scsi_host_template *);
+static const char *ultrastor_info(struct Scsi_Host *shpnt);
+static int ultrastor_queuecommand(struct Scsi_Host *, struct scsi_cmnd *);
+static int ultrastor_abort(struct scsi_cmnd *);
+static int ultrastor_host_reset(struct scsi_cmnd *);
+static int ultrastor_biosparam(struct scsi_device *, struct block_device *,
+				sector_t, int *);
 
 
 #define ULTRASTOR_14F_MAX_SG 16

@@ -29,12 +29,10 @@
  */
 
 #include <linux/module.h>
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/tty.h>
 #include <linux/slab.h>
 #include <linux/fb.h>
 #include <linux/init.h>
@@ -42,19 +40,61 @@
 #include <linux/pci_ids.h>
 #include <linux/resource.h>
 #include <linux/unistd.h>
+#include <linux/console.h>
 
 #include <asm/io.h>
 #include <asm/div64.h>
-
-#ifdef CONFIG_MTRR
-#include <asm/mtrr.h>
-#endif 
-
 #include <asm/page.h>
 
 #include "i810_regs.h"
 #include "i810.h"
 #include "i810_main.h"
+
+/*
+ * voffset - framebuffer offset in MiB from aperture start address.  In order for
+ * the driver to work with X, we must try to use memory holes left untouched by X. The
+ * following table lists where X's different surfaces start at.
+ *
+ * ---------------------------------------------
+ * :                :  64 MiB     : 32 MiB      :
+ * ----------------------------------------------
+ * : FrontBuffer    :   0         :  0          :
+ * : DepthBuffer    :   48        :  16         :
+ * : BackBuffer     :   56        :  24         :
+ * ----------------------------------------------
+ *
+ * So for chipsets with 64 MiB Aperture sizes, 32 MiB for v_offset is okay, allowing up to
+ * 15 + 1 MiB of Framebuffer memory.  For 32 MiB Aperture sizes, a v_offset of 8 MiB should
+ * work, allowing 7 + 1 MiB of Framebuffer memory.
+ * Note, the size of the hole may change depending on how much memory you allocate to X,
+ * and how the memory is split up between these surfaces.
+ *
+ * Note: Anytime the DepthBuffer or FrontBuffer is overlapped, X would still run but with
+ * DRI disabled.  But if the Frontbuffer is overlapped, X will fail to load.
+ *
+ * Experiment with v_offset to find out which works best for you.
+ */
+static u32 v_offset_default __devinitdata; /* For 32 MiB Aper size, 8 should be the default */
+static u32 voffset          __devinitdata;
+
+static int i810fb_cursor(struct fb_info *info, struct fb_cursor *cursor);
+static int  __devinit i810fb_init_pci (struct pci_dev *dev,
+				       const struct pci_device_id *entry);
+static void __exit i810fb_remove_pci(struct pci_dev *dev);
+static int i810fb_resume(struct pci_dev *dev);
+static int i810fb_suspend(struct pci_dev *dev, pm_message_t state);
+
+/* Chipset Specific Functions */
+static int i810fb_set_par    (struct fb_info *info);
+static int i810fb_getcolreg  (u8 regno, u8 *red, u8 *green, u8 *blue,
+			      u8 *transp, struct fb_info *info);
+static int i810fb_setcolreg  (unsigned regno, unsigned red, unsigned green, unsigned blue,
+			      unsigned transp, struct fb_info *info);
+static int i810fb_pan_display(struct fb_var_screeninfo *var, struct fb_info *info);
+static int i810fb_blank      (int blank_mode, struct fb_info *info);
+
+/* Initialization */
+static void i810fb_release_resource       (struct fb_info *info, struct i810fb_par *par);
 
 /* PCI */
 static const char *i810_pci_list[] __devinitdata = {
@@ -92,20 +132,22 @@ static struct pci_driver i810fb_driver = {
 	.resume   =     i810fb_resume,
 };
 
-static int vram       __initdata = 4;
-static int bpp        __initdata = 8;
-static int mtrr       __initdata = 0;
-static int accel      __initdata = 0;
-static int hsync1     __initdata = 0;
-static int hsync2     __initdata = 0;
-static int vsync1     __initdata = 0;
-static int vsync2     __initdata = 0;
-static int xres       __initdata = 640;
-static int yres       __initdata = 480;
-static int vyres      __initdata = 0;
-static int sync       __initdata = 0;
-static int ext_vga    __initdata = 0;
-static int dcolor     __initdata = 0;
+static char *mode_option __devinitdata = NULL;
+static int vram       __devinitdata = 4;
+static int bpp        __devinitdata = 8;
+static bool mtrr      __devinitdata;
+static bool accel     __devinitdata;
+static int hsync1     __devinitdata;
+static int hsync2     __devinitdata;
+static int vsync1     __devinitdata;
+static int vsync2     __devinitdata;
+static int xres       __devinitdata;
+static int yres;
+static int vyres      __devinitdata;
+static bool sync      __devinitdata;
+static bool extvga    __devinitdata;
+static bool dcolor    __devinitdata;
+static bool ddc3      __devinitdata;
 
 /*------------------------------------------------------------*/
 
@@ -310,6 +352,8 @@ static void i810_hires(u8 __iomem *mmio)
 	val = i810_readb(CR_DATA_CGA, mmio);
 	i810_writeb(CR_INDEX_CGA, mmio, CR80);
 	i810_writeb(CR_DATA_CGA, mmio, val | 1);
+	/* Stop LCD displays from flickering */
+	i810_writel(MEM_MODE, mmio, i810_readl(MEM_MODE, mmio) | 4);
 }
 
 /**
@@ -773,7 +817,7 @@ static void i810_load_cursor_image(int width, int height, u8 *data,
 
 static void i810_load_cursor_colors(int fg, int bg, struct fb_info *info)
 {
-	struct i810fb_par *par = (struct i810fb_par *) info->par;
+	struct i810fb_par *par = info->par;
 	u8 __iomem *mmio = par->mmio_start_virtual;
 	u8 red, green, blue, trans, temp;
 
@@ -946,32 +990,26 @@ static void set_color_bitfields(struct fb_var_screeninfo *var)
 static int i810_check_params(struct fb_var_screeninfo *var, 
 			     struct fb_info *info)
 {
-	struct i810fb_par *par = (struct i810fb_par *) info->par;
-	int line_length, vidmem;
-	u32 xres, yres, vxres, vyres;
-
-	xres = var->xres;
-	yres = var->yres;
-	vxres = var->xres_virtual;
-	vyres = var->yres_virtual;
+	struct i810fb_par *par = info->par;
+	int line_length, vidmem, mode_valid = 0, retval = 0;
+	u32 vyres = var->yres_virtual, vxres = var->xres_virtual;
 
 	/*
 	 *  Memory limit
 	 */
-	line_length = get_line_length(par, vxres, 
-				      var->bits_per_pixel);
-
+	line_length = get_line_length(par, vxres, var->bits_per_pixel);
 	vidmem = line_length*vyres;
+
 	if (vidmem > par->fb.size) {
 		vyres = par->fb.size/line_length;
-		if (vyres < yres) {
-			vyres = yres;
+		if (vyres < var->yres) {
+			vyres = info->var.yres;
 			vxres = par->fb.size/vyres;
 			vxres /= var->bits_per_pixel >> 3;
 			line_length = get_line_length(par, vxres, 
 						      var->bits_per_pixel);
-			vidmem = line_length * yres;
-			if (vxres < xres) {
+			vidmem = line_length * info->var.yres;
+			if (vxres < var->xres) {
 				printk("i810fb: required video memory, "
 				       "%d bytes, for %dx%d-%d (virtual) "
 				       "is out of range\n", 
@@ -981,6 +1019,10 @@ static int i810_check_params(struct fb_var_screeninfo *var,
 			}
 		}
 	}
+
+	var->xres_virtual = vxres;
+	var->yres_virtual = vyres;
+
 	/*
 	 * Monitor limit
 	 */
@@ -996,18 +1038,41 @@ static int i810_check_params(struct fb_var_screeninfo *var,
 		info->monspecs.dclkmax = 204000000;
 		break;
 	}
+
 	info->monspecs.dclkmin = 15000000;
 
-	if (fb_validate_mode(var, info)) {
-		if (fb_get_mode(FB_MAXTIMINGS, 0, var, info))
-			return -EINVAL;
+	if (!fb_validate_mode(var, info))
+		mode_valid = 1;
+
+#ifdef CONFIG_FB_I810_I2C
+	if (!mode_valid && info->monspecs.gtf &&
+	    !fb_get_mode(FB_MAXTIMINGS, 0, var, info))
+		mode_valid = 1;
+
+	if (!mode_valid && info->monspecs.modedb_len) {
+		const struct fb_videomode *mode;
+
+		mode = fb_find_best_mode(var, &info->modelist);
+		if (mode) {
+			fb_videomode_to_var(var, mode);
+			mode_valid = 1;
+		}
 	}
-	
-	var->xres = xres;
-	var->yres = yres;
-	var->xres_virtual = vxres;
-	var->yres_virtual = vyres;
-	return 0;
+#endif
+	if (!mode_valid && info->monspecs.modedb_len == 0) {
+		if (fb_get_mode(FB_MAXTIMINGS, 0, var, info)) {
+			int default_sync = (info->monspecs.hfmin-HFMIN)
+				|(info->monspecs.hfmax-HFMAX)
+				|(info->monspecs.vfmin-VFMIN)
+				|(info->monspecs.vfmax-VFMAX);
+			printk("i810fb: invalid video mode%s\n",
+			       default_sync ? "" : ". Specifying "
+			       "vsyncN/hsyncN parameters may help");
+			retval = -EINVAL;
+		}
+	}
+
+	return retval;
 }	
 
 /**
@@ -1020,13 +1085,15 @@ static int i810_check_params(struct fb_var_screeninfo *var,
  */
 static int encode_fix(struct fb_fix_screeninfo *fix, struct fb_info *info)
 {
-	struct i810fb_par *par = (struct i810fb_par *) info->par;
+	struct i810fb_par *par = info->par;
 
     	memset(fix, 0, sizeof(struct fb_fix_screeninfo));
 
     	strcpy(fix->id, "I810");
+	mutex_lock(&info->mm_lock);
     	fix->smem_start = par->fb.physical;
     	fix->smem_len = par->fb.size;
+	mutex_unlock(&info->mm_lock);
     	fix->type = FB_TYPE_PACKED_PIXELS;
     	fix->type_aux = 0;
 	fix->xpanstep = 8;
@@ -1131,7 +1198,7 @@ static void decode_var(const struct fb_var_screeninfo *var,
 static int i810fb_getcolreg(u8 regno, u8 *red, u8 *green, u8 *blue, 
 			    u8 *transp, struct fb_info *info)
 {
-	struct i810fb_par *par = (struct i810fb_par *) info->par;
+	struct i810fb_par *par = info->par;
 	u8 __iomem *mmio = par->mmio_start_virtual;
 	u8 temp;
 
@@ -1170,10 +1237,10 @@ static int i810fb_getcolreg(u8 regno, u8 *red, u8 *green, u8 *blue,
 
 static int i810fb_open(struct fb_info *info, int user)
 {
-	struct i810fb_par *par = (struct i810fb_par *) info->par;
-	u32 count = atomic_read(&par->use_count);
-	
-	if (count == 0) {
+	struct i810fb_par *par = info->par;
+
+	mutex_lock(&par->open_lock);
+	if (par->use_count == 0) {
 		memset(&par->state, 0, sizeof(struct vgastate));
 		par->state.flags = VGA_SAVE_CMAP;
 		par->state.vgabase = par->mmio_start_virtual;
@@ -1182,26 +1249,29 @@ static int i810fb_open(struct fb_info *info, int user)
 		i810_save_vga_state(par);
 	}
 
-	atomic_inc(&par->use_count);
+	par->use_count++;
+	mutex_unlock(&par->open_lock);
 	
 	return 0;
 }
 
 static int i810fb_release(struct fb_info *info, int user)
 {
-	struct i810fb_par *par = (struct i810fb_par *) info->par;
-	u32 count;
-	
-	count = atomic_read(&par->use_count);
-	if (count == 0)
-		return -EINVAL;
+	struct i810fb_par *par = info->par;
 
-	if (count == 1) {
+	mutex_lock(&par->open_lock);
+	if (par->use_count == 0) {
+		mutex_unlock(&par->open_lock);
+		return -EINVAL;
+	}
+
+	if (par->use_count == 1) {
 		i810_restore_vga_state(par);
 		restore_vga(&par->state);
 	}
 
-	atomic_dec(&par->use_count);
+	par->use_count--;
+	mutex_unlock(&par->open_lock);
 	
 	return 0;
 }
@@ -1211,7 +1281,7 @@ static int i810fb_setcolreg(unsigned regno, unsigned red, unsigned green,
 			    unsigned blue, unsigned transp, 
 			    struct fb_info *info)
 {
-	struct i810fb_par *par = (struct i810fb_par *) info->par;
+	struct i810fb_par *par = info->par;
 	u8 __iomem *mmio = par->mmio_start_virtual;
 	u8 temp;
 	int i;
@@ -1305,7 +1375,7 @@ static int i810fb_setcolreg(unsigned regno, unsigned red, unsigned green,
 static int i810fb_pan_display(struct fb_var_screeninfo *var, 
 			      struct fb_info *info)
 {
-	struct i810fb_par *par = (struct i810fb_par *) info->par;
+	struct i810fb_par *par = info->par;
 	u32 total;
 	
 	total = var->xoffset * par->depth + 
@@ -1317,7 +1387,7 @@ static int i810fb_pan_display(struct fb_var_screeninfo *var,
 
 static int i810fb_blank (int blank_mode, struct fb_info *info)
 {
-	struct i810fb_par *par = (struct i810fb_par *) info->par;
+	struct i810fb_par *par = info->par;
 	u8 __iomem *mmio = par->mmio_start_virtual;
 	int mode = 0, pwr, scr_off = 0;
 	
@@ -1362,12 +1432,11 @@ static int i810fb_blank (int blank_mode, struct fb_info *info)
 
 static int i810fb_set_par(struct fb_info *info)
 {
-	struct i810fb_par *par = (struct i810fb_par *) info->par;
+	struct i810fb_par *par = info->par;
 
 	decode_var(&info->var, par);
 	i810_load_regs(par);
 	i810_init_cursor(par);
-
 	encode_fix(&info->fix, info);
 
 	if (info->var.accel_flags && !(par->dev_flags & LOCKUP)) {
@@ -1407,12 +1476,11 @@ static int i810fb_check_var(struct fb_var_screeninfo *var,
 
 static int i810fb_cursor(struct fb_info *info, struct fb_cursor *cursor)
 {
-	struct i810fb_par *par = (struct i810fb_par *)info->par;
+	struct i810fb_par *par = info->par;
 	u8 __iomem *mmio = par->mmio_start_virtual;
 
-	if (!(par->dev_flags & USE_HWCUR) || !info->var.accel_flags ||
-	    par->dev_flags & LOCKUP)
-		return soft_cursor(info, cursor);
+	if (par->dev_flags & LOCKUP)
+		return -ENXIO;
 
 	if (cursor->image.width > 64 || cursor->image.height > 64)
 		return -ENXIO;
@@ -1444,7 +1512,7 @@ static int i810fb_cursor(struct fb_info *info, struct fb_cursor *cursor)
 		int size = ((cursor->image.width + 7) >> 3) *
 			cursor->image.height;
 		int i;
-		u8 *data = kmalloc(64 * 8, GFP_KERNEL);
+		u8 *data = kmalloc(64 * 8, GFP_ATOMIC);
 
 		if (data == NULL)
 			return -ENOMEM;
@@ -1492,39 +1560,34 @@ static struct fb_ops i810fb_ops __devinitdata = {
 /***********************************************************************
  *                         Power Management                            *
  ***********************************************************************/
-static int i810fb_suspend(struct pci_dev *dev, pm_message_t state)
+static int i810fb_suspend(struct pci_dev *dev, pm_message_t mesg)
 {
 	struct fb_info *info = pci_get_drvdata(dev);
-	struct i810fb_par *par = (struct i810fb_par *) info->par;
-	int blank = 0, prev_state = par->cur_state;
+	struct i810fb_par *par = info->par;
 
-	if (state == prev_state)
+	par->cur_state = mesg.event;
+
+	switch (mesg.event) {
+	case PM_EVENT_FREEZE:
+	case PM_EVENT_PRETHAW:
+		dev->dev.power.power_state = mesg;
 		return 0;
-
-	par->cur_state = state;
-
-	switch (state) {
-	case 1:
-		blank = VESA_VSYNC_SUSPEND;
-		break;
-	case 2:
-		blank = VESA_HSYNC_SUSPEND;
-		break;
-	case 3:
-		blank = VESA_POWERDOWN;
-		break;
-	default:
-		return -EINVAL;
 	}
-	info->fbops->fb_blank(blank, info);
 
-	if (!prev_state) { 
-		agp_unbind_memory(par->i810_gtt.i810_fb_memory);
-		agp_unbind_memory(par->i810_gtt.i810_cursor_memory);
-		pci_disable_device(dev);
-	}
+	console_lock();
+	fb_set_suspend(info, 1);
+
+	if (info->fbops->fb_sync)
+		info->fbops->fb_sync(info);
+
+	i810fb_blank(FB_BLANK_POWERDOWN, info);
+	agp_unbind_memory(par->i810_gtt.i810_fb_memory);
+	agp_unbind_memory(par->i810_gtt.i810_cursor_memory);
+
 	pci_save_state(dev);
-	pci_set_power_state(dev, pci_choose_state(dev, state));
+	pci_disable_device(dev);
+	pci_set_power_state(dev, pci_choose_state(dev, mesg));
+	console_unlock();
 
 	return 0;
 }
@@ -1532,23 +1595,33 @@ static int i810fb_suspend(struct pci_dev *dev, pm_message_t state)
 static int i810fb_resume(struct pci_dev *dev) 
 {
 	struct fb_info *info = pci_get_drvdata(dev);
-	struct i810fb_par *par = (struct i810fb_par *) info->par;
+	struct i810fb_par *par = info->par;
+	int cur_state = par->cur_state;
 
-	if (par->cur_state == 0)
+	par->cur_state = PM_EVENT_ON;
+
+	if (cur_state == PM_EVENT_FREEZE) {
+		pci_set_power_state(dev, PCI_D0);
 		return 0;
+	}
 
-	pci_restore_state(dev);
+	console_lock();
 	pci_set_power_state(dev, PCI_D0);
-	pci_enable_device(dev);
+	pci_restore_state(dev);
+
+	if (pci_enable_device(dev))
+		goto fail;
+
+	pci_set_master(dev);
 	agp_bind_memory(par->i810_gtt.i810_fb_memory,
 			par->fb.offset);
 	agp_bind_memory(par->i810_gtt.i810_cursor_memory,
 			par->cursor_heap.offset);
-
+	i810fb_set_par(info);
+	fb_set_suspend (info, 0);
 	info->fbops->fb_blank(VESA_NO_BLANKING, info);
-
-	par->cur_state = 0;
-
+fail:
+	console_unlock();
 	return 0;
 }
 /***********************************************************************
@@ -1589,7 +1662,7 @@ static void __devinit i810_fix_offsets(struct i810fb_par *par)
 
 static int __devinit i810_alloc_agp_mem(struct fb_info *info)
 {
-	struct i810fb_par *par = (struct i810fb_par *) info->par;
+	struct i810fb_par *par = info->par;
 	int size;
 	struct agp_bridge_data *bridge;
 	
@@ -1647,7 +1720,7 @@ static int __devinit i810_alloc_agp_mem(struct fb_info *info)
  * @info: pointer to device specific info structure
  *
  * DESCRIPTION:
- * Sets the the user monitor's horizontal and vertical
+ * Sets the user monitor's horizontal and vertical
  * frequency limits
  */
 static void __devinit i810_init_monspecs(struct fb_info *info)
@@ -1685,6 +1758,8 @@ static void __devinit i810_init_monspecs(struct fb_info *info)
 static void __devinit i810_init_defaults(struct i810fb_par *par, 
 				      struct fb_info *info)
 {
+	mutex_init(&par->open_lock);
+
 	if (voffset) 
 		v_offset_default = voffset;
 	else if (par->aperture.size > 32 * 1024 * 1024)
@@ -1701,15 +1776,26 @@ static void __devinit i810_init_defaults(struct i810fb_par *par,
 	if (sync) 
 		par->dev_flags |= ALWAYS_SYNC;
 
+	par->ddc_num = (ddc3 ? 3 : 2);
+
 	if (bpp < 8)
 		bpp = 8;
 	
-	if (!vyres) 
-		vyres = (vram << 20)/(xres*bpp >> 3);
-
 	par->i810fb_ops = i810fb_ops;
-	info->var.xres = xres;
-	info->var.yres = yres;
+
+	if (xres)
+		info->var.xres = xres;
+	else
+		info->var.xres = 640;
+
+	if (yres)
+		info->var.yres = yres;
+	else
+		info->var.yres = 480;
+
+	if (!vyres) 
+		vyres = (vram << 20)/(info->var.xres*bpp >> 3);
+
 	info->var.yres_virtual = vyres;
 	info->var.bits_per_pixel = bpp;
 
@@ -1736,7 +1822,7 @@ static void __devinit i810_init_device(struct i810fb_par *par)
 	i810_init_cursor(par);
 
 	/* mvo: enable external vga-connector (for laptops) */
-	if (ext_vga) {
+	if (extvga) {
 		i810_writel(HVSYNC, mmio, 0);
 		i810_writel(PWR_CLKC, mmio, 3);
 	}
@@ -1806,8 +1892,71 @@ i810_allocate_pci_resource(struct i810fb_par *par,
 	return 0;
 }
 
+static void __devinit i810fb_find_init_mode(struct fb_info *info)
+{
+	struct fb_videomode mode;
+	struct fb_var_screeninfo var;
+	struct fb_monspecs *specs = &info->monspecs;
+	int found = 0;
+#ifdef CONFIG_FB_I810_I2C
+	int i;
+	int err = 1;
+	struct i810fb_par *par = info->par;
+#endif
+
+	INIT_LIST_HEAD(&info->modelist);
+	memset(&mode, 0, sizeof(struct fb_videomode));
+	var = info->var;
+#ifdef CONFIG_FB_I810_I2C
+	i810_create_i2c_busses(par);
+
+	for (i = 0; i < par->ddc_num + 1; i++) {
+		err = i810_probe_i2c_connector(info, &par->edid, i);
+		if (!err)
+			break;
+	}
+
+	if (!err)
+		printk("i810fb_init_pci: DDC probe successful\n");
+
+	fb_edid_to_monspecs(par->edid, specs);
+
+	if (specs->modedb == NULL)
+		printk("i810fb_init_pci: Unable to get Mode Database\n");
+
+	fb_videomode_to_modelist(specs->modedb, specs->modedb_len,
+				 &info->modelist);
+	if (specs->modedb != NULL) {
+		const struct fb_videomode *m;
+
+		if (xres && yres) {
+			if ((m = fb_find_best_mode(&var, &info->modelist))) {
+				mode = *m;
+				found  = 1;
+			}
+		}
+
+		if (!found) {
+			m = fb_find_best_display(&info->monspecs, &info->modelist);
+			mode = *m;
+			found = 1;
+		}
+
+		fb_videomode_to_var(&var, &mode);
+	}
+#endif
+	if (mode_option)
+		fb_find_mode(&var, info, mode_option, specs->modedb,
+			     specs->modedb_len, (found) ? &mode : NULL,
+			     info->var.bits_per_pixel);
+
+	info->var = var;
+	fb_destroy_modedb(specs->modedb);
+	specs->modedb = NULL;
+}
+
 #ifndef MODULE
-static int __init i810fb_setup(char *options)
+static int __devinit i810fb_setup(char *options)
 {
 	char *this_opt, *suffix = NULL;
 
@@ -1819,8 +1968,8 @@ static int __init i810fb_setup(char *options)
 			mtrr = 1;
 		else if (!strncmp(this_opt, "accel", 5))
 			accel = 1;
-		else if (!strncmp(this_opt, "ext_vga", 7))
-			ext_vga = 1;
+		else if (!strncmp(this_opt, "extvga", 6))
+			extvga = 1;
 		else if (!strncmp(this_opt, "sync", 4))
 			sync = 1;
 		else if (!strncmp(this_opt, "vram:", 5))
@@ -1849,6 +1998,10 @@ static int __init i810fb_setup(char *options)
 			vsync2 = simple_strtoul(this_opt+7, NULL, 0);
 		else if (!strncmp(this_opt, "dcolor", 6))
 			dcolor = 1;
+		else if (!strncmp(this_opt, "ddc3", 4))
+			ddc3 = true;
+		else
+			mode_option = this_opt;
 	}
 	return 0;
 }
@@ -1859,6 +2012,7 @@ static int __devinit i810fb_init_pci (struct pci_dev *dev,
 {
 	struct fb_info    *info;
 	struct i810fb_par *par = NULL;
+	struct fb_videomode mode;
 	int i, err = -1, vfreq, hfreq, pixclock;
 
 	i = 0;
@@ -1867,16 +2021,16 @@ static int __devinit i810fb_init_pci (struct pci_dev *dev,
 	if (!info)
 		return -ENOMEM;
 
-	par = (struct i810fb_par *) info->par;
+	par = info->par;
 	par->dev = dev;
 
-	if (!(info->pixmap.addr = kmalloc(8*1024, GFP_KERNEL))) {
+	if (!(info->pixmap.addr = kzalloc(8*1024, GFP_KERNEL))) {
 		i810fb_release_resource(info, par);
 		return -ENOMEM;
 	}
-	memset(info->pixmap.addr, 0, 8*1024);
 	info->pixmap.size = 8*1024;
 	info->pixmap.buf_align = 8;
+	info->pixmap.access_align = 32;
 	info->pixmap.flags = FB_PIXMAP_SYSTEM;
 
 	if ((err = i810_allocate_pci_resource(par, entry))) {
@@ -1897,15 +2051,19 @@ static int __devinit i810fb_init_pci (struct pci_dev *dev,
 	info->fbops = &par->i810fb_ops;
 	info->pseudo_palette = par->pseudo_palette;
 	fb_alloc_cmap(&info->cmap, 256, 0);
+	i810fb_find_init_mode(info);
 
 	if ((err = info->fbops->fb_check_var(&info->var, info))) {
 		i810fb_release_resource(info, par);
 		return err;
 	}
-	encode_fix(&info->fix, info); 
-	 	    
+
+	fb_var_to_videomode(&mode, &info->var);
+	fb_add_videomode(&mode, &info->modelist);
+
 	i810fb_init_ringbuffer(info);
 	err = register_framebuffer(info);
+
 	if (err < 0) {
     		i810fb_release_resource(info, par); 
 		printk("i810fb_init: cannot register framebuffer device\n");
@@ -1944,6 +2102,8 @@ static void i810fb_release_resource(struct fb_info *info,
 	struct gtt_data *gtt = &par->i810_gtt;
 	unset_mtrr(par);
 
+	i810_delete_i2c_busses(par);
+
 	if (par->i810_gtt.i810_cursor_memory)
 		agp_free_memory(gtt->i810_cursor_memory);
 	if (par->i810_gtt.i810_fb_memory)
@@ -1953,15 +2113,12 @@ static void i810fb_release_resource(struct fb_info *info,
 		iounmap(par->mmio_start_virtual);
 	if (par->aperture.virtual)
 		iounmap(par->aperture.virtual);
-
+	kfree(par->edid);
 	if (par->res_flags & FRAMEBUFFER_REQ)
 		release_mem_region(par->aperture.physical,
 				   par->aperture.size);
 	if (par->res_flags & MMIO_REQ)
 		release_mem_region(par->mmio_start_phys, MMIO_SIZE);
-
-	if (par->res_flags & PCI_DEVICE_ENABLED)
-		pci_disable_device(par->dev);
 
 	framebuffer_release(info);
 
@@ -1970,7 +2127,7 @@ static void i810fb_release_resource(struct fb_info *info,
 static void __exit i810fb_remove_pci(struct pci_dev *dev)
 {
 	struct fb_info *info = pci_get_drvdata(dev);
-	struct i810fb_par *par = (struct i810fb_par *) info->par;
+	struct i810fb_par *par = info->par;
 
 	unregister_framebuffer(info);  
 	i810fb_release_resource(info, par);
@@ -1979,7 +2136,7 @@ static void __exit i810fb_remove_pci(struct pci_dev *dev)
 }                                                	
 
 #ifndef MODULE
-static int __init i810fb_init(void)
+static int __devinit i810fb_init(void)
 {
 	char *option = NULL;
 
@@ -1997,7 +2154,7 @@ static int __init i810fb_init(void)
 
 #ifdef MODULE
 
-static int __init i810fb_init(void)
+static int __devinit i810fb_init(void)
 {
 	hsync1 *= 1000;
 	hsync2 *= 1000;
@@ -2023,10 +2180,10 @@ MODULE_PARM_DESC(vyres, "Virtual vertical resolution in scanlines"
 		 " (default = 480)");
 module_param(hsync1, int, 0);
 MODULE_PARM_DESC(hsync1, "Minimum horizontal frequency of monitor in KHz"
-		 " (default = 31)");
+		 " (default = 29)");
 module_param(hsync2, int, 0);
 MODULE_PARM_DESC(hsync2, "Maximum horizontal frequency of monitor in KHz"
-		 " (default = 31)");
+		 " (default = 30)");
 module_param(vsync1, int, 0);
 MODULE_PARM_DESC(vsync1, "Minimum vertical frequency of monitor in Hz"
 		 " (default = 50)");
@@ -2037,14 +2194,18 @@ module_param(accel, bool, 0);
 MODULE_PARM_DESC(accel, "Use Acceleration (BLIT) engine (default = 0)");
 module_param(mtrr, bool, 0);
 MODULE_PARM_DESC(mtrr, "Use MTRR (default = 0)");
-module_param(ext_vga, bool, 0);
-MODULE_PARM_DESC(ext_vga, "Enable external VGA connector (default = 0)");
+module_param(extvga, bool, 0);
+MODULE_PARM_DESC(extvga, "Enable external VGA connector (default = 0)");
 module_param(sync, bool, 0);
 MODULE_PARM_DESC(sync, "wait for accel engine to finish drawing"
 		 " (default = 0)");
 module_param(dcolor, bool, 0);
 MODULE_PARM_DESC(dcolor, "use DirectColor visuals"
 		 " (default = 0 = TrueColor)");
+module_param(ddc3, bool, 0);
+MODULE_PARM_DESC(ddc3, "Probe DDC bus 3 (default = 0 = no)");
+module_param(mode_option, charp, 0);
+MODULE_PARM_DESC(mode_option, "Specify initial video mode");
 
 MODULE_AUTHOR("Tony A. Daplas");
 MODULE_DESCRIPTION("Framebuffer device for the Intel 810/815 and"

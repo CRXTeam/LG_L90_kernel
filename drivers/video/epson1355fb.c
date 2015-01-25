@@ -4,7 +4,7 @@
  * Epson Research S1D13505 Embedded RAMDAC LCD/CRT Controller
  *   (previously known as SED1355)
  *
- * Cf. http://www.erd.epson.com/vdc/html/S1D13505.html
+ * Cf. http://vdc.epson.com/
  *
  *
  * Copyright (C) Hewlett-Packard Company.  All rights reserved.
@@ -48,40 +48,29 @@
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/tty.h>
-#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/fb.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
+#include <linux/platform_device.h>
+
 #include <asm/types.h>
 #include <asm/io.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include <video/epson1355.h>
 
 struct epson1355_par {
 	unsigned long reg_addr;
+	u32 pseudo_palette[16];
 };
 
 /* ------------------------------------------------------------------------- */
 
-#ifdef CONFIG_SUPERH
-
-static inline u8 epson1355_read_reg(int index)
-{
-	return ctrl_inb(par.reg_addr + index);
-}
-
-static inline void epson1355_write_reg(u8 data, int index)
-{
-	ctrl_outb(data, par.reg_addr + index);
-}
-
-#elif defined(CONFIG_ARM)
+#if defined(CONFIG_ARM)
 
 # ifdef CONFIG_ARCH_CEIVA
-#  include <asm/arch/hardware.h>
+#  include <mach/hardware.h>
 #  define EPSON1355FB_BASE_PHYS	(CEIVA_PHYS_SED1355)
 # endif
 
@@ -288,7 +277,7 @@ static int epson1355fb_blank(int blank_mode, struct fb_info *info)
 	struct epson1355_par *par = info->par;
 
 	switch (blank_mode) {
-	case FB_BLANK_UNBLANKING:
+	case FB_BLANK_UNBLANK:
 	case FB_BLANK_NORMAL:
 		lcd_enable(par, 1);
 		backlight_enable(1);
@@ -402,16 +391,9 @@ static inline unsigned long copy_to_user16(void *to, const void *from,
 
 
 static ssize_t
-epson1355fb_read(struct file *file, char *buf, size_t count, loff_t * ppos)
+epson1355fb_read(struct fb_info *info, char *buf, size_t count, loff_t * ppos)
 {
-	struct inode *inode = file->f_dentry->d_inode;
-	int fbidx = iminor(inode);
-	struct fb_info *info = registered_fb[fbidx];
 	unsigned long p = *ppos;
-
-	/* from fbmem.c except for our own copy_*_user */
-	if (!info || !info->screen_base)
-		return -ENODEV;
 
 	if (p >= info->fix.smem_len)
 		return 0;
@@ -433,18 +415,11 @@ epson1355fb_read(struct file *file, char *buf, size_t count, loff_t * ppos)
 }
 
 static ssize_t
-epson1355fb_write(struct file *file, const char *buf,
+epson1355fb_write(struct fb_info *info, const char *buf,
 		  size_t count, loff_t * ppos)
 {
-	struct inode *inode = file->f_dentry->d_inode;
-	int fbidx = iminor(inode);
-	struct fb_info *info = registered_fb[fbidx];
 	unsigned long p = *ppos;
 	int err;
-
-	/* from fbmem.c except for our own copy_*_user */
-	if (!info || !info->screen_base)
-		return -ENODEV;
 
 	/* from fbmem.c except for our own copy_*_user */
 	if (p > info->fix.smem_len)
@@ -482,7 +457,6 @@ static struct fb_ops epson1355fb_fbops = {
 	.fb_imageblit 	= cfb_imageblit,
 	.fb_read 	= epson1355fb_read,
 	.fb_write 	= epson1355fb_write,
-	.fb_cursor 	= soft_cursor,
 };
 
 /* ------------------------------------------------------------------------- */
@@ -604,13 +578,9 @@ static void clearfb16(struct fb_info *info)
 		fb_writeb(0, dst);
 }
 
-static void epson1355fb_platform_release(struct device *device)
+static int epson1355fb_remove(struct platform_device *dev)
 {
-}
-
-static int epson1355fb_remove(struct device *device)
-{
-	struct fb_info *info = dev_get_drvdata(device);
+	struct fb_info *info = platform_get_drvdata(dev);
 	struct epson1355_par *par = info->par;
 
 	backlight_enable(0);
@@ -631,9 +601,8 @@ static int epson1355fb_remove(struct device *device)
 	return 0;
 }
 
-int __init epson1355fb_probe(struct device *device)
+int __devinit epson1355fb_probe(struct platform_device *dev)
 {
-	struct platform_device *dev = to_platform_device(device);
 	struct epson1355_par *default_par;
 	struct fb_info *info;
 	u8 revision;
@@ -654,10 +623,11 @@ int __init epson1355fb_probe(struct device *device)
 		goto bail;
 	}
 
-	info = framebuffer_alloc(sizeof(struct epson1355_par) + sizeof(u32) * 256, &dev->dev);
-	if (!info)
+	info = framebuffer_alloc(sizeof(struct epson1355_par), &dev->dev);
+	if (!info) {
 		rc = -ENOMEM;
 		goto bail;
+	}
 
 	default_par = info->par;
 	default_par->reg_addr = (unsigned long) ioremap(EPSON1355FB_REGS_PHYS, EPSON1355FB_REGS_LEN);
@@ -666,7 +636,7 @@ int __init epson1355fb_probe(struct device *device)
 		rc = -ENOMEM;
 		goto bail;
 	}
-	info->pseudo_palette = (void *)(default_par + 1);
+	info->pseudo_palette = default_par->pseudo_palette;
 
 	info->screen_base = ioremap(EPSON1355FB_FB_PHYS, EPSON1355FB_FB_LEN);
 	if (!info->screen_base) {
@@ -712,7 +682,7 @@ int __init epson1355fb_probe(struct device *device)
 	/*
 	 * Our driver data.
 	 */
-	dev_set_drvdata(&dev->dev, info);
+	platform_set_drvdata(dev, info);
 
 	printk(KERN_INFO "fb%d: %s frame buffer device\n",
 	       info->node, info->fix.id);
@@ -720,24 +690,19 @@ int __init epson1355fb_probe(struct device *device)
 	return 0;
 
       bail:
-	epson1355fb_remove(device);
+	epson1355fb_remove(dev);
 	return rc;
 }
 
-static struct device_driver epson1355fb_driver = {
-	.name	= "epson1355fb",
-	.bus	= &platform_bus_type,
+static struct platform_driver epson1355fb_driver = {
 	.probe	= epson1355fb_probe,
 	.remove	= epson1355fb_remove,
+	.driver	= {
+		.name	= "epson1355fb",
+	},
 };
 
-static struct platform_device epson1355fb_device = {
-	.name	= "epson1355fb",
-	.id	= 0,
-	.dev	= {
-		.release = epson1355fb_platform_release,
-	}
-};
+static struct platform_device *epson1355fb_device;
 
 int __init epson1355fb_init(void)
 {
@@ -746,12 +711,22 @@ int __init epson1355fb_init(void)
 	if (fb_get_options("epson1355fb", NULL))
 		return -ENODEV;
 
-	ret = driver_register(&epson1355fb_driver);
+	ret = platform_driver_register(&epson1355fb_driver);
+
 	if (!ret) {
-		ret = platform_device_register(&epson1355fb_device);
-		if (ret)
-			driver_unregister(&epson1355fb_driver);
+		epson1355fb_device = platform_device_alloc("epson1355fb", 0);
+
+		if (epson1355fb_device)
+			ret = platform_device_add(epson1355fb_device);
+		else
+			ret = -ENOMEM;
+
+		if (ret) {
+			platform_device_put(epson1355fb_device);
+			platform_driver_unregister(&epson1355fb_driver);
+		}
 	}
+
 	return ret;
 }
 
@@ -760,8 +735,8 @@ module_init(epson1355fb_init);
 #ifdef MODULE
 static void __exit epson1355fb_exit(void)
 {
-	platform_device_unregister(&epson1355fb_device);
-	driver_unregister(&epson1355fb_driver);
+	platform_device_unregister(epson1355fb_device);
+	platform_driver_unregister(&epson1355fb_driver);
 }
 
 /* ------------------------------------------------------------------------- */

@@ -18,14 +18,14 @@
  *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
-#include <sound/driver.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/pci.h>
 #include <linux/slab.h>
-#include <linux/moduleparam.h>
+#include <linux/module.h>
 #include <sound/core.h>
 #include <sound/initval.h>
+#include <sound/tlv.h>
 #include "vx222.h"
 
 #define CARD_NAME "VX222"
@@ -37,8 +37,8 @@ MODULE_SUPPORTED_DEVICE("{{Digigram," CARD_NAME "}}");
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 0-MAX */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;	/* ID for this card */
-static int enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP;	/* Enable this card */
-static int mic[SNDRV_CARDS]; /* microphone */
+static bool enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP;	/* Enable this card */
+static bool mic[SNDRV_CARDS]; /* microphone */
 static int ibl[SNDRV_CARDS]; /* microphone */
 
 module_param_array(index, int, NULL, 0444);
@@ -60,7 +60,7 @@ enum {
 	VX_PCI_VX222_NEW
 };
 
-static struct pci_device_id snd_vx222_ids[] = {
+static DEFINE_PCI_DEVICE_TABLE(snd_vx222_ids) = {
 	{ 0x10b5, 0x9050, 0x1369, PCI_ANY_ID, 0, 0, VX_PCI_VX222_OLD, },   /* PLX */
 	{ 0x10b5, 0x9030, 0x1369, PCI_ANY_ID, 0, 0, VX_PCI_VX222_NEW, },   /* PLX */
 	{ 0, }
@@ -72,6 +72,9 @@ MODULE_DEVICE_TABLE(pci, snd_vx222_ids);
 /*
  */
 
+static const DECLARE_TLV_DB_SCALE(db_scale_old_vol, -11350, 50, 0);
+static const DECLARE_TLV_DB_SCALE(db_scale_akm, -7350, 50, 0);
+
 static struct snd_vx_hardware vx222_old_hw = {
 
 	.name = "VX222/Old",
@@ -81,6 +84,7 @@ static struct snd_vx_hardware vx222_old_hw = {
 	.num_ins = 1,
 	.num_outs = 1,
 	.output_level_max = VX_ANALOG_OUT_LEVEL_MAX,
+	.output_level_db_scale = db_scale_old_vol,
 };
 
 static struct snd_vx_hardware vx222_v2_hw = {
@@ -92,6 +96,7 @@ static struct snd_vx_hardware vx222_v2_hw = {
 	.num_ins = 1,
 	.num_outs = 1,
 	.output_level_max = VX2_AKM_LEVEL_MAX,
+	.output_level_db_scale = db_scale_akm,
 };
 
 static struct snd_vx_hardware vx222_mic_hw = {
@@ -103,12 +108,13 @@ static struct snd_vx_hardware vx222_mic_hw = {
 	.num_ins = 1,
 	.num_outs = 1,
 	.output_level_max = VX2_AKM_LEVEL_MAX,
+	.output_level_db_scale = db_scale_akm,
 };
 
 
 /*
  */
-static int snd_vx222_free(vx_core_t *chip)
+static int snd_vx222_free(struct vx_core *chip)
 {
 	struct snd_vx222 *vx = (struct snd_vx222 *)chip;
 
@@ -121,21 +127,21 @@ static int snd_vx222_free(vx_core_t *chip)
 	return 0;
 }
 
-static int snd_vx222_dev_free(snd_device_t *device)
+static int snd_vx222_dev_free(struct snd_device *device)
 {
-	vx_core_t *chip = device->device_data;
+	struct vx_core *chip = device->device_data;
 	return snd_vx222_free(chip);
 }
 
 
-static int __devinit snd_vx222_create(snd_card_t *card, struct pci_dev *pci,
+static int __devinit snd_vx222_create(struct snd_card *card, struct pci_dev *pci,
 				      struct snd_vx_hardware *hw,
 				      struct snd_vx222 **rchip)
 {
-	vx_core_t *chip;
+	struct vx_core *chip;
 	struct snd_vx222 *vx;
 	int i, err;
-	static snd_device_ops_t ops = {
+	static struct snd_device_ops ops = {
 		.dev_free =	snd_vx222_dev_free,
 	};
 	struct snd_vx_ops *vx_ops;
@@ -147,7 +153,7 @@ static int __devinit snd_vx222_create(snd_card_t *card, struct pci_dev *pci,
 
 	vx_ops = hw->type == VX_TYPE_BOARD ? &vx222_old_ops : &vx222_ops;
 	chip = snd_vx_create(card, hw, vx_ops,
-			     sizeof(struct snd_vx222) - sizeof(vx_core_t));
+			     sizeof(struct snd_vx222) - sizeof(struct vx_core));
 	if (! chip) {
 		pci_disable_device(pci);
 		return -ENOMEM;
@@ -162,8 +168,8 @@ static int __devinit snd_vx222_create(snd_card_t *card, struct pci_dev *pci,
 	for (i = 0; i < 2; i++)
 		vx->port[i] = pci_resource_start(pci, i + 1);
 
-	if (request_irq(pci->irq, snd_vx_irq_handler, SA_INTERRUPT|SA_SHIRQ,
-			CARD_NAME, (void *) chip)) {
+	if (request_irq(pci->irq, snd_vx_irq_handler, IRQF_SHARED,
+			KBUILD_MODNAME, chip)) {
 		snd_printk(KERN_ERR "unable to grab IRQ %d\n", pci->irq);
 		snd_vx222_free(chip);
 		return -EBUSY;
@@ -186,7 +192,7 @@ static int __devinit snd_vx222_probe(struct pci_dev *pci,
 				     const struct pci_device_id *pci_id)
 {
 	static int dev;
-	snd_card_t *card;
+	struct snd_card *card;
 	struct snd_vx_hardware *hw;
 	struct snd_vx222 *vx;
 	int err;
@@ -198,9 +204,9 @@ static int __devinit snd_vx222_probe(struct pci_dev *pci,
 		return -ENOENT;
 	}
 
-	card = snd_card_new(index[dev], id[dev], THIS_MODULE, 0);
-	if (card == NULL)
-		return -ENOMEM;
+	err = snd_card_create(index[dev], id[dev], THIS_MODULE, 0, &card);
+	if (err < 0)
+		return err;
 
 	switch ((int)pci_id->driver_data) {
 	case VX_PCI_VX222_OLD:
@@ -218,6 +224,7 @@ static int __devinit snd_vx222_probe(struct pci_dev *pci,
 		snd_card_free(card);
 		return err;
 	}
+	card->private_data = vx;
 	vx->core.ibl.size = ibl[dev];
 
 	sprintf(card->longname, "%s at 0x%lx & 0x%lx, irq %i",
@@ -250,17 +257,52 @@ static void __devexit snd_vx222_remove(struct pci_dev *pci)
 	pci_set_drvdata(pci, NULL);
 }
 
+#ifdef CONFIG_PM
+static int snd_vx222_suspend(struct pci_dev *pci, pm_message_t state)
+{
+	struct snd_card *card = pci_get_drvdata(pci);
+	struct snd_vx222 *vx = card->private_data;
+	int err;
+
+	err = snd_vx_suspend(&vx->core, state);
+	pci_disable_device(pci);
+	pci_save_state(pci);
+	pci_set_power_state(pci, pci_choose_state(pci, state));
+	return err;
+}
+
+static int snd_vx222_resume(struct pci_dev *pci)
+{
+	struct snd_card *card = pci_get_drvdata(pci);
+	struct snd_vx222 *vx = card->private_data;
+
+	pci_set_power_state(pci, PCI_D0);
+	pci_restore_state(pci);
+	if (pci_enable_device(pci) < 0) {
+		printk(KERN_ERR "vx222: pci_enable_device failed, "
+		       "disabling device\n");
+		snd_card_disconnect(card);
+		return -EIO;
+	}
+	pci_set_master(pci);
+	return snd_vx_resume(&vx->core);
+}
+#endif
+
 static struct pci_driver driver = {
-	.name = "Digigram VX222",
+	.name = KBUILD_MODNAME,
 	.id_table = snd_vx222_ids,
 	.probe = snd_vx222_probe,
 	.remove = __devexit_p(snd_vx222_remove),
-	SND_PCI_PM_CALLBACKS
+#ifdef CONFIG_PM
+	.suspend = snd_vx222_suspend,
+	.resume = snd_vx222_resume,
+#endif
 };
 
 static int __init alsa_card_vx222_init(void)
 {
-	return pci_module_init(&driver);
+	return pci_register_driver(&driver);
 }
 
 static void __exit alsa_card_vx222_exit(void)

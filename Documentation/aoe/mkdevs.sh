@@ -5,6 +5,7 @@ n_partitions=${n_partitions:-16}
 
 if test "$#" != "1"; then
 	echo "Usage: sh `basename $0` {dir}" 1>&2
+	echo "       n_partitions=16 sh `basename $0` {dir}" 1>&2
 	exit 1
 fi
 dir=$1
@@ -26,6 +27,10 @@ rm -f $dir/discover
 mknod -m 0200 $dir/discover c $MAJOR 3
 rm -f $dir/interfaces
 mknod -m 0200 $dir/interfaces c $MAJOR 4
+rm -f $dir/revalidate
+mknod -m 0200 $dir/revalidate c $MAJOR 5
+rm -f $dir/flush
+mknod -m 0200 $dir/flush c $MAJOR 6
 
 export n_partitions
 mkshelf=`echo $0 | sed 's!mkdevs!mkshelf!'`

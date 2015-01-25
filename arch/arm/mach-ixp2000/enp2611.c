@@ -18,7 +18,6 @@
  *  option) any later version.
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/mm.h>
@@ -27,19 +26,17 @@
 #include <linux/bitops.h>
 #include <linux/pci.h>
 #include <linux/ioport.h>
-#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/serial.h>
 #include <linux/tty.h>
 #include <linux/serial_core.h>
-#include <linux/device.h>
+#include <linux/platform_device.h>
+#include <linux/io.h>
 
-#include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/pgtable.h>
 #include <asm/page.h>
-#include <asm/system.h>
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/mach-types.h>
 
 #include <asm/mach/pci.h>
@@ -64,6 +61,35 @@ static struct sys_timer enp2611_timer = {
 
 
 /*************************************************************************
+ * ENP-2611 I/O
+ *************************************************************************/
+static struct map_desc enp2611_io_desc[] __initdata = {
+	{
+		.virtual	= ENP2611_CALEB_VIRT_BASE,
+		.pfn		= __phys_to_pfn(ENP2611_CALEB_PHYS_BASE),
+		.length		= ENP2611_CALEB_SIZE,
+		.type		= MT_DEVICE,
+	}, {
+		.virtual	= ENP2611_PM3386_0_VIRT_BASE,
+		.pfn		= __phys_to_pfn(ENP2611_PM3386_0_PHYS_BASE),
+		.length		= ENP2611_PM3386_0_SIZE,
+		.type		= MT_DEVICE,
+	}, {
+		.virtual	= ENP2611_PM3386_1_VIRT_BASE,
+		.pfn		= __phys_to_pfn(ENP2611_PM3386_1_PHYS_BASE),
+		.length		= ENP2611_PM3386_1_SIZE,
+		.type		= MT_DEVICE,
+	}
+};
+
+void __init enp2611_map_io(void)
+{
+	ixp2000_map_io();
+	iotable_init(enp2611_io_desc, ARRAY_SIZE(enp2611_io_desc));
+}
+
+
+/*************************************************************************
  * ENP-2611 PCI
  *************************************************************************/
 static int enp2611_pci_setup(int nr, struct pci_sys_data *sys)
@@ -77,6 +103,7 @@ static void __init enp2611_pci_preinit(void)
 {
 	ixp2000_reg_write(IXP2000_PCI_ADDR_EXT, 0x00100000);
 	ixp2000_pci_preinit();
+	pcibios_setup("firmware");
 }
 
 static inline int enp2611_pci_valid_device(struct pci_bus *bus,
@@ -117,10 +144,12 @@ static struct pci_ops enp2611_pci_ops = {
 static struct pci_bus * __init enp2611_pci_scan_bus(int nr,
 						struct pci_sys_data *sys)
 {
-	return pci_scan_bus(sys->busnr, &enp2611_pci_ops, sys);
+	return pci_scan_root_bus(NULL, sys->busnr, &enp2611_pci_ops, sys,
+				 &sys->resources);
 }
 
-static int __init enp2611_pci_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+static int __init enp2611_pci_map_irq(const struct pci_dev *dev, u8 slot,
+	u8 pin)
 {
 	int irq;
 
@@ -169,7 +198,7 @@ subsys_initcall(enp2611_pci_init);
 
 
 /*************************************************************************
- * ENP-2611 Machine Intialization
+ * ENP-2611 Machine Initialization
  *************************************************************************/
 static struct flash_platform_data enp2611_flash_platform_data = {
 	.map_name	= "cfi_probe",
@@ -197,24 +226,40 @@ static struct platform_device enp2611_flash = {
 	.resource	= &enp2611_flash_resource,
 };
 
+static struct ixp2000_i2c_pins enp2611_i2c_gpio_pins = {
+	.sda_pin	= ENP2611_GPIO_SDA,
+	.scl_pin	= ENP2611_GPIO_SCL,
+};
+
+static struct platform_device enp2611_i2c_controller = {
+	.name		= "IXP2000-I2C",
+	.id		= 0,
+	.dev		= {
+		.platform_data = &enp2611_i2c_gpio_pins
+	},
+	.num_resources	= 0
+};
+
 static struct platform_device *enp2611_devices[] __initdata = {
-	&enp2611_flash
+	&enp2611_flash,
+	&enp2611_i2c_controller
 };
 
 static void __init enp2611_init_machine(void)
 {
 	platform_add_devices(enp2611_devices, ARRAY_SIZE(enp2611_devices));
+	ixp2000_uart_init();
 }
 
 
 MACHINE_START(ENP2611, "Radisys ENP-2611 PCI network processor board")
-	MAINTAINER("Lennert Buytenhek <buytenh@wantstofly.org>")
-	BOOT_MEM(0x00000000, IXP2000_UART_PHYS_BASE, IXP2000_UART_VIRT_BASE)
-	BOOT_PARAMS(0x00000100)
-	MAPIO(ixp2000_map_io)
-	INITIRQ(ixp2000_init_irq)
+	/* Maintainer: Lennert Buytenhek <buytenh@wantstofly.org> */
+	.atag_offset	= 0x100,
+	.map_io		= enp2611_map_io,
+	.init_irq	= ixp2000_init_irq,
 	.timer		= &enp2611_timer,
-	INIT_MACHINE(enp2611_init_machine)
+	.init_machine	= enp2611_init_machine,
+	.restart	= ixp2000_restart,
 MACHINE_END
 
 

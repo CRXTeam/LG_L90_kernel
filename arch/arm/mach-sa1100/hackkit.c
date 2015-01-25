@@ -22,18 +22,19 @@
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/partitions.h>
 
-#include <asm/hardware.h>
 #include <asm/mach-types.h>
 #include <asm/setup.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
-#include <asm/irq.h>
 
 #include <asm/mach/arch.h>
 #include <asm/mach/flash.h>
 #include <asm/mach/map.h>
 #include <asm/mach/irq.h>
 #include <asm/mach/serial_sa1100.h>
+
+#include <mach/hardware.h>
+#include <mach/irqs.h>
 
 #include "generic.h"
 
@@ -57,8 +58,12 @@ static void hackkit_uart_pm(struct uart_port *port, u_int state, u_int oldstate)
  */
 
 static struct map_desc hackkit_io_desc[] __initdata = {
- /* virtual     physical    length      type */
-  { 0xe8000000, 0x00000000, 0x01000000, MT_DEVICE } /* Flash bank 0 */
+	{	/* Flash bank 0 */
+		.virtual	=  0xe8000000,
+		.pfn		= __phys_to_pfn(0x00000000),
+		.length		= 0x01000000,
+		.type		= MT_DEVICE
+	},
 };
 
 static struct sa1100_port_fns hackkit_port_fns __initdata = {
@@ -175,15 +180,12 @@ static struct flash_platform_data hackkit_flash_data = {
 	.nr_parts	= ARRAY_SIZE(hackkit_partitions),
 };
 
-static struct resource hackkit_flash_resource = {
-	.start		= SA1100_CS0_PHYS,
-	.end		= SA1100_CS0_PHYS + SZ_32M,
-	.flags		= IORESOURCE_MEM,
-};
+static struct resource hackkit_flash_resource =
+	DEFINE_RES_MEM(SA1100_CS0_PHYS, SZ_32M);
 
 static void __init hackkit_init(void)
 {
-	sa11x0_set_flash_data(&hackkit_flash_data, &hackkit_flash_resource, 1);
+	sa11x0_register_mtd(&hackkit_flash_data, &hackkit_flash_resource, 1);
 }
 
 /**********************************************************************
@@ -191,10 +193,11 @@ static void __init hackkit_init(void)
  */
 
 MACHINE_START(HACKKIT, "HackKit Cpu Board")
-	BOOT_MEM(0xc0000000, 0x80000000, 0xf8000000)
-	BOOT_PARAMS(0xc0000100)
-	MAPIO(hackkit_map_io)
-	INITIRQ(sa1100_init_irq)
+	.atag_offset	= 0x100,
+	.map_io		= hackkit_map_io,
+	.nr_irqs	= SA1100_NR_IRQS,
+	.init_irq	= sa1100_init_irq,
 	.timer		= &sa1100_timer,
 	.init_machine	= hackkit_init,
+	.restart	= sa11x0_restart,
 MACHINE_END

@@ -211,7 +211,7 @@ static void mfc3_change_mode( struct parport *p, int m)
 
 static int use_cnt = 0;
 
-static irqreturn_t mfc3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t mfc3_interrupt(int irq, void *dev_id)
 {
 	int i;
 
@@ -219,7 +219,7 @@ static irqreturn_t mfc3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		if (this_port[i] != NULL)
 			if (pia(this_port[i])->crb & 128) { /* Board caused interrupt */
 				dummy = pia(this_port[i])->pprb; /* clear irq bit */
-				parport_generic_irq(irq, this_port[i], regs);
+				parport_generic_irq(this_port[i]);
 			}
 	return IRQ_HANDLED;
 }
@@ -353,9 +353,10 @@ static int __init parport_mfc3_init(void)
 
 		if (p->irq != PARPORT_IRQ_NONE) {
 			if (use_cnt++ == 0)
-				if (request_irq(IRQ_AMIGA_PORTS, mfc3_interrupt, SA_SHIRQ, p->name, &pp_mfc3_ops))
+				if (request_irq(IRQ_AMIGA_PORTS, mfc3_interrupt, IRQF_SHARED, p->name, &pp_mfc3_ops))
 					goto out_irq;
 		}
+		p->dev = &z->dev;
 
 		this_port[pias++] = p;
 		printk(KERN_INFO "%s: Multiface III port using irq\n", p->name);
@@ -385,7 +386,7 @@ static void __exit parport_mfc3_exit(void)
 		if (!this_port[i])
 			continue;
 		parport_remove_port(this_port[i]);
-		if (!this_port[i]->irq != PARPORT_IRQ_NONE) {
+		if (this_port[i]->irq != PARPORT_IRQ_NONE) {
 			if (--use_cnt == 0) 
 				free_irq(IRQ_AMIGA_PORTS, &pp_mfc3_ops);
 		}
@@ -396,7 +397,7 @@ static void __exit parport_mfc3_exit(void)
 
 
 MODULE_AUTHOR("Joerg Dorchain <joerg@dorchain.net>");
-MODULE_DESCRIPTION("Parport Driver for Multiface 3 expansion cards Paralllel Port");
+MODULE_DESCRIPTION("Parport Driver for Multiface 3 expansion cards Parallel Port");
 MODULE_SUPPORTED_DEVICE("Multiface 3 Parallel Port");
 MODULE_LICENSE("GPL");
 

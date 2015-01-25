@@ -30,8 +30,9 @@
 
 #include <linux/types.h>
 #include <linux/pci.h>
+#include <linux/pci_hotplug.h>
 
-/* PICMG 2.12 R2.0 HS CSR bits: */
+/* PICMG 2.1 R2.0 HS CSR bits: */
 #define HS_CSR_INS	0x0080
 #define HS_CSR_EXT	0x0040
 #define HS_CSR_PI	0x0030
@@ -68,6 +69,11 @@ struct cpci_hp_controller {
 	char *name;
 	struct cpci_hp_controller_ops *ops;
 };
+
+static inline const char *slot_name(struct slot *slot)
+{
+	return hotplug_slot_name(slot->hotplug_slot);
+}
 
 extern int cpci_hp_register_controller(struct cpci_hp_controller *controller);
 extern int cpci_hp_unregister_controller(struct cpci_hp_controller *controller);

@@ -14,9 +14,11 @@
 #include <linux/acpi.h>
 #include <linux/module.h>
 #include <linux/pci.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/agp_backend.h>
 #include <asm/sn/addrs.h>
+#include <asm/sn/io.h>
 #include <asm/sn/pcidev.h>
 #include <asm/sn/pcibus_provider_defs.h>
 #include <asm/sn/tioca_provider.h>
@@ -37,7 +39,7 @@ static struct aper_size_info_fixed sgi_tioca_sizes[] = {
 	{0, 0, 0},
 };
 
-static void *sgi_tioca_alloc_page(struct agp_bridge_data *bridge)
+static struct page *sgi_tioca_alloc_page(struct agp_bridge_data *bridge)
 {
 	struct page *page;
 	int nid;
@@ -46,14 +48,12 @@ static void *sgi_tioca_alloc_page(struct agp_bridge_data *bridge)
 
 	nid = info->ca_closest_node;
 	page = alloc_pages_node(nid, GFP_KERNEL, 0);
-	if (page == NULL) {
-		return 0;
-	}
+	if (!page)
+		return NULL;
 
 	get_page(page);
-	SetPageLocked(page);
 	atomic_inc(&agp_bridge->current_memory_agp);
-	return page_address(page);
+	return page;
 }
 
 /*
@@ -71,8 +71,8 @@ static void sgi_tioca_tlbflush(struct agp_memory *mem)
  * entry.
  */
 static unsigned long
-sgi_tioca_mask_memory(struct agp_bridge_data *bridge,
-		      unsigned long addr, int type)
+sgi_tioca_mask_memory(struct agp_bridge_data *bridge, dma_addr_t addr,
+		      int type)
 {
 	return tioca_physpage_to_gart(addr);
 }
@@ -133,10 +133,13 @@ static int sgi_tioca_insert_memory(struct agp_memory *mem, off_t pg_start,
 	off_t j;
 	void *temp;
 	struct agp_bridge_data *bridge;
+	u64 *table;
 
 	bridge = mem->bridge;
 	if (!bridge)
 		return -EINVAL;
+
+	table = (u64 *)bridge->gatt_table;
 
 	temp = bridge->current_size;
 
@@ -175,19 +178,20 @@ static int sgi_tioca_insert_memory(struct agp_memory *mem, off_t pg_start,
 	j = pg_start;
 
 	while (j < (pg_start + mem->page_count)) {
-		if (*(bridge->gatt_table + j))
+		if (table[j])
 			return -EBUSY;
 		j++;
 	}
 
-	if (mem->is_flushed == FALSE) {
+	if (!mem->is_flushed) {
 		bridge->driver->cache_flush();
-		mem->is_flushed = TRUE;
+		mem->is_flushed = true;
 	}
 
 	for (i = 0, j = pg_start; i < mem->page_count; i++, j++) {
-		*(bridge->gatt_table + j) =
-		    bridge->driver->mask_memory(bridge, mem->memory[i],
+		table[j] =
+		    bridge->driver->mask_memory(bridge,
+						page_to_phys(mem->pages[i]),
 						mem->type);
 	}
 
@@ -200,6 +204,7 @@ static int sgi_tioca_remove_memory(struct agp_memory *mem, off_t pg_start,
 {
 	size_t i;
 	struct agp_bridge_data *bridge;
+	u64 *table;
 
 	bridge = mem->bridge;
 	if (!bridge)
@@ -209,8 +214,10 @@ static int sgi_tioca_remove_memory(struct agp_memory *mem, off_t pg_start,
 		return -EINVAL;
 	}
 
+	table = (u64 *)bridge->gatt_table;
+
 	for (i = pg_start; i < (mem->page_count + pg_start); i++) {
-		*(bridge->gatt_table + i) = 0;
+		table[i] = 0;
 	}
 
 	bridge->driver->tlb_flush(mem);
@@ -240,7 +247,7 @@ static struct agp_bridge_data *sgi_tioca_find_bridge(struct pci_dev *pdev)
 	return bridge;
 }
 
-struct agp_bridge_driver sgi_tioca_driver = {
+const struct agp_bridge_driver sgi_tioca_driver = {
 	.owner = THIS_MODULE,
 	.size_type = U16_APER_SIZE,
 	.configure = sgi_tioca_configure,
@@ -258,8 +265,9 @@ struct agp_bridge_driver sgi_tioca_driver = {
 	.free_by_type = agp_generic_free_by_type,
 	.agp_alloc_page = sgi_tioca_alloc_page,
 	.agp_destroy_page = agp_generic_destroy_page,
-	.cant_use_aperture = 1,
-	.needs_scratch_page = 0,
+	.agp_type_to_mask_type  = agp_generic_type_to_mask_type,
+	.cant_use_aperture = true,
+	.needs_scratch_page = false,
 	.num_aperture_sizes = 1,
 };
 
@@ -274,14 +282,17 @@ static int __devinit agp_sgi_init(void)
 	else
 		return 0;
 
-	sgi_tioca_agp_bridges =
-	    (struct agp_bridge_data **)kmalloc(tioca_gart_found *
-					       sizeof(struct agp_bridge_data *),
-					       GFP_KERNEL);
+	sgi_tioca_agp_bridges = kmalloc(tioca_gart_found *
+					sizeof(struct agp_bridge_data *),
+					GFP_KERNEL);
+	if (!sgi_tioca_agp_bridges)
+		return -ENOMEM;
 
 	j = 0;
 	list_for_each_entry(info, &tioca_list, ca_list) {
 		struct list_head *tmp;
+		if (list_empty(info->ca_devices))
+			continue;
 		list_for_each(tmp, info->ca_devices) {
 			u8 cap_ptr;
 			pdev = pci_dev_b(tmp);
@@ -320,9 +331,8 @@ static int __devinit agp_sgi_init(void)
 
 static void __devexit agp_sgi_cleanup(void)
 {
-	if(sgi_tioca_agp_bridges)
-		kfree(sgi_tioca_agp_bridges);
-	sgi_tioca_agp_bridges=NULL;
+	kfree(sgi_tioca_agp_bridges);
+	sgi_tioca_agp_bridges = NULL;
 }
 
 module_init(agp_sgi_init);

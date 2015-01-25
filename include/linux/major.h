@@ -53,7 +53,7 @@
 #define STL_SIOMEMMAJOR		28
 #define ACSI_MAJOR		28
 #define AZTECH_CDROM_MAJOR	29
-#define GRAPHDEV_MAJOR		29   /* SparcLinux & Linux/68k /dev/fb */
+#define FB_MAJOR		29   /* /dev/fb* framebuffers */
 #define CM206_CDROM_MAJOR	32
 #define IDE2_MAJOR		33
 #define IDE3_MAJOR		34
@@ -100,6 +100,7 @@
 #define I2O_MAJOR		80	/* 80->87 */
 
 #define SHMIQ_MAJOR		85   /* Linux/mips, SGI /dev/shmiq */
+#define SCSI_CHANGER_MAJOR      86
 
 #define IDE6_MAJOR		88
 #define IDE7_MAJOR		89
@@ -112,6 +113,7 @@
 
 #define UBD_MAJOR		98
 
+#define PP_MAJOR		99
 #define JSFD_MAJOR		99
 
 #define PHONE_MAJOR		100
@@ -143,6 +145,7 @@
 #define UNIX98_PTY_MAJOR_COUNT	8
 #define UNIX98_PTY_SLAVE_MAJOR	(UNIX98_PTY_MASTER_MAJOR+UNIX98_PTY_MAJOR_COUNT)
 
+#define DRBD_MAJOR		147
 #define RTF_MAJOR		150
 #define RAW_MAJOR		162
 
@@ -150,9 +153,13 @@
 #define USB_ACM_AUX_MAJOR	167
 #define USB_CHAR_MAJOR		180
 
+#define MMC_BLOCK_MAJOR		179
+
 #define VXVM_MAJOR		199	/* VERITAS volume i/o driver    */
 #define VXSPEC_MAJOR		200	/* VERITAS volume config driver */
 #define VXDMP_MAJOR		201	/* VERITAS volume multipath driver */
+
+#define XENVBD_MAJOR		202	/* Xen virtual block device */
 
 #define MSR_MAJOR		202
 #define CPUID_MAJOR		203
@@ -163,5 +170,8 @@
 #define IBM_FS3270_MAJOR	228
 
 #define VIOTAPE_MAJOR		230
+
+#define BLOCK_EXT_MAJOR		259
+#define SCSI_OSD_MAJOR		260	/* open-osd's OSD scsi device */
 
 #endif

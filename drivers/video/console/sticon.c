@@ -37,7 +37,6 @@
 
 #include <linux/init.h>
 #include <linux/kernel.h>
-#include <linux/tty.h>
 #include <linux/console.h>
 #include <linux/errno.h>
 #include <linux/vt_kern.h>
@@ -75,7 +74,7 @@ static inline void cursor_undrawn(void)
     cursor_drawn = 0;
 }
 
-static const char *__init sticon_startup(void)
+static const char *sticon_startup(void)
 {
     return "STI console";
 }
@@ -315,7 +314,7 @@ static unsigned long sticon_getxy(struct vc_data *conp, unsigned long pos,
 }
 
 static u8 sticon_build_attr(struct vc_data *conp, u8 color, u8 intens,
-			    u8 blink, u8 underline, u8 reverse)
+			    u8 blink, u8 underline, u8 reverse, u8 italic)
 {
     u8 attr = ((color & 0x70) >> 1) | ((color & 7));
 
@@ -346,7 +345,7 @@ static void sticon_save_screen(struct vc_data *conp)
 {
 }
 
-static struct consw sti_con = {
+static const struct consw sti_con = {
 	.owner			= THIS_MODULE,
 	.con_startup		= sticon_startup,
 	.con_init		= sticon_init,
@@ -371,7 +370,7 @@ static struct consw sti_con = {
 
 
 
-int __init sticonsole_init(void)
+static int __init sticonsole_init(void)
 {
     /* already initialized ? */
     if (sticon_sti)

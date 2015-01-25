@@ -44,8 +44,6 @@
 * Jan 02, 1997	Gene Kozin	Initial version (based on wanpipe.h).
 *****************************************************************************/
 
-#include <linux/spinlock.h>       /* Support for SMP Locking */
-
 #ifndef	_ROUTER_H
 #define	_ROUTER_H
 
@@ -311,7 +309,7 @@ typedef struct wandev_conf
 #define WANOPT_EVEN	2
 
 /* CHDLC Protocol Options */
-/* DF Commmented out for now.
+/* DF Commented out for now.
 
 #define WANOPT_CHDLC_NO_DCD		IGNORE_DCD_FOR_LINK_STAT
 #define WANOPT_CHDLC_NO_CTS		IGNORE_CTS_FOR_LINK_STAT
@@ -457,6 +455,8 @@ typedef struct wanif_conf
 #include <linux/fs.h>		/* support for device drivers */
 #include <linux/proc_fs.h>	/* proc filesystem pragmatics */
 #include <linux/netdevice.h>	/* support for network drivers */
+#include <linux/spinlock.h>     /* Support for SMP Locking */
+
 /*----------------------------------------------------------------------------
  * WAN device data space.
  */
@@ -516,22 +516,13 @@ struct wan_device {
 /* Public functions available for device drivers */
 extern int register_wan_device(struct wan_device *wandev);
 extern int unregister_wan_device(char *name);
-unsigned short wanrouter_type_trans(struct sk_buff *skb,
-				    struct net_device *dev);
-int wanrouter_encapsulate(struct sk_buff *skb, struct net_device *dev,
-			  unsigned short type);
 
 /* Proc interface functions. These must not be called by the drivers! */
 extern int wanrouter_proc_init(void);
 extern void wanrouter_proc_cleanup(void);
 extern int wanrouter_proc_add(struct wan_device *wandev);
 extern int wanrouter_proc_delete(struct wan_device *wandev);
-extern int wanrouter_ioctl( struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg);
-
-extern void lock_adapter_irq(spinlock_t *lock, unsigned long *smp_flags);
-extern void unlock_adapter_irq(spinlock_t *lock, unsigned long *smp_flags);
-
-
+extern long wanrouter_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
 
 /* Public Data */
 /* list of registered devices */

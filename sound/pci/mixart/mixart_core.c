@@ -20,8 +20,9 @@
  *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
-#include <sound/driver.h>
 #include <linux/interrupt.h>
+#include <linux/mutex.h>
+
 #include <asm/io.h>
 #include <sound/core.h>
 #include "mixart.h"
@@ -44,7 +45,7 @@
 #define MSG_CANCEL_NOTIFY_MASK      0x80000000    /* this bit is set for a notification that has been canceled */
 
 
-static int retrieve_msg_frame(mixart_mgr_t *mgr, u32 *msg_frame)
+static int retrieve_msg_frame(struct mixart_mgr *mgr, u32 *msg_frame)
 {
 	/* read the message frame fifo */
 	u32 headptr, tailptr;
@@ -55,8 +56,10 @@ static int retrieve_msg_frame(mixart_mgr_t *mgr, u32 *msg_frame)
 	if (tailptr == headptr)
 		return 0; /* no message posted */
 
-	snd_assert( tailptr >= MSG_OUTBOUND_POST_STACK, return 0); /* error */
-	snd_assert( tailptr < (MSG_OUTBOUND_POST_STACK+MSG_BOUND_STACK_SIZE), return 0); /* error */
+	if (tailptr < MSG_OUTBOUND_POST_STACK)
+		return 0; /* error */
+	if (tailptr >= MSG_OUTBOUND_POST_STACK + MSG_BOUND_STACK_SIZE)
+		return 0; /* error */
 
 	*msg_frame = readl_be(MIXART_MEM(mgr, tailptr));
 
@@ -69,7 +72,8 @@ static int retrieve_msg_frame(mixart_mgr_t *mgr, u32 *msg_frame)
 	return 1;
 }
 
-static int get_msg(mixart_mgr_t *mgr, mixart_msg_t *resp, u32 msg_frame_address )
+static int get_msg(struct mixart_mgr *mgr, struct mixart_msg *resp,
+		   u32 msg_frame_address )
 {
 	unsigned long flags;
 	u32  headptr;
@@ -137,8 +141,8 @@ static int get_msg(mixart_mgr_t *mgr, mixart_msg_t *resp, u32 msg_frame_address 
  * send a message to miXart. return: the msg_frame used for this message
  */
 /* call with mgr->msg_lock held! */
-static int send_msg( mixart_mgr_t *mgr,
-		     mixart_msg_t *msg,
+static int send_msg( struct mixart_mgr *mgr,
+		     struct mixart_msg *msg,
 		     int max_answersize,
 		     int mark_pending,
 		     u32 *msg_event)
@@ -147,7 +151,8 @@ static int send_msg( mixart_mgr_t *mgr,
 	u32 msg_frame_address;
 	int err, i;
 
-	snd_assert(msg->size % 4 == 0, return -EINVAL);
+	if (snd_BUG_ON(msg->size % 4))
+		return -EINVAL;
 
 	err = 0;
 
@@ -230,15 +235,15 @@ static int send_msg( mixart_mgr_t *mgr,
 }
 
 
-int snd_mixart_send_msg(mixart_mgr_t *mgr, mixart_msg_t *request, int max_resp_size, void *resp_data)
+int snd_mixart_send_msg(struct mixart_mgr *mgr, struct mixart_msg *request, int max_resp_size, void *resp_data)
 {
-	mixart_msg_t resp;
+	struct mixart_msg resp;
 	u32 msg_frame = 0; /* set to 0, so it's no notification to wait for, but the answer */
 	int err;
 	wait_queue_t wait;
 	long timeout;
 
-	down(&mgr->msg_mutex);
+	mutex_lock(&mgr->msg_mutex);
 
 	init_waitqueue_entry(&wait, current);
 
@@ -247,7 +252,7 @@ int snd_mixart_send_msg(mixart_mgr_t *mgr, mixart_msg_t *request, int max_resp_s
 	err = send_msg(mgr, request, max_resp_size, 1, &msg_frame);  /* send and mark the answer pending */
 	if (err) {
 		spin_unlock_irq(&mgr->msg_lock);
-		up(&mgr->msg_mutex);
+		mutex_unlock(&mgr->msg_mutex);
 		return err;
 	}
 
@@ -259,38 +264,42 @@ int snd_mixart_send_msg(mixart_mgr_t *mgr, mixart_msg_t *request, int max_resp_s
 
 	if (! timeout) {
 		/* error - no ack */
-		up(&mgr->msg_mutex);
-		snd_printk(KERN_ERR "error: no reponse on msg %x\n", msg_frame);
+		mutex_unlock(&mgr->msg_mutex);
+		snd_printk(KERN_ERR "error: no response on msg %x\n", msg_frame);
 		return -EIO;
 	}
 
-	/* retrieve the answer into the same mixart_msg_t */
+	/* retrieve the answer into the same struct mixart_msg */
 	resp.message_id = 0;
-	resp.uid = (mixart_uid_t){0,0};
+	resp.uid = (struct mixart_uid){0,0};
 	resp.data = resp_data;
 	resp.size = max_resp_size;
 
 	err = get_msg(mgr, &resp, msg_frame);
 
 	if( request->message_id != resp.message_id )
-		snd_printk(KERN_ERR "REPONSE ERROR!\n");
+		snd_printk(KERN_ERR "RESPONSE ERROR!\n");
 
-	up(&mgr->msg_mutex);
+	mutex_unlock(&mgr->msg_mutex);
 	return err;
 }
 
 
-int snd_mixart_send_msg_wait_notif(mixart_mgr_t *mgr, mixart_msg_t *request, u32 notif_event)
+int snd_mixart_send_msg_wait_notif(struct mixart_mgr *mgr,
+				   struct mixart_msg *request, u32 notif_event)
 {
 	int err;
 	wait_queue_t wait;
 	long timeout;
 
-	snd_assert(notif_event != 0, return -EINVAL);
-	snd_assert((notif_event & MSG_TYPE_MASK) == MSG_TYPE_NOTIFY, return -EINVAL);
-	snd_assert((notif_event & MSG_CANCEL_NOTIFY_MASK) == 0, return -EINVAL);
+	if (snd_BUG_ON(!notif_event))
+		return -EINVAL;
+	if (snd_BUG_ON((notif_event & MSG_TYPE_MASK) != MSG_TYPE_NOTIFY))
+		return -EINVAL;
+	if (snd_BUG_ON(notif_event & MSG_CANCEL_NOTIFY_MASK))
+		return -EINVAL;
 
-	down(&mgr->msg_mutex);
+	mutex_lock(&mgr->msg_mutex);
 
 	init_waitqueue_entry(&wait, current);
 
@@ -299,7 +308,7 @@ int snd_mixart_send_msg_wait_notif(mixart_mgr_t *mgr, mixart_msg_t *request, u32
 	err = send_msg(mgr, request, MSG_DEFAULT_SIZE, 1, &notif_event);  /* send and mark the notification event pending */
 	if(err) {
 		spin_unlock_irq(&mgr->msg_lock);
-		up(&mgr->msg_mutex);
+		mutex_unlock(&mgr->msg_mutex);
 		return err;
 	}
 
@@ -311,17 +320,17 @@ int snd_mixart_send_msg_wait_notif(mixart_mgr_t *mgr, mixart_msg_t *request, u32
 
 	if (! timeout) {
 		/* error - no ack */
-		up(&mgr->msg_mutex);
+		mutex_unlock(&mgr->msg_mutex);
 		snd_printk(KERN_ERR "error: notification %x not received\n", notif_event);
 		return -EIO;
 	}
 
-	up(&mgr->msg_mutex);
+	mutex_unlock(&mgr->msg_mutex);
 	return 0;
 }
 
 
-int snd_mixart_send_msg_nonblock(mixart_mgr_t *mgr, mixart_msg_t *request)
+int snd_mixart_send_msg_nonblock(struct mixart_mgr *mgr, struct mixart_msg *request)
 {
 	u32 message_frame;
 	unsigned long flags;
@@ -332,7 +341,7 @@ int snd_mixart_send_msg_nonblock(mixart_mgr_t *mgr, mixart_msg_t *request)
 	err = send_msg(mgr, request, MSG_DEFAULT_SIZE, 0, &message_frame);
 	spin_unlock_irqrestore(&mgr->msg_lock, flags);
 
-	/* the answer will be handled by snd_mixart_msg_tasklet()  */
+	/* the answer will be handled by snd_struct mixart_msgasklet()  */
 	atomic_inc(&mgr->msg_processed);
 
 	return err;
@@ -343,10 +352,10 @@ int snd_mixart_send_msg_nonblock(mixart_mgr_t *mgr, mixart_msg_t *request)
 static u32 mixart_msg_data[MSG_DEFAULT_SIZE / 4];
 
 
-void snd_mixart_msg_tasklet( unsigned long arg)
+void snd_mixart_msg_tasklet(unsigned long arg)
 {
-	mixart_mgr_t *mgr = ( mixart_mgr_t*)(arg);
-	mixart_msg_t resp;
+	struct mixart_mgr *mgr = ( struct mixart_mgr*)(arg);
+	struct mixart_msg resp;
 	u32 msg, addr, type;
 	int err;
 
@@ -404,11 +413,11 @@ void snd_mixart_msg_tasklet( unsigned long arg)
 }
 
 
-irqreturn_t snd_mixart_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+irqreturn_t snd_mixart_interrupt(int irq, void *dev_id)
 {
-	mixart_mgr_t *mgr = dev_id;
+	struct mixart_mgr *mgr = dev_id;
 	int err;
-	mixart_msg_t resp;
+	struct mixart_msg resp;
 
 	u32 msg;
 	u32 it_reg;
@@ -448,7 +457,8 @@ irqreturn_t snd_mixart_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 			if(resp.message_id == MSG_SERVICES_TIMER_NOTIFY) {
 				int i;
-				mixart_timer_notify_t *notify = (mixart_timer_notify_t*)mixart_msg_data;
+				struct mixart_timer_notify *notify;
+				notify = (struct mixart_timer_notify *)mixart_msg_data;
 
 				for(i=0; i<notify->stream_count; i++) {
 
@@ -458,8 +468,8 @@ irqreturn_t snd_mixart_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 					unsigned int sub_number  =   buffer_id & MIXART_NOTIFY_SUBS_MASK;             /* 0 to MIXART_PLAYBACK_STREAMS */
 					unsigned int is_capture  = ((buffer_id & MIXART_NOTIFY_CAPT_MASK) != 0);      /* playback == 0 / capture == 1 */
 
-					mixart_t *chip  = mgr->chip[chip_number];
-					mixart_stream_t *stream;
+					struct snd_mixart *chip  = mgr->chip[chip_number];
+					struct mixart_stream *stream;
 
 					if ((chip_number >= mgr->num_cards) || (pcm_number >= MIXART_PCM_TOTAL) || (sub_number >= MIXART_PLAYBACK_STREAMS)) {
 						snd_printk(KERN_ERR "error MSG_SERVICES_TIMER_NOTIFY buffer_id (%x) pos(%d)\n",
@@ -473,7 +483,7 @@ irqreturn_t snd_mixart_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 						stream = &chip->playback_stream[pcm_number][sub_number];
 
 					if (stream->substream && (stream->status == MIXART_STREAM_STATUS_RUNNING)) {
-						snd_pcm_runtime_t *runtime = stream->substream->runtime;
+						struct snd_pcm_runtime *runtime = stream->substream->runtime;
 						int elapsed = 0;
 						u64 sample_count = ((u64)notify->streams[i].sample_pos_high_part) << 32;
 						sample_count |= notify->streams[i].sample_pos_low_part;
@@ -540,7 +550,7 @@ irqreturn_t snd_mixart_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 				mgr->msg_fifo[mgr->msg_fifo_writeptr] = msg;
 				mgr->msg_fifo_writeptr++;
 				mgr->msg_fifo_writeptr %= MSG_FIFO_SIZE;
-				tasklet_hi_schedule(&mgr->msg_taskq);
+				tasklet_schedule(&mgr->msg_taskq);
 			}
 			spin_unlock(&mgr->msg_lock);
 			break;
@@ -561,7 +571,7 @@ irqreturn_t snd_mixart_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 }
 
 
-void snd_mixart_init_mailbox(mixart_mgr_t *mgr)
+void snd_mixart_init_mailbox(struct mixart_mgr *mgr)
 {
 	writel( 0, MIXART_MEM( mgr, MSG_HOST_RSC_PROTECTION ) );
 	writel( 0, MIXART_MEM( mgr, MSG_AGENT_RSC_PROTECTION ) );
@@ -573,14 +583,14 @@ void snd_mixart_init_mailbox(mixart_mgr_t *mgr)
 	return;
 }
 
-void snd_mixart_exit_mailbox(mixart_mgr_t *mgr)
+void snd_mixart_exit_mailbox(struct mixart_mgr *mgr)
 {
 	/* no more interrupts on outbound messagebox */
 	writel_le( MIXART_HOST_ALL_INTERRUPT_MASKED, MIXART_REG( mgr, MIXART_PCI_OMIMR_OFFSET));
 	return;
 }
 
-void snd_mixart_reset_board(mixart_mgr_t *mgr)
+void snd_mixart_reset_board(struct mixart_mgr *mgr)
 {
 	/* reset miXart */
 	writel_be( 1, MIXART_REG(mgr, MIXART_BA1_BRUTAL_RESET_OFFSET) );

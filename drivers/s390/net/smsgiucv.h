@@ -5,6 +5,10 @@
  * Author(s): Martin Schwidefsky (schwidefsky@de.ibm.com)
  */
 
-int  smsg_register_callback(char *, void (*)(char *));
-void smsg_unregister_callback(char *, void (*)(char *));
+#define SMSGIUCV_DRV_NAME     "SMSGIUCV"
+
+int  smsg_register_callback(const char *,
+			    void (*)(const char *, char *));
+void smsg_unregister_callback(const char *,
+			      void (*)(const char *, char *));
 

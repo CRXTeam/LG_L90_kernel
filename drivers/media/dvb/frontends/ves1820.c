@@ -18,7 +18,6 @@
     Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 */
 
-#include <linux/config.h>
 #include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/init.h>
@@ -35,7 +34,6 @@
 
 struct ves1820_state {
 	struct i2c_adapter* i2c;
-	struct dvb_frontend_ops ops;
 	/* configuration settings */
 	const struct ves1820_config* config;
 	struct dvb_frontend frontend;
@@ -49,7 +47,7 @@ struct ves1820_state {
 static int verbose;
 
 static u8 ves1820_inittab[] = {
-	0x69, 0x6A, 0x93, 0x12, 0x12, 0x46, 0x26, 0x1A,
+	0x69, 0x6A, 0x93, 0x1A, 0x12, 0x46, 0x26, 0x1A,
 	0x43, 0x6A, 0xAA, 0xAA, 0x1E, 0x85, 0x43, 0x20,
 	0xE0, 0x00, 0xA1, 0x00, 0x00, 0x00, 0x00, 0x00,
 	0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
@@ -67,10 +65,9 @@ static int ves1820_writereg(struct ves1820_state *state, u8 reg, u8 data)
 	ret = i2c_transfer(state->i2c, &msg, 1);
 
 	if (ret != 1)
-		printk("ves1820: %s(): writereg error (reg == 0x%02x,"
-			"val == 0x%02x, ret == %i)\n", __FUNCTION__, reg, data, ret);
+		printk("ves1820: %s(): writereg error (reg == 0x%02x, "
+			"val == 0x%02x, ret == %i)\n", __func__, reg, data, ret);
 
-	msleep(10);
 	return (ret != 1) ? -EREMOTEIO : 0;
 }
 
@@ -87,8 +84,8 @@ static u8 ves1820_readreg(struct ves1820_state *state, u8 reg)
 	ret = i2c_transfer(state->i2c, msg, 2);
 
 	if (ret != 2)
-		printk("ves1820: %s(): readreg error (reg == 0x%02x,"
-		"ret == %i)\n", __FUNCTION__, reg, ret);
+		printk("ves1820: %s(): readreg error (reg == 0x%02x, "
+		"ret == %i)\n", __func__, reg, ret);
 
 	return b1[0];
 }
@@ -141,25 +138,25 @@ static int ves1820_set_symbolrate(struct ves1820_state *state, u32 symbolrate)
 	/* yeuch! */
 	fpxin = state->config->xin * 10;
 	fptmp = fpxin; do_div(fptmp, 123);
-	if (symbolrate < fptmp);
+	if (symbolrate < fptmp)
 		SFIL = 1;
 	fptmp = fpxin; do_div(fptmp, 160);
-	if (symbolrate < fptmp);
+	if (symbolrate < fptmp)
 		SFIL = 0;
 	fptmp = fpxin; do_div(fptmp, 246);
-	if (symbolrate < fptmp);
+	if (symbolrate < fptmp)
 		SFIL = 1;
 	fptmp = fpxin; do_div(fptmp, 320);
-	if (symbolrate < fptmp);
+	if (symbolrate < fptmp)
 		SFIL = 0;
 	fptmp = fpxin; do_div(fptmp, 492);
-	if (symbolrate < fptmp);
+	if (symbolrate < fptmp)
 		SFIL = 1;
 	fptmp = fpxin; do_div(fptmp, 640);
-	if (symbolrate < fptmp);
+	if (symbolrate < fptmp)
 		SFIL = 0;
 	fptmp = fpxin; do_div(fptmp, 984);
-	if (symbolrate < fptmp);
+	if (symbolrate < fptmp)
 		SFIL = 1;
 
 	fin = state->config->xin >> 4;
@@ -168,7 +165,7 @@ static int ves1820_set_symbolrate(struct ves1820_state *state, u32 symbolrate)
 	tmp = ((symbolrate << 4) % fin) << 8;
 	ratio = (ratio << 8) + tmp / fin;
 	tmp = (tmp % fin) << 8;
-	ratio = (ratio << 8) + (tmp + fin / 2) / fin;
+	ratio = (ratio << 8) + DIV_ROUND_CLOSEST(tmp, fin);
 
 	BDR = ratio;
 	BDRI = (((state->config->xin << 5) / symbolrate) + 1) / 2;
@@ -193,40 +190,41 @@ static int ves1820_set_symbolrate(struct ves1820_state *state, u32 symbolrate)
 
 static int ves1820_init(struct dvb_frontend* fe)
 {
-	struct ves1820_state* state = (struct ves1820_state*) fe->demodulator_priv;
+	struct ves1820_state* state = fe->demodulator_priv;
 	int i;
-	int val;
 
 	ves1820_writereg(state, 0, 0);
 
-	for (i = 0; i < 53; i++) {
-		val = ves1820_inittab[i];
-		if ((i == 2) && (state->config->selagc)) val |= 0x08;
-		ves1820_writereg(state, i, val);
-	}
+	for (i = 0; i < sizeof(ves1820_inittab); i++)
+		ves1820_writereg(state, i, ves1820_inittab[i]);
+	if (state->config->selagc)
+		ves1820_writereg(state, 2, ves1820_inittab[2] | 0x08);
 
 	ves1820_writereg(state, 0x34, state->pwm);
-
-	if (state->config->pll_init) state->config->pll_init(fe);
 
 	return 0;
 }
 
-static int ves1820_set_parameters(struct dvb_frontend* fe, struct dvb_frontend_parameters *p)
+static int ves1820_set_parameters(struct dvb_frontend *fe)
 {
-	struct ves1820_state* state = (struct ves1820_state*) fe->demodulator_priv;
+	struct dtv_frontend_properties *p = &fe->dtv_property_cache;
+	struct ves1820_state* state = fe->demodulator_priv;
 	static const u8 reg0x00[] = { 0x00, 0x04, 0x08, 0x0c, 0x10 };
 	static const u8 reg0x01[] = { 140, 140, 106, 100, 92 };
 	static const u8 reg0x05[] = { 135, 100, 70, 54, 38 };
 	static const u8 reg0x08[] = { 162, 116, 67, 52, 35 };
 	static const u8 reg0x09[] = { 145, 150, 106, 126, 107 };
-	int real_qam = p->u.qam.modulation - QAM_16;
+	int real_qam = p->modulation - QAM_16;
 
 	if (real_qam < 0 || real_qam > 4)
 		return -EINVAL;
 
-	state->config->pll_set(fe, p);
-	ves1820_set_symbolrate(state, p->u.qam.symbol_rate);
+	if (fe->ops.tuner_ops.set_params) {
+		fe->ops.tuner_ops.set_params(fe);
+		if (fe->ops.i2c_gate_ctrl) fe->ops.i2c_gate_ctrl(fe, 0);
+	}
+
+	ves1820_set_symbolrate(state, p->symbol_rate);
 	ves1820_writereg(state, 0x34, state->pwm);
 
 	ves1820_writereg(state, 0x01, reg0x01[real_qam]);
@@ -235,13 +233,13 @@ static int ves1820_set_parameters(struct dvb_frontend* fe, struct dvb_frontend_p
 	ves1820_writereg(state, 0x09, reg0x09[real_qam]);
 
 	ves1820_setup_reg0(state, reg0x00[real_qam], p->inversion);
-
+	ves1820_writereg(state, 2, ves1820_inittab[2] | (state->config->selagc ? 0x08 : 0));
 	return 0;
 }
 
 static int ves1820_read_status(struct dvb_frontend* fe, fe_status_t* status)
 {
-	struct ves1820_state* state = (struct ves1820_state*) fe->demodulator_priv;
+	struct ves1820_state* state = fe->demodulator_priv;
 	int sync;
 
 	*status = 0;
@@ -267,7 +265,7 @@ static int ves1820_read_status(struct dvb_frontend* fe, fe_status_t* status)
 
 static int ves1820_read_ber(struct dvb_frontend* fe, u32* ber)
 {
-	struct ves1820_state* state = (struct ves1820_state*) fe->demodulator_priv;
+	struct ves1820_state* state = fe->demodulator_priv;
 
 	u32 _ber = ves1820_readreg(state, 0x14) |
 			(ves1820_readreg(state, 0x15) << 8) |
@@ -279,7 +277,7 @@ static int ves1820_read_ber(struct dvb_frontend* fe, u32* ber)
 
 static int ves1820_read_signal_strength(struct dvb_frontend* fe, u16* strength)
 {
-	struct ves1820_state* state = (struct ves1820_state*) fe->demodulator_priv;
+	struct ves1820_state* state = fe->demodulator_priv;
 
 	u8 gain = ves1820_readreg(state, 0x17);
 	*strength = (gain << 8) | gain;
@@ -289,7 +287,7 @@ static int ves1820_read_signal_strength(struct dvb_frontend* fe, u16* strength)
 
 static int ves1820_read_snr(struct dvb_frontend* fe, u16* snr)
 {
-	struct ves1820_state* state = (struct ves1820_state*) fe->demodulator_priv;
+	struct ves1820_state* state = fe->demodulator_priv;
 
 	u8 quality = ~ves1820_readreg(state, 0x18);
 	*snr = (quality << 8) | quality;
@@ -299,7 +297,7 @@ static int ves1820_read_snr(struct dvb_frontend* fe, u16* snr)
 
 static int ves1820_read_ucblocks(struct dvb_frontend* fe, u32* ucblocks)
 {
-	struct ves1820_state* state = (struct ves1820_state*) fe->demodulator_priv;
+	struct ves1820_state* state = fe->demodulator_priv;
 
 	*ucblocks = ves1820_readreg(state, 0x13) & 0x7f;
 	if (*ucblocks == 0x7f)
@@ -312,9 +310,10 @@ static int ves1820_read_ucblocks(struct dvb_frontend* fe, u32* ucblocks)
 	return 0;
 }
 
-static int ves1820_get_frontend(struct dvb_frontend* fe, struct dvb_frontend_parameters *p)
+static int ves1820_get_frontend(struct dvb_frontend *fe)
 {
-	struct ves1820_state* state = (struct ves1820_state*) fe->demodulator_priv;
+	struct dtv_frontend_properties *p = &fe->dtv_property_cache;
+	struct ves1820_state* state = fe->demodulator_priv;
 	int sync;
 	s8 afc = 0;
 
@@ -323,7 +322,7 @@ static int ves1820_get_frontend(struct dvb_frontend* fe, struct dvb_frontend_par
 	if (verbose) {
 		/* AFC only valid when carrier has been recovered */
 		printk(sync & 2 ? "ves1820: AFC (%d) %dHz\n" :
-			"ves1820: [AFC (%d) %dHz]\n", afc, -((s32) p->u.qam.symbol_rate * afc) >> 10);
+			"ves1820: [AFC (%d) %dHz]\n", afc, -((s32) p->symbol_rate * afc) >> 10);
 	}
 
 	if (!state->config->invert) {
@@ -332,20 +331,20 @@ static int ves1820_get_frontend(struct dvb_frontend* fe, struct dvb_frontend_par
 		p->inversion = (!(state->reg0 & 0x20)) ? INVERSION_ON : INVERSION_OFF;
 	}
 
-	p->u.qam.modulation = ((state->reg0 >> 2) & 7) + QAM_16;
+	p->modulation = ((state->reg0 >> 2) & 7) + QAM_16;
 
-	p->u.qam.fec_inner = FEC_NONE;
+	p->fec_inner = FEC_NONE;
 
 	p->frequency = ((p->frequency + 31250) / 62500) * 62500;
 	if (sync & 2)
-		p->frequency -= ((s32) p->u.qam.symbol_rate * afc) >> 10;
+		p->frequency -= ((s32) p->symbol_rate * afc) >> 10;
 
 	return 0;
 }
 
 static int ves1820_sleep(struct dvb_frontend* fe)
 {
-	struct ves1820_state* state = (struct ves1820_state*) fe->demodulator_priv;
+	struct ves1820_state* state = fe->demodulator_priv;
 
 	ves1820_writereg(state, 0x1b, 0x02);	/* pdown ADC */
 	ves1820_writereg(state, 0x00, 0x80);	/* standby */
@@ -364,7 +363,7 @@ static int ves1820_get_tune_settings(struct dvb_frontend* fe, struct dvb_fronten
 
 static void ves1820_release(struct dvb_frontend* fe)
 {
-	struct ves1820_state* state = (struct ves1820_state*) fe->demodulator_priv;
+	struct ves1820_state* state = fe->demodulator_priv;
 	kfree(state);
 }
 
@@ -377,12 +376,11 @@ struct dvb_frontend* ves1820_attach(const struct ves1820_config* config,
 	struct ves1820_state* state = NULL;
 
 	/* allocate memory for the internal state */
-	state = (struct ves1820_state*) kmalloc(sizeof(struct ves1820_state), GFP_KERNEL);
+	state = kzalloc(sizeof(struct ves1820_state), GFP_KERNEL);
 	if (state == NULL)
 		goto error;
 
 	/* setup the state */
-	memcpy(&state->ops, &ves1820_ops, sizeof(struct dvb_frontend_ops));
 	state->reg0 = ves1820_inittab[0];
 	state->config = config;
 	state->i2c = i2c;
@@ -395,12 +393,12 @@ struct dvb_frontend* ves1820_attach(const struct ves1820_config* config,
 	if (verbose)
 		printk("ves1820: pwm=0x%02x\n", state->pwm);
 
-	state->ops.info.symbol_rate_min = (state->config->xin / 2) / 64;      /* SACLK/64 == (XIN/2)/64 */
-	state->ops.info.symbol_rate_max = (state->config->xin / 2) / 4;       /* SACLK/4 */
-
 	/* create dvb_frontend */
-	state->frontend.ops = &state->ops;
+	memcpy(&state->frontend.ops, &ves1820_ops, sizeof(struct dvb_frontend_ops));
+	state->frontend.ops.info.symbol_rate_min = (state->config->xin / 2) / 64;      /* SACLK/64 == (XIN/2)/64 */
+	state->frontend.ops.info.symbol_rate_max = (state->config->xin / 2) / 4;       /* SACLK/4 */
 	state->frontend.demodulator_priv = state;
+
 	return &state->frontend;
 
 error:
@@ -409,13 +407,12 @@ error:
 }
 
 static struct dvb_frontend_ops ves1820_ops = {
-
+	.delsys = { SYS_DVBC_ANNEX_A },
 	.info = {
 		.name = "VLSI VES1820 DVB-C",
-		.type = FE_QAM,
 		.frequency_stepsize = 62500,
-		.frequency_min = 51000000,
-		.frequency_max = 858000000,
+		.frequency_min = 47000000,
+		.frequency_max = 862000000,
 		.caps = FE_CAN_QAM_16 |
 			FE_CAN_QAM_32 |
 			FE_CAN_QAM_64 |

@@ -1,11 +1,9 @@
 #ifndef __RIVAFB_H
 #define __RIVAFB_H
 
-#include <linux/config.h>
 #include <linux/fb.h>
 #include <video/vga.h>
 #include <linux/i2c.h>
-#include <linux/i2c-id.h>
 #include <linux/i2c-algo-bit.h>
 
 #include "riva_hw.h"
@@ -54,14 +52,14 @@ struct riva_par {
 #ifdef CONFIG_X86
 	struct vgastate state;
 #endif
-	atomic_t ref_count;
+	struct mutex open_lock;
+	unsigned int ref_count;
 	unsigned char *EDID;
 	unsigned int Chipset;
 	int forceCRTC;
 	Bool SecondCRTC;
 	int FlatPanel;
 	struct pci_dev *pdev;
-	int bus;
 	int cursor_reset;
 #ifdef CONFIG_MTRR
 	struct { int vram; int vram_valid; } mtrr;

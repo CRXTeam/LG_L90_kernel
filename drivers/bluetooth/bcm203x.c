@@ -22,7 +22,6 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 
 #include <linux/kernel.h>
@@ -30,7 +29,6 @@
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/errno.h>
-#include <linux/timer.h>
 
 #include <linux/device.h>
 #include <linux/firmware.h>
@@ -39,16 +37,9 @@
 
 #include <net/bluetooth/bluetooth.h>
 
-#ifndef CONFIG_BT_HCIBCM203X_DEBUG
-#undef  BT_DBG
-#define BT_DBG(D...)
-#endif
+#define VERSION "1.2"
 
-#define VERSION "1.0"
-
-static int ignore = 0;
-
-static struct usb_device_id bcm203x_table[] = {
+static const struct usb_device_id bcm203x_table[] = {
 	/* Broadcom Blutonium (BCM2033) */
 	{ USB_DEVICE(0x0a5c, 0x2033) },
 
@@ -73,7 +64,7 @@ struct bcm203x_data {
 
 	unsigned long		state;
 
-	struct timer_list	timer;
+	struct work_struct	work;
 
 	struct urb		*urb;
 	unsigned char		*buffer;
@@ -83,7 +74,7 @@ struct bcm203x_data {
 	unsigned int		fw_sent;
 };
 
-static void bcm203x_complete(struct urb *urb, struct pt_regs *regs)
+static void bcm203x_complete(struct urb *urb)
 {
 	struct bcm203x_data *data = urb->context;
 	struct usb_device *udev = urb->dev;
@@ -106,7 +97,7 @@ static void bcm203x_complete(struct urb *urb, struct pt_regs *regs)
 
 		data->state = BCM203X_SELECT_MEMORY;
 
-		mod_timer(&data->timer, jiffies + (HZ / 10));
+		schedule_work(&data->work);
 		break;
 
 	case BCM203X_SELECT_MEMORY:
@@ -159,9 +150,10 @@ static void bcm203x_complete(struct urb *urb, struct pt_regs *regs)
 	}
 }
 
-static void bcm203x_timer(unsigned long user_data)
+static void bcm203x_work(struct work_struct *work)
 {
-	struct bcm203x_data *data = (struct bcm203x_data *) user_data;
+	struct bcm203x_data *data =
+		container_of(work, struct bcm203x_data, work);
 
 	if (usb_submit_urb(data->urb, GFP_ATOMIC) < 0)
 		BT_ERR("Can't submit URB");
@@ -176,16 +168,14 @@ static int bcm203x_probe(struct usb_interface *intf, const struct usb_device_id 
 
 	BT_DBG("intf %p id %p", intf, id);
 
-	if (ignore || (intf->cur_altsetting->desc.bInterfaceNumber != 0))
+	if (intf->cur_altsetting->desc.bInterfaceNumber != 0)
 		return -ENODEV;
 
-	data = kmalloc(sizeof(*data), GFP_KERNEL);
+	data = kzalloc(sizeof(*data), GFP_KERNEL);
 	if (!data) {
 		BT_ERR("Can't allocate memory for data structure");
 		return -ENOMEM;
 	}
-
-	memset(data, 0, sizeof(*data));
 
 	data->udev  = udev;
 	data->state = BCM203X_LOAD_MINIDRV;
@@ -204,7 +194,7 @@ static int bcm203x_probe(struct usb_interface *intf, const struct usb_device_id 
 		return -EIO;
 	}
 
-	BT_DBG("minidrv data %p size %d", firmware->data, firmware->size);
+	BT_DBG("minidrv data %p size %zu", firmware->data, firmware->size);
 
 	size = max_t(uint, firmware->size, 4096);
 
@@ -232,30 +222,28 @@ static int bcm203x_probe(struct usb_interface *intf, const struct usb_device_id 
 		return -EIO;
 	}
 
-	BT_DBG("firmware data %p size %d", firmware->data, firmware->size);
+	BT_DBG("firmware data %p size %zu", firmware->data, firmware->size);
 
-	data->fw_data = kmalloc(firmware->size, GFP_KERNEL);
+	data->fw_data = kmemdup(firmware->data, firmware->size, GFP_KERNEL);
 	if (!data->fw_data) {
 		BT_ERR("Can't allocate memory for firmware image");
+		release_firmware(firmware);
 		usb_free_urb(data->urb);
 		kfree(data->buffer);
 		kfree(data);
 		return -ENOMEM;
 	}
 
-	memcpy(data->fw_data, firmware->data, firmware->size);
 	data->fw_size = firmware->size;
 	data->fw_sent = 0;
 
 	release_firmware(firmware);
 
-	init_timer(&data->timer);
-	data->timer.function = bcm203x_timer;
-	data->timer.data = (unsigned long) data;
+	INIT_WORK(&data->work, bcm203x_work);
 
 	usb_set_intfdata(intf, data);
 
-	mod_timer(&data->timer, jiffies + HZ);
+	schedule_work(&data->work);
 
 	return 0;
 }
@@ -277,7 +265,6 @@ static void bcm203x_disconnect(struct usb_interface *intf)
 }
 
 static struct usb_driver bcm203x_driver = {
-	.owner		= THIS_MODULE,
 	.name		= "bcm203x",
 	.probe		= bcm203x_probe,
 	.disconnect	= bcm203x_disconnect,
@@ -305,10 +292,9 @@ static void __exit bcm203x_exit(void)
 module_init(bcm203x_init);
 module_exit(bcm203x_exit);
 
-module_param(ignore, bool, 0644);
-MODULE_PARM_DESC(ignore, "Ignore devices from the matching table");
-
 MODULE_AUTHOR("Marcel Holtmann <marcel@holtmann.org>");
 MODULE_DESCRIPTION("Broadcom Blutonium firmware driver ver " VERSION);
 MODULE_VERSION(VERSION);
 MODULE_LICENSE("GPL");
+MODULE_FIRMWARE("BCM2033-MD.hex");
+MODULE_FIRMWARE("BCM2033-FW.bin");

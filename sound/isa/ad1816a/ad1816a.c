@@ -18,12 +18,11 @@
     Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
 */
 
-#include <sound/driver.h>
 #include <linux/init.h>
 #include <linux/time.h>
 #include <linux/wait.h>
 #include <linux/pnp.h>
-#include <linux/moduleparam.h>
+#include <linux/module.h>
 #include <sound/core.h>
 #include <sound/initval.h>
 #include <sound/ad1816a.h>
@@ -45,7 +44,7 @@ MODULE_SUPPORTED_DEVICE("{{Highscreen,Sound-Boostar 16 3D},"
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 1-MAX */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;	/* ID for this card */
-static int enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_ISAPNP;	/* Enable this card */
+static bool enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_ISAPNP;	/* Enable this card */
 static long port[SNDRV_CARDS] = SNDRV_DEFAULT_PORT;	/* PnP setup */
 static long mpu_port[SNDRV_CARDS] = SNDRV_DEFAULT_PORT;	/* PnP setup */
 static long fm_port[SNDRV_CARDS] = SNDRV_DEFAULT_PORT;	/* PnP setup */
@@ -53,6 +52,7 @@ static int irq[SNDRV_CARDS] = SNDRV_DEFAULT_IRQ;	/* Pnp setup */
 static int mpu_irq[SNDRV_CARDS] = SNDRV_DEFAULT_IRQ;	/* Pnp setup */
 static int dma1[SNDRV_CARDS] = SNDRV_DEFAULT_DMA;	/* PnP setup */
 static int dma2[SNDRV_CARDS] = SNDRV_DEFAULT_DMA;	/* PnP setup */
+static int clockfreq[SNDRV_CARDS];
 
 module_param_array(index, int, NULL, 0444);
 MODULE_PARM_DESC(index, "Index value for ad1816a based soundcard.");
@@ -60,20 +60,8 @@ module_param_array(id, charp, NULL, 0444);
 MODULE_PARM_DESC(id, "ID string for ad1816a based soundcard.");
 module_param_array(enable, bool, NULL, 0444);
 MODULE_PARM_DESC(enable, "Enable ad1816a based soundcard.");
-module_param_array(port, long, NULL, 0444);
-MODULE_PARM_DESC(port, "Port # for ad1816a driver.");
-module_param_array(mpu_port, long, NULL, 0444);
-MODULE_PARM_DESC(mpu_port, "MPU-401 port # for ad1816a driver.");
-module_param_array(fm_port, long, NULL, 0444);
-MODULE_PARM_DESC(fm_port, "FM port # for ad1816a driver.");
-module_param_array(irq, int, NULL, 0444);
-MODULE_PARM_DESC(irq, "IRQ # for ad1816a driver.");
-module_param_array(mpu_irq, int, NULL, 0444);
-MODULE_PARM_DESC(mpu_irq, "MPU-401 IRQ # for ad1816a driver.");
-module_param_array(dma1, int, NULL, 0444);
-MODULE_PARM_DESC(dma1, "1st DMA # for ad1816a driver.");
-module_param_array(dma2, int, NULL, 0444);
-MODULE_PARM_DESC(dma2, "2nd DMA # for ad1816a driver.");
+module_param_array(clockfreq, int, NULL, 0444);
+MODULE_PARM_DESC(clockfreq, "Clock frequency for ad1816a driver (default = 0).");
 
 struct snd_card_ad1816a {
 	struct pnp_dev *dev;
@@ -83,6 +71,8 @@ struct snd_card_ad1816a {
 static struct pnp_card_device_id snd_ad1816a_pnpids[] = {
 	/* Analog Devices AD1815 */
 	{ .id = "ADS7150", .devs = { { .id = "ADS7150" }, { .id = "ADS7151" } } },
+	/* Analog Device AD1816? */
+	{ .id = "ADS7180", .devs = { { .id = "ADS7180" }, { .id = "ADS7181" } } },
 	/* Analog Devices AD1816A - added by Kenneth Platz <kxp@atl.hp.com> */
 	{ .id = "ADS7181", .devs = { { .id = "ADS7180" }, { .id = "ADS7181" } } },
 	/* Analog Devices AD1816A - Aztech/Newcom SC-16 3D */
@@ -93,8 +83,10 @@ static struct pnp_card_device_id snd_ad1816a_pnpids[] = {
 	{ .id = "MDK1605", .devs = { { .id = "ADS7180" }, { .id = "ADS7181" } } },
 	/* Shark Predator ISA - added by Ken Arromdee */
 	{ .id = "SMM7180", .devs = { { .id = "ADS7180" }, { .id = "ADS7181" } } },
-	/* Analog Devices AD1816A - Terratec AudioSystem EWS64S */
+	/* Analog Devices AD1816A - Terratec AudioSystem EWS64 S */
 	{ .id = "TER1112", .devs = { { .id = "ADS7180" }, { .id = "ADS7181" } } },
+	/* Analog Devices AD1816A - Terratec AudioSystem EWS64 S */
+	{ .id = "TER1112", .devs = { { .id = "TER1100" }, { .id = "TER1101" } } },
 	/* Analog Devices AD1816A - Terratec Base 64 */
 	{ .id = "TER1411", .devs = { { .id = "ADS7180" }, { .id = "ADS7181" } } },
 	/* end */
@@ -112,40 +104,23 @@ static int __devinit snd_card_ad1816a_pnp(int dev, struct snd_card_ad1816a *acar
 					  const struct pnp_card_device_id *id)
 {
 	struct pnp_dev *pdev;
-	struct pnp_resource_table *cfg = kmalloc(sizeof(*cfg), GFP_KERNEL);
 	int err;
 
 	acard->dev = pnp_request_card_device(card, id->devs[0].id, NULL);
-	if (acard->dev == NULL) {
-		kfree(cfg);
+	if (acard->dev == NULL)
 		return -EBUSY;
-	}
+
 	acard->devmpu = pnp_request_card_device(card, id->devs[1].id, NULL);
 	if (acard->devmpu == NULL) {
-		kfree(cfg);
-		return -EBUSY;
+		mpu_port[dev] = -1;
+		snd_printk(KERN_WARNING PFX "MPU401 device busy, skipping.\n");
 	}
 
 	pdev = acard->dev;
-	pnp_init_resource_table(cfg);
 
-	if (port[dev] != SNDRV_AUTO_PORT)
-		pnp_resource_change(&cfg->port_resource[2], port[dev], 16);
-	if (fm_port[dev] != SNDRV_AUTO_PORT)
-		pnp_resource_change(&cfg->port_resource[1], fm_port[dev], 4);
-	if (dma1[dev] != SNDRV_AUTO_DMA)
-		pnp_resource_change(&cfg->dma_resource[0], dma1[dev], 1);
-	if (dma2[dev] != SNDRV_AUTO_DMA)
-		pnp_resource_change(&cfg->dma_resource[1], dma2[dev], 1);
-	if (irq[dev] != SNDRV_AUTO_IRQ)
-		pnp_resource_change(&cfg->irq_resource[0], irq[dev], 1);
-
-	if (pnp_manual_config_dev(pdev, cfg, 0) < 0)
-		snd_printk(KERN_ERR PFX "AUDIO the requested resources are invalid, using auto config\n");
 	err = pnp_activate_dev(pdev);
 	if (err < 0) {
 		printk(KERN_ERR PFX "AUDIO PnP configure failure\n");
-		kfree(cfg);
 		return -EBUSY;
 	}
 
@@ -155,16 +130,11 @@ static int __devinit snd_card_ad1816a_pnp(int dev, struct snd_card_ad1816a *acar
 	dma2[dev] = pnp_dma(pdev, 1);
 	irq[dev] = pnp_irq(pdev, 0);
 
+	if (acard->devmpu == NULL)
+		return 0;
+
 	pdev = acard->devmpu;
-	pnp_init_resource_table(cfg);
 
-	if (mpu_port[dev] != SNDRV_AUTO_PORT)
-		pnp_resource_change(&cfg->port_resource[0], mpu_port[dev], 2);
-	if (mpu_irq[dev] != SNDRV_AUTO_IRQ)
-		pnp_resource_change(&cfg->irq_resource[0], mpu_irq[dev], 1);
-
-	if (pnp_manual_config_dev(pdev, cfg, 0) < 0)
-		snd_printk(KERN_ERR PFX "AUDIO the requested resources are invalid, using auto config\n");
 	err = pnp_activate_dev(pdev);
 	if (err < 0) {
 		printk(KERN_ERR PFX "MPU401 PnP configure failure\n");
@@ -175,7 +145,6 @@ static int __devinit snd_card_ad1816a_pnp(int dev, struct snd_card_ad1816a *acar
 		mpu_irq[dev] = pnp_irq(pdev, 0);
 	}
 
-	kfree(cfg);
 	return 0;
 }
 
@@ -183,15 +152,17 @@ static int __devinit snd_card_ad1816a_probe(int dev, struct pnp_card_link *pcard
 					    const struct pnp_card_device_id *pid)
 {
 	int error;
-	snd_card_t *card;
+	struct snd_card *card;
 	struct snd_card_ad1816a *acard;
-	ad1816a_t *chip;
-	opl3_t *opl3;
+	struct snd_ad1816a *chip;
+	struct snd_opl3 *opl3;
+	struct snd_timer *timer;
 
-	if ((card = snd_card_new(index[dev], id[dev], THIS_MODULE,
-				 sizeof(struct snd_card_ad1816a))) == NULL)
-		return -ENOMEM;
-	acard = (struct snd_card_ad1816a *)card->private_data;
+	error = snd_card_create(index[dev], id[dev], THIS_MODULE,
+				sizeof(struct snd_card_ad1816a), &card);
+	if (error < 0)
+		return error;
+	acard = card->private_data;
 
 	if ((error = snd_card_ad1816a_pnp(dev, acard, pcard, pid))) {
 		snd_card_free(card);
@@ -207,6 +178,8 @@ static int __devinit snd_card_ad1816a_probe(int dev, struct pnp_card_link *pcard
 		snd_card_free(card);
 		return error;
 	}
+	if (clockfreq[dev] >= 5000 && clockfreq[dev] <= 100000)
+		chip->clock_freq = clockfreq[dev];
 
 	strcpy(card->driver, "AD1816A");
 	strcpy(card->shortname, "ADI SoundPort AD1816A");
@@ -223,9 +196,15 @@ static int __devinit snd_card_ad1816a_probe(int dev, struct pnp_card_link *pcard
 		return error;
 	}
 
+	error = snd_ad1816a_timer(chip, 0, &timer);
+	if (error < 0) {
+		snd_card_free(card);
+		return error;
+	}
+
 	if (mpu_port[dev] > 0) {
 		if (snd_mpu401_uart_new(card, 0, MPU401_HW_MPU401,
-					mpu_port[dev], 0, mpu_irq[dev], SA_INTERRUPT,
+					mpu_port[dev], 0, mpu_irq[dev],
 					NULL) < 0)
 			printk(KERN_ERR PFX "no MPU-401 device at 0x%lx.\n", mpu_port[dev]);
 	}
@@ -236,11 +215,8 @@ static int __devinit snd_card_ad1816a_probe(int dev, struct pnp_card_link *pcard
 				    OPL3_HW_AUTO, 0, &opl3) < 0) {
 			printk(KERN_ERR PFX "no OPL device at 0x%lx-0x%lx.\n", fm_port[dev], fm_port[dev] + 2);
 		} else {
-			if ((error = snd_opl3_timer_new(opl3, 1, 2)) < 0) {
-				snd_card_free(card);
-				return error;
-			}
-			if ((error = snd_opl3_hwdep_new(opl3, 0, 1, NULL)) < 0) {
+			error = snd_opl3_hwdep_new(opl3, 0, 1, NULL);
+			if (error < 0) {
 				snd_card_free(card);
 				return error;
 			}
@@ -255,6 +231,8 @@ static int __devinit snd_card_ad1816a_probe(int dev, struct pnp_card_link *pcard
 	return 0;
 }
 
+static unsigned int __devinitdata ad1816a_devices;
+
 static int __devinit snd_ad1816a_pnp_detect(struct pnp_card_link *card,
 					    const struct pnp_card_device_id *id)
 {
@@ -268,6 +246,7 @@ static int __devinit snd_ad1816a_pnp_detect(struct pnp_card_link *card,
 		if (res < 0)
 			return res;
 		dev++;
+		ad1816a_devices++;
 		return 0;
 	}
         return -ENODEV;
@@ -275,10 +254,8 @@ static int __devinit snd_ad1816a_pnp_detect(struct pnp_card_link *card,
 
 static void __devexit snd_ad1816a_pnp_remove(struct pnp_card_link * pcard)
 {
-	snd_card_t *card = (snd_card_t *) pnp_get_card_drvdata(pcard);
-
-	snd_card_disconnect(card);
-	snd_card_free_in_thread(card);
+	snd_card_free(pnp_get_card_drvdata(pcard));
+	pnp_set_card_drvdata(pcard, NULL);
 }
 
 static struct pnp_card_driver ad1816a_pnpc_driver = {
@@ -287,20 +264,25 @@ static struct pnp_card_driver ad1816a_pnpc_driver = {
 	.id_table	= snd_ad1816a_pnpids,
 	.probe		= snd_ad1816a_pnp_detect,
 	.remove		= __devexit_p(snd_ad1816a_pnp_remove),
+	/* FIXME: suspend/resume */
 };
 
 static int __init alsa_card_ad1816a_init(void)
 {
-	int cards = 0;
+	int err;
 
-	cards += pnp_register_card_driver(&ad1816a_pnpc_driver);
-#ifdef MODULE
-	if (!cards) {
+	err = pnp_register_card_driver(&ad1816a_pnpc_driver);
+	if (err)
+		return err;
+
+	if (!ad1816a_devices) {
 		pnp_unregister_card_driver(&ad1816a_pnpc_driver);
+#ifdef MODULE
 		printk(KERN_ERR "no AD1816A based soundcards found.\n");
-	}
 #endif	/* MODULE */
-	return cards ? 0 : -ENODEV;
+		return -ENODEV;
+	}
+	return 0;
 }
 
 static void __exit alsa_card_ad1816a_exit(void)

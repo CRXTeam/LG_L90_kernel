@@ -2,13 +2,8 @@
 # PARIDE configuration
 #
 # PARIDE doesn't need PARPORT, but if PARPORT is configured as a module,
-# PARIDE must also be a module.  The bogus CONFIG_PARIDE_PARPORT option
-# controls the choices given to the user ...
-config PARIDE_PARPORT
-	tristate
-	depends on PARIDE!=n
-	default m if PARPORT=m
-	default y if PARPORT!=m
+# PARIDE must also be a module.
+# PARIDE only supports PC style parports. Tough for USB or other parports...
 
 comment "Parallel IDE high-level drivers"
 	depends on PARIDE

@@ -1,6 +1,6 @@
 
 #include <linux/kernel.h>
-#include <linux/module.h>
+#include <linux/export.h>
 
 /**
  * int_sqrt - rough approximation to sqrt
@@ -15,7 +15,7 @@ unsigned long int_sqrt(unsigned long x)
 	op = x;
 	res = 0;
 
-	one = 1 << 30;
+	one = 1UL << (BITS_PER_LONG - 2);
 	while (one > op)
 		one >>= 2;
 

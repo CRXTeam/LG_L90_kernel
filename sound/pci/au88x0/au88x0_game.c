@@ -1,6 +1,4 @@
 /*
- * $Id: au88x0_game.c,v 1.9 2003/09/22 03:51:28 mjander Exp $
- *
  *  Manuel Jander.
  *
  *  Based on the work of:
@@ -30,13 +28,13 @@
  * driver. (email: mjander@embedded.cl).
  */
 
-#include <sound/driver.h>
 #include <linux/time.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <sound/core.h>
 #include "au88x0.h"
 #include <linux/gameport.h>
+#include <linux/export.h>
 
 #if defined(CONFIG_GAMEPORT) || (defined(MODULE) && defined(CONFIG_GAMEPORT_MODULE))
 

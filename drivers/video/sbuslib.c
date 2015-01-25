@@ -3,23 +3,26 @@
  * Copyright (C) 2003 David S. Miller (davem@redhat.com)
  */
 
+#include <linux/compat.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/fb.h>
 #include <linux/mm.h>
+#include <linux/uaccess.h>
+#include <linux/of_device.h>
 
-#include <asm/oplib.h>
 #include <asm/fbio.h>
 
 #include "sbuslib.h"
 
-void sbusfb_fill_var(struct fb_var_screeninfo *var, int prom_node, int bpp)
+void sbusfb_fill_var(struct fb_var_screeninfo *var, struct device_node *dp,
+		     int bpp)
 {
 	memset(var, 0, sizeof(*var));
 
-	var->xres = prom_getintdefault(prom_node, "width", 1152);
-	var->yres = prom_getintdefault(prom_node, "height", 900);
+	var->xres = of_getintprop_default(dp, "width", 1152);
+	var->yres = of_getintprop_default(dp, "height", 900);
 	var->xres_virtual = var->xres;
 	var->yres_virtual = var->yres;
 	var->bits_per_pixel = bpp;
@@ -45,6 +48,9 @@ int sbusfb_mmap_helper(struct sbus_mmap_map *map,
 	unsigned long off;
 	int i;
                                         
+	if (!(vma->vm_flags & (VM_SHARED | VM_MAYSHARE)))
+		return -EINVAL;
+
 	size = vma->vm_end - vma->vm_start;
 	if (vma->vm_pgoff > (~0UL >> PAGE_SHIFT))
 		return -EINVAL;
@@ -54,6 +60,8 @@ int sbusfb_mmap_helper(struct sbus_mmap_map *map,
 	/* To stop the swapper from even considering these pages */
 	vma->vm_flags |= (VM_IO | VM_RESERVED);
 	
+	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+
 	/* Each page, see which map applies */
 	for (page = 0; page < size; ){
 		map_size = 0;
@@ -68,7 +76,7 @@ int sbusfb_mmap_helper(struct sbus_mmap_map *map,
 				map_offset = (physbase + map[i].poff) & POFF_MASK;
 				break;
 			}
-		if (!map_size){
+		if (!map_size) {
 			page += PAGE_SIZE;
 			continue;
 		}
@@ -182,3 +190,79 @@ int sbusfb_ioctl_helper(unsigned long cmd, unsigned long arg,
 	};
 }
 EXPORT_SYMBOL(sbusfb_ioctl_helper);
+
+#ifdef CONFIG_COMPAT
+static int fbiogetputcmap(struct fb_info *info, unsigned int cmd, unsigned long arg)
+{
+	struct fbcmap32 __user *argp = (void __user *)arg;
+	struct fbcmap __user *p = compat_alloc_user_space(sizeof(*p));
+	u32 addr;
+	int ret;
+
+	ret = copy_in_user(p, argp, 2 * sizeof(int));
+	ret |= get_user(addr, &argp->red);
+	ret |= put_user(compat_ptr(addr), &p->red);
+	ret |= get_user(addr, &argp->green);
+	ret |= put_user(compat_ptr(addr), &p->green);
+	ret |= get_user(addr, &argp->blue);
+	ret |= put_user(compat_ptr(addr), &p->blue);
+	if (ret)
+		return -EFAULT;
+	return info->fbops->fb_ioctl(info,
+			(cmd == FBIOPUTCMAP32) ?
+			FBIOPUTCMAP_SPARC : FBIOGETCMAP_SPARC,
+			(unsigned long)p);
+}
+
+static int fbiogscursor(struct fb_info *info, unsigned long arg)
+{
+	struct fbcursor __user *p = compat_alloc_user_space(sizeof(*p));
+	struct fbcursor32 __user *argp =  (void __user *)arg;
+	compat_uptr_t addr;
+	int ret;
+
+	ret = copy_in_user(p, argp,
+			      2 * sizeof (short) + 2 * sizeof(struct fbcurpos));
+	ret |= copy_in_user(&p->size, &argp->size, sizeof(struct fbcurpos));
+	ret |= copy_in_user(&p->cmap, &argp->cmap, 2 * sizeof(int));
+	ret |= get_user(addr, &argp->cmap.red);
+	ret |= put_user(compat_ptr(addr), &p->cmap.red);
+	ret |= get_user(addr, &argp->cmap.green);
+	ret |= put_user(compat_ptr(addr), &p->cmap.green);
+	ret |= get_user(addr, &argp->cmap.blue);
+	ret |= put_user(compat_ptr(addr), &p->cmap.blue);
+	ret |= get_user(addr, &argp->mask);
+	ret |= put_user(compat_ptr(addr), &p->mask);
+	ret |= get_user(addr, &argp->image);
+	ret |= put_user(compat_ptr(addr), &p->image);
+	if (ret)
+		return -EFAULT;
+	return info->fbops->fb_ioctl(info, FBIOSCURSOR, (unsigned long)p);
+}
+
+int sbusfb_compat_ioctl(struct fb_info *info, unsigned int cmd, unsigned long arg)
+{
+	switch (cmd) {
+	case FBIOGTYPE:
+	case FBIOSATTR:
+	case FBIOGATTR:
+	case FBIOSVIDEO:
+	case FBIOGVIDEO:
+	case FBIOGCURSOR32:	/* This is not implemented yet.
+				   Later it should be converted... */
+	case FBIOSCURPOS:
+	case FBIOGCURPOS:
+	case FBIOGCURMAX:
+		return info->fbops->fb_ioctl(info, cmd, arg);
+	case FBIOPUTCMAP32:
+		return fbiogetputcmap(info, cmd, arg);
+	case FBIOGETCMAP32:
+		return fbiogetputcmap(info, cmd, arg);
+	case FBIOSCURSOR32:
+		return fbiogscursor(info, arg);
+	default:
+		return -ENOIOCTLCMD;
+	}
+}
+EXPORT_SYMBOL(sbusfb_compat_ioctl);
+#endif

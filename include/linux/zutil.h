@@ -15,7 +15,6 @@
 
 #include <linux/zlib.h>
 #include <linux/string.h>
-#include <linux/errno.h>
 #include <linux/kernel.h>
 
 typedef unsigned char  uch;
@@ -23,18 +22,6 @@ typedef unsigned short ush;
 typedef unsigned long  ulg;
 
         /* common constants */
-
-#ifndef DEF_WBITS
-#  define DEF_WBITS MAX_WBITS
-#endif
-/* default windowBits for decompression. MAX_WBITS is for compression only */
-
-#if MAX_MEM_LEVEL >= 8
-#  define DEF_MEM_LEVEL 8
-#else
-#  define DEF_MEM_LEVEL  MAX_MEM_LEVEL
-#endif
-/* default memLevel */
 
 #define STORED_BLOCK 0
 #define STATIC_TREES 1

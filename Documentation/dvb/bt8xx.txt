@@ -1,90 +1,98 @@
-How to get the Nebula, PCTV and Twinhan DST cards working
-=========================================================
+How to get the bt8xx cards working
+==================================
 
-This class of cards has a bt878a as the PCI interface, and
-require the bttv driver.
+1) General information
+======================
 
-Please pay close attention to the warning about the bttv module
-options below for the DST card.
+This class of cards has a bt878a as the PCI interface, and require the bttv driver
+for accessing the i2c bus and the gpio pins of the bt8xx chipset.
+Please see Documentation/dvb/cards.txt => o Cards based on the Conexant Bt8xx PCI bridge:
 
-1) General informations
-=======================
+Compiling kernel please enable:
+a.)"Device drivers" => "Multimedia devices" => "Video For Linux" => "Enable Video for Linux API 1 (DEPRECATED)"
+b.)"Device drivers" => "Multimedia devices" => "Video For Linux" => "Video Capture Adapters" => "BT848 Video For Linux"
+c.)"Device drivers" => "Multimedia devices" => "Digital Video Broadcasting Devices" => "DVB for Linux" "DVB Core Support" "Bt8xx based PCI Cards"
 
-These drivers require the bttv driver to provide the means to access
-the i2c bus and the gpio pins of the bt8xx chipset.
+Please use the following options with care as deselection of drivers which are in fact necessary
+may result in DVB devices that cannot be tuned due to lack of driver support:
+You can save RAM by deselecting every frontend module that your DVB card does not need.
 
-Because of this, you need to enable
-"Device drivers" => "Multimedia devices"
-  => "Video For Linux" => "BT848 Video For Linux"
+First please remove the static dependency of DVB card drivers on all frontend modules for all possible card variants by enabling:
+d.) "Device drivers" => "Multimedia devices" => "Digital Video Broadcasting Devices"
+ => "DVB for Linux" "DVB Core Support" "Load and attach frontend modules as needed"
+
+If you know the frontend driver that your card needs please enable:
+e.)"Device drivers" => "Multimedia devices" => "Digital Video Broadcasting Devices"
+ => "DVB for Linux" "DVB Core Support" "Customise DVB Frontends" => "Customise the frontend modules to build"
+ Then please select your card-specific frontend module.
 
 2) Loading Modules
 ==================
 
-In general you need to load the bttv driver, which will handle the gpio and
-i2c communication for us. Next you need the common dvb-bt8xx device driver
-and one frontend driver.
+Regular case: If the bttv driver detects a bt8xx-based DVB card, all frontend and backend modules will be loaded automatically.
+Exceptions are:
+- Old TwinHan DST cards or clones with or without CA slot and not containing an Eeprom.
+People running udev please see Documentation/dvb/udev.txt.
 
-The bttv driver will HANG YOUR SYSTEM IF YOU DO NOT SPECIFY THE CORRECT 
-CARD ID!
+In the following cases overriding the PCI type detection for dvb-bt8xx might be necessary:
 
-(If you don't get your card running and you suspect that the card id you're
-using is wrong, have a look at "bttv-cards.c" for a list of possible card
-ids.)
+2a) Running TwinHan and Clones
+------------------------------
 
-Pay attention to failures when you load the frontend drivers
-(e.g. dmesg, /var/log/messages).
+	$ modprobe bttv card=113
+	$ modprobe dst
 
-3a) Nebula / Pinnacle PCTV
+Useful parameters for verbosity level and debugging the dst module:
+
+verbose=0:		messages are disabled
+	1:		only error messages are displayed
+	2:		notifications are displayed
+	3:		other useful messages are displayed
+	4:		debug setting
+dst_addons=0:		card is a free to air (FTA) card only
+	   0x20:	card has a conditional access slot for scrambled channels
+
+The autodetected values are determined by the cards' "response string".
+In your logs see f. ex.: dst_get_device_id: Recognize [DSTMCI].
+For bug reports please send in a complete log with verbose=4 activated.
+Please also see Documentation/dvb/ci.txt.
+
+2b) Running multiple cards
 --------------------------
 
-   $ modprobe bttv i2c_hw=1 card=0x68
-   $ modprobe dvb-bt8xx
-   
-For Nebula cards use the "nxt6000" frontend driver:
-   $ modprobe nxt6000
+Examples of card ID's:
 
-For Pinnacle PCTV cards use the "cx24110" frontend driver:
-   $ modprobe cx24110
+Pinnacle PCTV Sat:		 94
+Nebula Electronics Digi TV:	104
+pcHDTV HD-2000 TV:		112
+Twinhan DST and clones:		113
+Avermedia AverTV DVB-T 771:	123
+Avermedia AverTV DVB-T 761:	124
+DViCO FusionHDTV DVB-T Lite:	128
+DViCO FusionHDTV 5 Lite:	135
 
-3b) TwinHan
------------
+Notice: The order of the card ID should be uprising:
+Example:
+	$ modprobe bttv card=113 card=135
 
-   $ modprobe bttv i2c_hw=1 card=0x71
-   $ modprobe dvb-bt8xx
-   $ modprobe dst
+For a full list of card ID's please see Documentation/video4linux/CARDLIST.bttv.
+In case of further problems please subscribe and send questions to the mailing list: linux-dvb@linuxtv.org.
 
-The value 0x71 will override the PCI type detection for dvb-bt8xx, which 
-is necessary for TwinHan cards.#
+2c) Probing the cards with broken PCI subsystem ID
+--------------------------------------------------
+There are some TwinHan cards that the EEPROM has become corrupted for some
+reason. The cards do not have correct PCI subsystem ID. But we can force
+probing the cards with broken PCI subsystem ID
 
-If you're having an older card (blue color circuit) and card=0x71 locks your
-machine, try using 0x68, too. If that does not work, ask on the DVB mailing list.
+	$ echo 109e 0878 $subvendor $subdevice > \
+		/sys/bus/pci/drivers/bt878/new_id
 
-The DST module takes a couple of useful parameters, in case the
-dst drivers fails to detect your type of card correctly.
+109e: PCI_VENDOR_ID_BROOKTREE
+0878: PCI_DEVICE_ID_BROOKTREE_878
 
-dst_type takes values 0 (satellite), 1 (terrestial TV), 2 (cable).
-
-dst_type_flags takes bit combined values:
-1 = new tuner type packets. You can use this if your card is detected
-    and you have debug and you continually see the tuner packets not
-    working (make sure not a basic problem like dish alignment etc.)
-
-2 = TS 204. If your card tunes OK, but the picture is terrible, seemingly
-    breaking up in one half continually, and crc fails a lot, then
-    this is worth a try (or trying to turn off)
-
-4 = has symdiv. Some cards, mostly without new tuner packets, require
-    a symbol division algorithm. Doesn't apply to terrestial TV.
-
-You can also specify a value to have the autodetected values turned off
-(e.g. 0). The autodected values are determined bythe cards 'response
-string' which you can see in your logs e.g.
-
-dst_check_ci: recognize DST-MOT
-
-or 
-
-dst_check_ci: unable to recognize DSTXCI or STXCI
-
---
-Authors: Richard Walker, Jamie Honan, Michael Hunold
+Authors: Richard Walker,
+	 Jamie Honan,
+	 Michael Hunold,
+	 Manu Abraham,
+	 Uwe Bugla,
+	 Michael Krufky

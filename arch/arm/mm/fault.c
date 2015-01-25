@@ -8,19 +8,57 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/signal.h>
-#include <linux/ptrace.h>
 #include <linux/mm.h>
+#include <linux/hardirq.h>
 #include <linux/init.h>
+#include <linux/kprobes.h>
+#include <linux/uaccess.h>
+#include <linux/page-flags.h>
+#include <linux/sched.h>
+#include <linux/highmem.h>
+#include <linux/perf_event.h>
 
-#include <asm/system.h>
+#include <asm/exception.h>
 #include <asm/pgtable.h>
+#include <asm/system_misc.h>
+#include <asm/system_info.h>
 #include <asm/tlbflush.h>
-#include <asm/uaccess.h>
+#include <asm/cputype.h>
+#if defined(CONFIG_ARCH_MSM_SCORPION) && !defined(CONFIG_MSM_SMP)
+#include <asm/io.h>
+#include <mach/msm_iomap.h>
+#endif
 
 #include "fault.h"
+
+#define CREATE_TRACE_POINTS
+#include <trace/events/exception.h>
+
+#ifdef CONFIG_MMU
+
+#ifdef CONFIG_KPROBES
+static inline int notify_page_fault(struct pt_regs *regs, unsigned int fsr)
+{
+	int ret = 0;
+
+	if (!user_mode(regs)) {
+		/* kprobe_running() needs smp_processor_id() */
+		preempt_disable();
+		if (kprobe_running() && kprobe_fault_handler(regs, fsr))
+			ret = 1;
+		preempt_enable();
+	}
+
+	return ret;
+}
+#else
+static inline int notify_page_fault(struct pt_regs *regs, unsigned int fsr)
+{
+	return 0;
+}
+#endif
 
 /*
  * This is useful to dump out the page tables associated with
@@ -35,9 +73,11 @@ void show_pte(struct mm_struct *mm, unsigned long addr)
 
 	printk(KERN_ALERT "pgd = %p\n", mm->pgd);
 	pgd = pgd_offset(mm, addr);
-	printk(KERN_ALERT "[%08lx] *pgd=%08lx", addr, pgd_val(*pgd));
+	printk(KERN_ALERT "[%08lx] *pgd=%08llx",
+			addr, (long long)pgd_val(*pgd));
 
 	do {
+		pud_t *pud;
 		pmd_t *pmd;
 		pte_t *pte;
 
@@ -49,10 +89,21 @@ void show_pte(struct mm_struct *mm, unsigned long addr)
 			break;
 		}
 
-		pmd = pmd_offset(pgd, addr);
-#if PTRS_PER_PMD != 1
-		printk(", *pmd=%08lx", pmd_val(*pmd));
-#endif
+		pud = pud_offset(pgd, addr);
+		if (PTRS_PER_PUD != 1)
+			printk(", *pud=%08llx", (long long)pud_val(*pud));
+
+		if (pud_none(*pud))
+			break;
+
+		if (pud_bad(*pud)) {
+			printk("(bad)");
+			break;
+		}
+
+		pmd = pmd_offset(pud, addr);
+		if (PTRS_PER_PMD != 1)
+			printk(", *pmd=%08llx", (long long)pmd_val(*pmd));
 
 		if (pmd_none(*pmd))
 			break;
@@ -62,17 +113,25 @@ void show_pte(struct mm_struct *mm, unsigned long addr)
 			break;
 		}
 
-#ifndef CONFIG_HIGHMEM
 		/* We must not map this if we have highmem enabled */
+		if (PageHighMem(pfn_to_page(pmd_val(*pmd) >> PAGE_SHIFT)))
+			break;
+
 		pte = pte_offset_map(pmd, addr);
-		printk(", *pte=%08lx", pte_val(*pte));
-		printk(", *ppte=%08lx", pte_val(pte[-PTRS_PER_PTE]));
-		pte_unmap(pte);
+		printk(", *pte=%08llx", (long long)pte_val(*pte));
+#ifndef CONFIG_ARM_LPAE
+		printk(", *ppte=%08llx",
+		       (long long)pte_val(pte[PTE_HWTABLE_PTRS]));
 #endif
+		pte_unmap(pte);
 	} while(0);
 
 	printk("\n");
 }
+#else					/* CONFIG_MMU */
+void show_pte(struct mm_struct *mm, unsigned long addr)
+{ }
+#endif					/* CONFIG_MMU */
 
 /*
  * Oops.  The kernel tried to access some page that wasn't present.
@@ -108,14 +167,18 @@ __do_kernel_fault(struct mm_struct *mm, unsigned long addr, unsigned int fsr,
  */
 static void
 __do_user_fault(struct task_struct *tsk, unsigned long addr,
-		unsigned int fsr, int code, struct pt_regs *regs)
+		unsigned int fsr, unsigned int sig, int code,
+		struct pt_regs *regs)
 {
 	struct siginfo si;
 
+	trace_user_fault(tsk, addr, fsr);
+
 #ifdef CONFIG_DEBUG_USER
-	if (user_debug & UDBG_SEGV) {
-		printk(KERN_DEBUG "%s: unhandled page fault at 0x%08lx, code 0x%03x\n",
-		       tsk->comm, addr, fsr);
+	if (((user_debug & UDBG_SEGV) && (sig == SIGSEGV)) ||
+	    ((user_debug & UDBG_BUS)  && (sig == SIGBUS))) {
+		printk(KERN_DEBUG "%s: unhandled page fault (%d) at 0x%08lx, code 0x%03x\n",
+		       tsk->comm, sig, addr, fsr);
 		show_pte(tsk->mm, addr);
 		show_regs(regs);
 	}
@@ -124,42 +187,61 @@ __do_user_fault(struct task_struct *tsk, unsigned long addr,
 	tsk->thread.address = addr;
 	tsk->thread.error_code = fsr;
 	tsk->thread.trap_no = 14;
-	si.si_signo = SIGSEGV;
+	si.si_signo = sig;
 	si.si_errno = 0;
 	si.si_code = code;
 	si.si_addr = (void __user *)addr;
-	force_sig_info(SIGSEGV, &si, tsk);
+	force_sig_info(sig, &si, tsk);
 }
 
-void
-do_bad_area(struct task_struct *tsk, struct mm_struct *mm, unsigned long addr,
-	    unsigned int fsr, struct pt_regs *regs)
+void do_bad_area(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 {
+	struct task_struct *tsk = current;
+	struct mm_struct *mm = tsk->active_mm;
+
 	/*
 	 * If we are in kernel mode at this point, we
 	 * have no context to handle this fault with.
 	 */
 	if (user_mode(regs))
-		__do_user_fault(tsk, addr, fsr, SEGV_MAPERR, regs);
+		__do_user_fault(tsk, addr, fsr, SIGSEGV, SEGV_MAPERR, regs);
 	else
 		__do_kernel_fault(mm, addr, fsr, regs);
 }
 
-#define VM_FAULT_BADMAP		(-20)
-#define VM_FAULT_BADACCESS	(-21)
+#ifdef CONFIG_MMU
+#define VM_FAULT_BADMAP		0x010000
+#define VM_FAULT_BADACCESS	0x020000
 
-static int
+/*
+ * Check that the permissions on the VMA allow for the fault which occurred.
+ * If we encountered a write fault, we must have write permission, otherwise
+ * we allow any permission.
+ */
+static inline bool access_error(unsigned int fsr, struct vm_area_struct *vma)
+{
+	unsigned int mask = VM_READ | VM_WRITE | VM_EXEC;
+
+	if (fsr & FSR_WRITE)
+		mask = VM_WRITE;
+	if (fsr & FSR_LNX_PF)
+		mask = VM_EXEC;
+
+	return vma->vm_flags & mask ? false : true;
+}
+
+static int __kprobes
 __do_page_fault(struct mm_struct *mm, unsigned long addr, unsigned int fsr,
-		struct task_struct *tsk)
+		unsigned int flags, struct task_struct *tsk)
 {
 	struct vm_area_struct *vma;
-	int fault, mask;
+	int fault;
 
 	vma = find_vma(mm, addr);
 	fault = VM_FAULT_BADMAP;
-	if (!vma)
+	if (unlikely(!vma))
 		goto out;
-	if (vma->vm_start > addr)
+	if (unlikely(vma->vm_start > addr))
 		goto check_stack;
 
 	/*
@@ -167,86 +249,124 @@ __do_page_fault(struct mm_struct *mm, unsigned long addr, unsigned int fsr,
 	 * memory access, so we can handle it.
 	 */
 good_area:
-	if (fsr & (1 << 11)) /* write? */
-		mask = VM_WRITE;
-	else
-		mask = VM_READ|VM_EXEC;
-
-	fault = VM_FAULT_BADACCESS;
-	if (!(vma->vm_flags & mask))
+	if (access_error(fsr, vma)) {
+		fault = VM_FAULT_BADACCESS;
 		goto out;
-
-	/*
-	 * If for any reason at all we couldn't handle
-	 * the fault, make sure we exit gracefully rather
-	 * than endlessly redo the fault.
-	 */
-survive:
-	fault = handle_mm_fault(mm, vma, addr & PAGE_MASK, fsr & (1 << 11));
-
-	/*
-	 * Handle the "normal" cases first - successful and sigbus
-	 */
-	switch (fault) {
-	case VM_FAULT_MAJOR:
-		tsk->maj_flt++;
-		return fault;
-	case VM_FAULT_MINOR:
-		tsk->min_flt++;
-	case VM_FAULT_SIGBUS:
-		return fault;
 	}
 
-	if (tsk->pid != 1)
-		goto out;
-
-	/*
-	 * If we are out of memory for pid1,
-	 * sleep for a while and retry
-	 */
-	yield();
-	goto survive;
+	return handle_mm_fault(mm, vma, addr & PAGE_MASK, flags);
 
 check_stack:
-	if (vma->vm_flags & VM_GROWSDOWN && !expand_stack(vma, addr))
+	/* Don't allow expansion below FIRST_USER_ADDRESS */
+	if (vma->vm_flags & VM_GROWSDOWN &&
+	    addr >= FIRST_USER_ADDRESS && !expand_stack(vma, addr))
 		goto good_area;
 out:
 	return fault;
 }
 
-static int
+static int __kprobes
 do_page_fault(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 {
 	struct task_struct *tsk;
 	struct mm_struct *mm;
-	int fault;
+	int fault, sig, code;
+	int write = fsr & FSR_WRITE;
+	unsigned int flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE |
+				(write ? FAULT_FLAG_WRITE : 0);
+
+	if (notify_page_fault(regs, fsr))
+		return 0;
 
 	tsk = current;
 	mm  = tsk->mm;
+
+	/* Enable interrupts if they were enabled in the parent context. */
+	if (interrupts_enabled(regs))
+		local_irq_enable();
 
 	/*
 	 * If we're in an interrupt or have no user
 	 * context, we must not take the fault..
 	 */
-	if (in_interrupt() || !mm)
+	if (in_atomic() || !mm)
 		goto no_context;
 
-	down_read(&mm->mmap_sem);
-	fault = __do_page_fault(mm, addr, fsr, tsk);
-	up_read(&mm->mmap_sem);
-
 	/*
-	 * Handle the "normal" case first
+	 * As per x86, we may deadlock here.  However, since the kernel only
+	 * validly references user space from well defined areas of the code,
+	 * we can bug out early if this is from code which shouldn't.
 	 */
-	if (fault > 0)
+	if (!down_read_trylock(&mm->mmap_sem)) {
+		if (!user_mode(regs) && !search_exception_tables(regs->ARM_pc))
+			goto no_context;
+retry:
+		down_read(&mm->mmap_sem);
+	} else {
+		/*
+		 * The above down_read_trylock() might have succeeded in
+		 * which case, we'll have missed the might_sleep() from
+		 * down_read()
+		 */
+		might_sleep();
+#ifdef CONFIG_DEBUG_VM
+		if (!user_mode(regs) &&
+		    !search_exception_tables(regs->ARM_pc))
+			goto no_context;
+#endif
+	}
+
+	fault = __do_page_fault(mm, addr, fsr, flags, tsk);
+
+	/* If we need to retry but a fatal signal is pending, handle the
+	 * signal first. We do not need to release the mmap_sem because
+	 * it would already be released in __lock_page_or_retry in
+	 * mm/filemap.c. */
+	if ((fault & VM_FAULT_RETRY) && fatal_signal_pending(current))
 		return 0;
 
 	/*
-	 * We had some memory, but were unable to
-	 * successfully fix up this page fault.
+	 * Major/minor page fault accounting is only done on the
+	 * initial attempt. If we go through a retry, it is extremely
+	 * likely that the page will be found in page cache at that point.
 	 */
-	if (fault == 0)
-		goto do_sigbus;
+
+	perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, regs, addr);
+	if (!(fault & VM_FAULT_ERROR) && flags & FAULT_FLAG_ALLOW_RETRY) {
+		if (fault & VM_FAULT_MAJOR) {
+			tsk->maj_flt++;
+			perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS_MAJ, 1,
+					regs, addr);
+		} else {
+			tsk->min_flt++;
+			perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS_MIN, 1,
+					regs, addr);
+		}
+		if (fault & VM_FAULT_RETRY) {
+			/* Clear FAULT_FLAG_ALLOW_RETRY to avoid any risk
+			* of starvation. */
+			flags &= ~FAULT_FLAG_ALLOW_RETRY;
+			goto retry;
+		}
+	}
+
+	up_read(&mm->mmap_sem);
+
+	/*
+	 * Handle the "normal" case first - VM_FAULT_MAJOR / VM_FAULT_MINOR
+	 */
+	if (likely(!(fault & (VM_FAULT_ERROR | VM_FAULT_BADMAP | VM_FAULT_BADACCESS))))
+		return 0;
+
+	if (fault & VM_FAULT_OOM) {
+		/*
+		 * We ran out of memory, call the OOM killer, and return to
+		 * userspace (which will retry the fault, or kill us if we
+		 * got oom-killed)
+		 */
+		pagefault_out_of_memory();
+		return 0;
+	}
 
 	/*
 	 * If we are in kernel mode at this point, we
@@ -255,47 +375,37 @@ do_page_fault(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 	if (!user_mode(regs))
 		goto no_context;
 
-	if (fault == VM_FAULT_OOM) {
+	if (fault & VM_FAULT_SIGBUS) {
 		/*
-		 * We ran out of memory, or some other thing happened to
-		 * us that made us unable to handle the page fault gracefully.
+		 * We had some memory, but were unable to
+		 * successfully fix up this page fault.
 		 */
-		printk("VM: killing process %s\n", tsk->comm);
-		do_exit(SIGKILL);
-	} else
-		__do_user_fault(tsk, addr, fsr, fault == VM_FAULT_BADACCESS ?
-				SEGV_ACCERR : SEGV_MAPERR, regs);
-	return 0;
-
-
-/*
- * We ran out of memory, or some other thing happened to us that made
- * us unable to handle the page fault gracefully.
- */
-do_sigbus:
-	/*
-	 * Send a sigbus, regardless of whether we were in kernel
-	 * or user mode.
-	 */
-	tsk->thread.address = addr;
-	tsk->thread.error_code = fsr;
-	tsk->thread.trap_no = 14;
-	force_sig(SIGBUS, tsk);
-#ifdef CONFIG_DEBUG_USER
-	if (user_debug & UDBG_BUS) {
-		printk(KERN_DEBUG "%s: sigbus at 0x%08lx, pc=0x%08lx\n",
-			current->comm, addr, instruction_pointer(regs));
+		sig = SIGBUS;
+		code = BUS_ADRERR;
+	} else {
+		/*
+		 * Something tried to access memory that
+		 * isn't in our memory map..
+		 */
+		sig = SIGSEGV;
+		code = fault == VM_FAULT_BADACCESS ?
+			SEGV_ACCERR : SEGV_MAPERR;
 	}
-#endif
 
-	/* Kernel mode? Handle exceptions or die */
-	if (user_mode(regs))
-		return 0;
+	__do_user_fault(tsk, addr, fsr, sig, code, regs);
+	return 0;
 
 no_context:
 	__do_kernel_fault(mm, addr, fsr, regs);
 	return 0;
 }
+#else					/* CONFIG_MMU */
+static int
+do_page_fault(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
+{
+	return 0;
+}
+#endif					/* CONFIG_MMU */
 
 /*
  * First Level Translation Fault Handler
@@ -314,17 +424,21 @@ no_context:
  * interrupt or a critical region, and should only copy the information
  * from the master page table, nothing more.
  */
-static int
+#ifdef CONFIG_MMU
+static int __kprobes
 do_translation_fault(unsigned long addr, unsigned int fsr,
 		     struct pt_regs *regs)
 {
-	struct task_struct *tsk;
 	unsigned int index;
 	pgd_t *pgd, *pgd_k;
+	pud_t *pud, *pud_k;
 	pmd_t *pmd, *pmd_k;
 
 	if (addr < TASK_SIZE)
 		return do_page_fault(addr, fsr, regs);
+
+	if (user_mode(regs))
+		goto bad_area;
 
 	index = pgd_index(addr);
 
@@ -336,25 +450,54 @@ do_translation_fault(unsigned long addr, unsigned int fsr,
 
 	if (pgd_none(*pgd_k))
 		goto bad_area;
-
 	if (!pgd_present(*pgd))
 		set_pgd(pgd, *pgd_k);
 
-	pmd_k = pmd_offset(pgd_k, addr);
-	pmd   = pmd_offset(pgd, addr);
+	pud = pud_offset(pgd, addr);
+	pud_k = pud_offset(pgd_k, addr);
 
-	if (pmd_none(*pmd_k))
+	if (pud_none(*pud_k))
+		goto bad_area;
+	if (!pud_present(*pud))
+		set_pud(pud, *pud_k);
+
+	pmd = pmd_offset(pud, addr);
+	pmd_k = pmd_offset(pud_k, addr);
+
+#ifdef CONFIG_ARM_LPAE
+	/*
+	 * Only one hardware entry per PMD with LPAE.
+	 */
+	index = 0;
+#else
+	/*
+	 * On ARM one Linux PGD entry contains two hardware entries (see page
+	 * tables layout in pgtable.h). We normally guarantee that we always
+	 * fill both L1 entries. But create_mapping() doesn't follow the rule.
+	 * It can create inidividual L1 entries, so here we have to call
+	 * pmd_none() check for the entry really corresponded to address, not
+	 * for the first of pair.
+	 */
+	index = (addr >> SECTION_SHIFT) & 1;
+#endif
+	if (pmd_none(pmd_k[index]))
 		goto bad_area;
 
 	copy_pmd(pmd, pmd_k);
 	return 0;
 
 bad_area:
-	tsk = current;
-
-	do_bad_area(tsk, tsk->active_mm, addr, fsr, regs);
+	do_bad_area(addr, fsr, regs);
 	return 0;
 }
+#else					/* CONFIG_MMU */
+static int
+do_translation_fault(unsigned long addr, unsigned int fsr,
+		     struct pt_regs *regs)
+{
+	return 0;
+}
+#endif					/* CONFIG_MMU */
 
 /*
  * Some section permission faults need to be handled gracefully.
@@ -363,8 +506,7 @@ bad_area:
 static int
 do_sect_fault(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 {
-	struct task_struct *tsk = current;
-	do_bad_area(tsk, tsk->active_mm, addr, fsr, regs);
+	do_bad_area(addr, fsr, regs);
 	return 0;
 }
 
@@ -377,86 +519,225 @@ do_bad(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 	return 1;
 }
 
-static struct fsr_info {
+#if defined(CONFIG_ARCH_MSM_SCORPION) && !defined(CONFIG_MSM_SMP)
+#define __str(x) #x
+#define MRC(x, v1, v2, v4, v5, v6) do {					\
+	unsigned int __##x;						\
+	asm("mrc " __str(v1) ", " __str(v2) ", %0, " __str(v4) ", "	\
+		__str(v5) ", " __str(v6) "\n" \
+		: "=r" (__##x));					\
+	pr_info("%s: %s = 0x%.8x\n", __func__, #x, __##x);		\
+} while(0)
+
+#define MSM_TCSR_SPARE2 (MSM_TCSR_BASE + 0x60)
+
+#endif
+
+int
+do_imprecise_ext(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
+{
+#if defined(CONFIG_ARCH_MSM_SCORPION) && !defined(CONFIG_MSM_SMP)
+	MRC(ADFSR,    p15, 0,  c5, c1, 0);
+	MRC(DFSR,     p15, 0,  c5, c0, 0);
+	MRC(ACTLR,    p15, 0,  c1, c0, 1);
+	MRC(EFSR,     p15, 7, c15, c0, 1);
+	MRC(L2SR,     p15, 3, c15, c1, 0);
+	MRC(L2CR0,    p15, 3, c15, c0, 1);
+	MRC(L2CPUESR, p15, 3, c15, c1, 1);
+	MRC(L2CPUCR,  p15, 3, c15, c0, 2);
+	MRC(SPESR,    p15, 1,  c9, c7, 0);
+	MRC(SPCR,     p15, 0,  c9, c7, 0);
+	MRC(DMACHSR,  p15, 1, c11, c0, 0);
+	MRC(DMACHESR, p15, 1, c11, c0, 1);
+	MRC(DMACHCR,  p15, 0, c11, c0, 2);
+
+	/* clear out EFSR and ADFSR after fault */
+	asm volatile ("mcr p15, 7, %0, c15, c0, 1\n\t"
+		      "mcr p15, 0, %0, c5, c1, 0"
+		      : : "r" (0));
+#endif
+#if defined(CONFIG_ARCH_MSM_SCORPION) && !defined(CONFIG_MSM_SMP)
+	pr_info("%s: TCSR_SPARE2 = 0x%.8x\n", __func__, readl(MSM_TCSR_SPARE2));
+#endif
+	return 1;
+}
+
+struct fsr_info {
 	int	(*fn)(unsigned long addr, unsigned int fsr, struct pt_regs *regs);
 	int	sig;
+	int	code;
 	const char *name;
-} fsr_info[] = {
-	/*
-	 * The following are the standard ARMv3 and ARMv4 aborts.  ARMv5
-	 * defines these to be "precise" aborts.
-	 */
-	{ do_bad,		SIGSEGV, "vector exception"		   },
-	{ do_bad,		SIGILL,	 "alignment exception"		   },
-	{ do_bad,		SIGKILL, "terminal exception"		   },
-	{ do_bad,		SIGILL,	 "alignment exception"		   },
-	{ do_bad,		SIGBUS,	 "external abort on linefetch"	   },
-	{ do_translation_fault,	SIGSEGV, "section translation fault"	   },
-	{ do_bad,		SIGBUS,	 "external abort on linefetch"	   },
-	{ do_page_fault,	SIGSEGV, "page translation fault"	   },
-	{ do_bad,		SIGBUS,	 "external abort on non-linefetch" },
-	{ do_bad,		SIGSEGV, "section domain fault"		   },
-	{ do_bad,		SIGBUS,	 "external abort on non-linefetch" },
-	{ do_bad,		SIGSEGV, "page domain fault"		   },
-	{ do_bad,		SIGBUS,	 "external abort on translation"   },
-	{ do_sect_fault,	SIGSEGV, "section permission fault"	   },
-	{ do_bad,		SIGBUS,	 "external abort on translation"   },
-	{ do_page_fault,	SIGSEGV, "page permission fault"	   },
-	/*
-	 * The following are "imprecise" aborts, which are signalled by bit
-	 * 10 of the FSR, and may not be recoverable.  These are only
-	 * supported if the CPU abort handler supports bit 10.
-	 */
-	{ do_bad,		SIGBUS,  "unknown 16"			   },
-	{ do_bad,		SIGBUS,  "unknown 17"			   },
-	{ do_bad,		SIGBUS,  "unknown 18"			   },
-	{ do_bad,		SIGBUS,  "unknown 19"			   },
-	{ do_bad,		SIGBUS,  "lock abort"			   }, /* xscale */
-	{ do_bad,		SIGBUS,  "unknown 21"			   },
-	{ do_bad,		SIGBUS,  "imprecise external abort"	   }, /* xscale */
-	{ do_bad,		SIGBUS,  "unknown 23"			   },
-	{ do_bad,		SIGBUS,  "dcache parity error"		   }, /* xscale */
-	{ do_bad,		SIGBUS,  "unknown 25"			   },
-	{ do_bad,		SIGBUS,  "unknown 26"			   },
-	{ do_bad,		SIGBUS,  "unknown 27"			   },
-	{ do_bad,		SIGBUS,  "unknown 28"			   },
-	{ do_bad,		SIGBUS,  "unknown 29"			   },
-	{ do_bad,		SIGBUS,  "unknown 30"			   },
-	{ do_bad,		SIGBUS,  "unknown 31"			   }
 };
+
+/* FSR definition */
+#ifdef CONFIG_ARM_LPAE
+#include "fsr-3level.c"
+#else
+#include "fsr-2level.c"
+#endif
 
 void __init
 hook_fault_code(int nr, int (*fn)(unsigned long, unsigned int, struct pt_regs *),
-		int sig, const char *name)
+		int sig, int code, const char *name)
 {
-	if (nr >= 0 && nr < ARRAY_SIZE(fsr_info)) {
-		fsr_info[nr].fn   = fn;
-		fsr_info[nr].sig  = sig;
-		fsr_info[nr].name = name;
-	}
+	if (nr < 0 || nr >= ARRAY_SIZE(fsr_info))
+		BUG();
+
+	fsr_info[nr].fn   = fn;
+	fsr_info[nr].sig  = sig;
+	fsr_info[nr].code = code;
+	fsr_info[nr].name = name;
 }
+
+#ifdef CONFIG_MSM_KRAIT_TBB_ABORT_HANDLER
+static int krait_tbb_fixup(unsigned int fsr, struct pt_regs *regs)
+{
+	int base_cond, cond = 0;
+	unsigned int p1, cpsr_z, cpsr_c, cpsr_n, cpsr_v;
+
+	if ((read_cpuid_id() & 0xFFFFFFFC) != 0x510F04D0)
+		return 0;
+
+	if (!thumb_mode(regs))
+		return 0;
+
+	/* If ITSTATE is 0, return quickly */
+	if ((regs->ARM_cpsr & PSR_IT_MASK) == 0)
+		return 0;
+
+	cpsr_n = (regs->ARM_cpsr & PSR_N_BIT) ? 1 : 0;
+	cpsr_z = (regs->ARM_cpsr & PSR_Z_BIT) ? 1 : 0;
+	cpsr_c = (regs->ARM_cpsr & PSR_C_BIT) ? 1 : 0;
+	cpsr_v = (regs->ARM_cpsr & PSR_V_BIT) ? 1 : 0;
+
+	p1 = (regs->ARM_cpsr & BIT(12)) ? 1 : 0;
+
+	base_cond = (regs->ARM_cpsr >> 13) & 0x07;
+
+	switch (base_cond) {
+	case 0x0:	/* equal */
+		cond = cpsr_z;
+		break;
+
+	case 0x1:	/* carry set */
+		cond = cpsr_c;
+		break;
+
+	case 0x2:	/* minus / negative */
+		cond = cpsr_n;
+		break;
+
+	case 0x3:	/* overflow */
+		cond = cpsr_v;
+		break;
+
+	case 0x4:	/* unsigned higher */
+		cond = (cpsr_c == 1) && (cpsr_z == 0);
+		break;
+
+	case 0x5:	/* signed greater / equal */
+		cond = (cpsr_n == cpsr_v);
+		break;
+
+	case 0x6:	/* signed greater */
+		cond = (cpsr_z == 0) && (cpsr_n == cpsr_v);
+		break;
+
+	case 0x7:	/* always */
+		cond = 1;
+		break;
+	};
+
+	if (cond == p1) {
+		pr_debug("Conditional abort fixup, PC=%08x, base=%d, cond=%d\n",
+			 (unsigned int) regs->ARM_pc, base_cond, cond);
+		regs->ARM_pc += 2;
+		return 1;
+	}
+	return 0;
+}
+#endif
 
 /*
  * Dispatch a data abort to the relevant handler.
  */
-asmlinkage void
+asmlinkage void __exception
 do_DataAbort(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 {
-	const struct fsr_info *inf = fsr_info + (fsr & 15) + ((fsr & (1 << 10)) >> 6);
+	const struct fsr_info *inf = fsr_info + fsr_fs(fsr);
+	struct siginfo info;
 
-	if (!inf->fn(addr, fsr, regs))
+#ifdef CONFIG_MSM_KRAIT_TBB_ABORT_HANDLER
+	if (krait_tbb_fixup(fsr, regs))
+		return;
+#endif
+
+	if (!inf->fn(addr, fsr & ~FSR_LNX_PF, regs))
 		return;
 
 	printk(KERN_ALERT "Unhandled fault: %s (0x%03x) at 0x%08lx\n",
 		inf->name, fsr, addr);
-	force_sig(inf->sig, current);
-	show_pte(current->mm, addr);
-	die_if_kernel("Oops", regs, 0);
+
+	info.si_signo = inf->sig;
+	info.si_errno = 0;
+	info.si_code  = inf->code;
+	info.si_addr  = (void __user *)addr;
+	arm_notify_die("", regs, &info, fsr, 0);
 }
 
-asmlinkage void
-do_PrefetchAbort(unsigned long addr, struct pt_regs *regs)
+void __init
+hook_ifault_code(int nr, int (*fn)(unsigned long, unsigned int, struct pt_regs *),
+		 int sig, int code, const char *name)
 {
-	do_translation_fault(addr, 0, regs);
+	if (nr < 0 || nr >= ARRAY_SIZE(ifsr_info))
+		BUG();
+
+	ifsr_info[nr].fn   = fn;
+	ifsr_info[nr].sig  = sig;
+	ifsr_info[nr].code = code;
+	ifsr_info[nr].name = name;
 }
 
+asmlinkage void __exception
+do_PrefetchAbort(unsigned long addr, unsigned int ifsr, struct pt_regs *regs)
+{
+	const struct fsr_info *inf = ifsr_info + fsr_fs(ifsr);
+	struct siginfo info;
+
+	if (!inf->fn(addr, ifsr | FSR_LNX_PF, regs))
+		return;
+
+	printk(KERN_ALERT "Unhandled prefetch abort: %s (0x%03x) at 0x%08lx\n",
+		inf->name, ifsr, addr);
+
+	info.si_signo = inf->sig;
+	info.si_errno = 0;
+	info.si_code  = inf->code;
+	info.si_addr  = (void __user *)addr;
+	arm_notify_die("", regs, &info, ifsr, 0);
+}
+
+#ifndef CONFIG_ARM_LPAE
+static int __init exceptions_init(void)
+{
+	if (cpu_architecture() >= CPU_ARCH_ARMv6) {
+		hook_fault_code(4, do_translation_fault, SIGSEGV, SEGV_MAPERR,
+				"I-cache maintenance fault");
+	}
+
+	if (cpu_architecture() >= CPU_ARCH_ARMv7) {
+		/*
+		 * TODO: Access flag faults introduced in ARMv6K.
+		 * Runtime check for 'K' extension is needed
+		 */
+		hook_fault_code(3, do_bad, SIGSEGV, SEGV_MAPERR,
+				"section access flag fault");
+		hook_fault_code(6, do_bad, SIGSEGV, SEGV_MAPERR,
+				"section access flag fault");
+	}
+
+	return 0;
+}
+
+arch_initcall(exceptions_init);
+#endif

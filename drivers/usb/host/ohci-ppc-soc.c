@@ -5,7 +5,7 @@
  * (C) Copyright 2000-2002 David Brownell <dbrownell@users.sourceforge.net>
  * (C) Copyright 2002 Hewlett-Packard Company
  * (C) Copyright 2003-2005 MontaVista Software Inc.
- * 
+ *
  * Bus Glue for PPC On-Chip OHCI driver
  * Tested on Freescale MPC5200 and IBM STB04xxx
  *
@@ -14,7 +14,8 @@
  * This file is licenced under the GPL.
  */
 
-#include <asm/usb.h>
+#include <linux/platform_device.h>
+#include <linux/signal.h>
 
 /* configure so an HC device and id are always provided */
 /* always called with process context; sleeping is OK */
@@ -23,9 +24,7 @@
  * usb_hcd_ppc_soc_probe - initialize On-Chip HCDs
  * Context: !in_interrupt()
  *
- * Allocates basic resources for this USB host controller, and
- * then invokes the start() method for the HCD associated with it
- * through the hotplug entry's driver_data.
+ * Allocates basic resources for this USB host controller.
  *
  * Store this function in the HCD's struct pci_driver as probe().
  */
@@ -37,20 +36,19 @@ static int usb_hcd_ppc_soc_probe(const struct hc_driver *driver,
 	struct ohci_hcd	*ohci;
 	struct resource *res;
 	int irq;
-	struct usb_hcd_platform_data *pd = pdev->dev.platform_data;
 
 	pr_debug("initializing PPC-SOC USB Controller\n");
 
 	res = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
 	if (!res) {
-		pr_debug(__FILE__ ": no irq\n");
+		pr_debug("%s: no irq\n", __FILE__);
 		return -ENODEV;
 	}
 	irq = res->start;
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res) {
-		pr_debug(__FILE__ ": no reg addr\n");
+		pr_debug("%s: no reg addr\n", __FILE__);
 		return -ENODEV;
 	}
 
@@ -58,41 +56,41 @@ static int usb_hcd_ppc_soc_probe(const struct hc_driver *driver,
 	if (!hcd)
 		return -ENOMEM;
 	hcd->rsrc_start = res->start;
-	hcd->rsrc_len = res->end - res->start + 1;
+	hcd->rsrc_len = resource_size(res);
 
 	if (!request_mem_region(hcd->rsrc_start, hcd->rsrc_len, hcd_name)) {
-		pr_debug(__FILE__ ": request_mem_region failed\n");
+		pr_debug("%s: request_mem_region failed\n", __FILE__);
 		retval = -EBUSY;
 		goto err1;
 	}
 
 	hcd->regs = ioremap(hcd->rsrc_start, hcd->rsrc_len);
 	if (!hcd->regs) {
-		pr_debug(__FILE__ ": ioremap failed\n");
+		pr_debug("%s: ioremap failed\n", __FILE__);
 		retval = -ENOMEM;
 		goto err2;
 	}
 
-	if (pd->start && (retval = pd->start(pdev)))
-		goto err3;
-
 	ohci = hcd_to_ohci(hcd);
-	ohci->flags |= OHCI_BIG_ENDIAN;
+	ohci->flags |= OHCI_QUIRK_BE_MMIO | OHCI_QUIRK_BE_DESC;
+
+#ifdef CONFIG_PPC_MPC52xx
+	/* MPC52xx doesn't need frame_no shift */
+	ohci->flags |= OHCI_QUIRK_FRAME_NO;
+#endif
 	ohci_hcd_init(ohci);
 
-	retval = usb_add_hcd(hcd, irq, SA_INTERRUPT);
+	retval = usb_add_hcd(hcd, irq, 0);
 	if (retval == 0)
 		return retval;
 
 	pr_debug("Removing PPC-SOC USB Controller\n");
-	if (pd && pd->stop)
-		pd->stop(pdev);
- err3:
+
 	iounmap(hcd->regs);
  err2:
 	release_mem_region(hcd->rsrc_start, hcd->rsrc_len);
  err1:
- 	usb_put_hcd(hcd);
+	usb_put_hcd(hcd);
 	return retval;
 }
 
@@ -105,25 +103,21 @@ static int usb_hcd_ppc_soc_probe(const struct hc_driver *driver,
  * @pdev: USB Host Controller being removed
  * Context: !in_interrupt()
  *
- * Reverses the effect of usb_hcd_ppc_soc_probe(), first invoking
- * the HCD's stop() method.  It is always called from a thread
+ * Reverses the effect of usb_hcd_ppc_soc_probe().
+ * It is always called from a thread
  * context, normally "rmmod", "apmd", or something similar.
  *
  */
 static void usb_hcd_ppc_soc_remove(struct usb_hcd *hcd,
 		struct platform_device *pdev)
 {
-	struct usb_hcd_platform_data *pd = pdev->dev.platform_data;
-
 	usb_remove_hcd(hcd);
 
 	pr_debug("stopping PPC-SOC USB Controller\n");
-	if (pd && pd->stop)
-		pd->stop(pdev);
 
 	iounmap(hcd->regs);
 	release_mem_region(hcd->rsrc_start, hcd->rsrc_len);
-	usb_hcd_put(hcd);
+	usb_put_hcd(hcd);
 }
 
 static int __devinit
@@ -159,6 +153,7 @@ static const struct hc_driver ohci_ppc_soc_hc_driver = {
 	 */
 	.start =		ohci_ppc_soc_start,
 	.stop =			ohci_stop,
+	.shutdown =		ohci_shutdown,
 
 	/*
 	 * managing i/o requests and associated device resources
@@ -177,16 +172,15 @@ static const struct hc_driver ohci_ppc_soc_hc_driver = {
 	 */
 	.hub_status_data =	ohci_hub_status_data,
 	.hub_control =		ohci_hub_control,
-#ifdef	CONFIG_USB_SUSPEND
-	.hub_suspend =		ohci_hub_suspend,
-	.hub_resume =		ohci_hub_resume,
+#ifdef	CONFIG_PM
+	.bus_suspend =		ohci_bus_suspend,
+	.bus_resume =		ohci_bus_resume,
 #endif
 	.start_port_reset =	ohci_start_port_reset,
 };
 
-static int ohci_hcd_ppc_soc_drv_probe(struct device *dev)
+static int ohci_hcd_ppc_soc_drv_probe(struct platform_device *pdev)
 {
-	struct platform_device *pdev = to_platform_device(dev);
 	int ret;
 
 	if (usb_disabled())
@@ -196,39 +190,26 @@ static int ohci_hcd_ppc_soc_drv_probe(struct device *dev)
 	return ret;
 }
 
-static int ohci_hcd_ppc_soc_drv_remove(struct device *dev)
+static int ohci_hcd_ppc_soc_drv_remove(struct platform_device *pdev)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct usb_hcd *hcd = dev_get_drvdata(dev);
+	struct usb_hcd *hcd = platform_get_drvdata(pdev);
 
 	usb_hcd_ppc_soc_remove(hcd, pdev);
 	return 0;
 }
 
-static struct device_driver ohci_hcd_ppc_soc_driver = {
-	.name		= "ppc-soc-ohci",
-	.bus		= &platform_bus_type,
+static struct platform_driver ohci_hcd_ppc_soc_driver = {
 	.probe		= ohci_hcd_ppc_soc_drv_probe,
 	.remove		= ohci_hcd_ppc_soc_drv_remove,
-#if	defined(CONFIG_USB_SUSPEND) || defined(CONFIG_PM)
+	.shutdown	= usb_hcd_platform_shutdown,
+#ifdef	CONFIG_PM
 	/*.suspend	= ohci_hcd_ppc_soc_drv_suspend,*/
 	/*.resume	= ohci_hcd_ppc_soc_drv_resume,*/
 #endif
+	.driver		= {
+		.name	= "ppc-soc-ohci",
+		.owner	= THIS_MODULE,
+	},
 };
 
-static int __init ohci_hcd_ppc_soc_init(void)
-{
-	pr_debug(DRIVER_INFO " (PPC SOC)\n");
-	pr_debug("block sizes: ed %d td %d\n", sizeof(struct ed),
-							sizeof(struct td));
-
-	return driver_register(&ohci_hcd_ppc_soc_driver);
-}
-
-static void __exit ohci_hcd_ppc_soc_cleanup(void)
-{
-	driver_unregister(&ohci_hcd_ppc_soc_driver);
-}
-
-module_init(ohci_hcd_ppc_soc_init);
-module_exit(ohci_hcd_ppc_soc_cleanup);
+MODULE_ALIAS("platform:ppc-soc-ohci");

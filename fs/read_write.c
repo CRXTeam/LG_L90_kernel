@@ -9,75 +9,149 @@
 #include <linux/fcntl.h>
 #include <linux/file.h>
 #include <linux/uio.h>
-#include <linux/smp_lock.h>
-#include <linux/dnotify.h>
+#include <linux/fsnotify.h>
 #include <linux/security.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/syscalls.h>
+#include <linux/pagemap.h>
+#include <linux/splice.h>
+#include "read_write.h"
 
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
 
-struct file_operations generic_ro_fops = {
+const struct file_operations generic_ro_fops = {
 	.llseek		= generic_file_llseek,
-	.read		= generic_file_read,
+	.read		= do_sync_read,
+	.aio_read	= generic_file_aio_read,
 	.mmap		= generic_file_readonly_mmap,
-	.sendfile	= generic_file_sendfile,
+	.splice_read	= generic_file_splice_read,
 };
 
 EXPORT_SYMBOL(generic_ro_fops);
 
-loff_t generic_file_llseek(struct file *file, loff_t offset, int origin)
+static inline int unsigned_offsets(struct file *file)
 {
-	long long retval;
+	return file->f_mode & FMODE_UNSIGNED_OFFSET;
+}
+
+static loff_t lseek_execute(struct file *file, struct inode *inode,
+		loff_t offset, loff_t maxsize)
+{
+	if (offset < 0 && !unsigned_offsets(file))
+		return -EINVAL;
+	if (offset > maxsize)
+		return -EINVAL;
+
+	if (offset != file->f_pos) {
+		file->f_pos = offset;
+		file->f_version = 0;
+	}
+	return offset;
+}
+
+/**
+ * generic_file_llseek_size - generic llseek implementation for regular files
+ * @file:	file structure to seek on
+ * @offset:	file offset to seek to
+ * @origin:	type of seek
+ * @size:	max size of file system
+ *
+ * This is a variant of generic_file_llseek that allows passing in a custom
+ * file size.
+ *
+ * Synchronization:
+ * SEEK_SET and SEEK_END are unsynchronized (but atomic on 64bit platforms)
+ * SEEK_CUR is synchronized against other SEEK_CURs, but not read/writes.
+ * read/writes behave like SEEK_SET against seeks.
+ */
+loff_t
+generic_file_llseek_size(struct file *file, loff_t offset, int origin,
+		loff_t maxsize)
+{
 	struct inode *inode = file->f_mapping->host;
 
-	down(&inode->i_sem);
 	switch (origin) {
-		case 2:
-			offset += inode->i_size;
-			break;
-		case 1:
-			offset += file->f_pos;
+	case SEEK_END:
+		offset += i_size_read(inode);
+		break;
+	case SEEK_CUR:
+		/*
+		 * Here we special-case the lseek(fd, 0, SEEK_CUR)
+		 * position-querying operation.  Avoid rewriting the "same"
+		 * f_pos value back to the file because a concurrent read(),
+		 * write() or lseek() might have altered it
+		 */
+		if (offset == 0)
+			return file->f_pos;
+		/*
+		 * f_lock protects against read/modify/write race with other
+		 * SEEK_CURs. Note that parallel writes and reads behave
+		 * like SEEK_SET.
+		 */
+		spin_lock(&file->f_lock);
+		offset = lseek_execute(file, inode, file->f_pos + offset,
+				       maxsize);
+		spin_unlock(&file->f_lock);
+		return offset;
+	case SEEK_DATA:
+		/*
+		 * In the generic case the entire file is data, so as long as
+		 * offset isn't at the end of the file then the offset is data.
+		 */
+		if (offset >= i_size_read(inode))
+			return -ENXIO;
+		break;
+	case SEEK_HOLE:
+		/*
+		 * There is a virtual hole at the end of the file, so as long as
+		 * offset isn't i_size or larger, return i_size.
+		 */
+		if (offset >= i_size_read(inode))
+			return -ENXIO;
+		offset = i_size_read(inode);
+		break;
 	}
-	retval = -EINVAL;
-	if (offset>=0 && offset<=inode->i_sb->s_maxbytes) {
-		if (offset != file->f_pos) {
-			file->f_pos = offset;
-			file->f_version = 0;
-		}
-		retval = offset;
-	}
-	up(&inode->i_sem);
-	return retval;
-}
 
+	return lseek_execute(file, inode, offset, maxsize);
+}
+EXPORT_SYMBOL(generic_file_llseek_size);
+
+/**
+ * generic_file_llseek - generic llseek implementation for regular files
+ * @file:	file structure to seek on
+ * @offset:	file offset to seek to
+ * @origin:	type of seek
+ *
+ * This is a generic implemenation of ->llseek useable for all normal local
+ * filesystems.  It just updates the file offset to the value specified by
+ * @offset and @origin under i_mutex.
+ */
+loff_t generic_file_llseek(struct file *file, loff_t offset, int origin)
+{
+	struct inode *inode = file->f_mapping->host;
+
+	return generic_file_llseek_size(file, offset, origin,
+					inode->i_sb->s_maxbytes);
+}
 EXPORT_SYMBOL(generic_file_llseek);
 
-loff_t remote_llseek(struct file *file, loff_t offset, int origin)
+/**
+ * noop_llseek - No Operation Performed llseek implementation
+ * @file:	file structure to seek on
+ * @offset:	file offset to seek to
+ * @origin:	type of seek
+ *
+ * This is an implementation of ->llseek useable for the rare special case when
+ * userspace expects the seek to succeed but the (device) file is actually not
+ * able to perform the seek. In this case you use noop_llseek() instead of
+ * falling back to the default implementation of ->llseek.
+ */
+loff_t noop_llseek(struct file *file, loff_t offset, int origin)
 {
-	long long retval;
-
-	lock_kernel();
-	switch (origin) {
-		case 2:
-			offset += i_size_read(file->f_dentry->d_inode);
-			break;
-		case 1:
-			offset += file->f_pos;
-	}
-	retval = -EINVAL;
-	if (offset>=0 && offset<=file->f_dentry->d_inode->i_sb->s_maxbytes) {
-		if (offset != file->f_pos) {
-			file->f_pos = offset;
-			file->f_version = 0;
-		}
-		retval = offset;
-	}
-	unlock_kernel();
-	return retval;
+	return file->f_pos;
 }
-EXPORT_SYMBOL(remote_llseek);
+EXPORT_SYMBOL(noop_llseek);
 
 loff_t no_llseek(struct file *file, loff_t offset, int origin)
 {
@@ -87,25 +161,55 @@ EXPORT_SYMBOL(no_llseek);
 
 loff_t default_llseek(struct file *file, loff_t offset, int origin)
 {
-	long long retval;
+	struct inode *inode = file->f_path.dentry->d_inode;
+	loff_t retval;
 
-	lock_kernel();
+	mutex_lock(&inode->i_mutex);
 	switch (origin) {
-		case 2:
-			offset += i_size_read(file->f_dentry->d_inode);
+		case SEEK_END:
+			offset += i_size_read(inode);
 			break;
-		case 1:
+		case SEEK_CUR:
+			if (offset == 0) {
+				retval = file->f_pos;
+				goto out;
+			}
 			offset += file->f_pos;
+			break;
+		case SEEK_DATA:
+			/*
+			 * In the generic case the entire file is data, so as
+			 * long as offset isn't at the end of the file then the
+			 * offset is data.
+			 */
+			if (offset >= inode->i_size) {
+				retval = -ENXIO;
+				goto out;
+			}
+			break;
+		case SEEK_HOLE:
+			/*
+			 * There is a virtual hole at the end of the file, so
+			 * as long as offset isn't i_size or larger, return
+			 * i_size.
+			 */
+			if (offset >= inode->i_size) {
+				retval = -ENXIO;
+				goto out;
+			}
+			offset = inode->i_size;
+			break;
 	}
 	retval = -EINVAL;
-	if (offset >= 0) {
+	if (offset >= 0 || unsigned_offsets(file)) {
 		if (offset != file->f_pos) {
 			file->f_pos = offset;
 			file->f_version = 0;
 		}
 		retval = offset;
 	}
-	unlock_kernel();
+out:
+	mutex_unlock(&inode->i_mutex);
 	return retval;
 }
 EXPORT_SYMBOL(default_llseek);
@@ -116,7 +220,6 @@ loff_t vfs_llseek(struct file *file, loff_t offset, int origin)
 
 	fn = no_llseek;
 	if (file->f_mode & FMODE_LSEEK) {
-		fn = default_llseek;
 		if (file->f_op && file->f_op->llseek)
 			fn = file->f_op->llseek;
 	}
@@ -124,7 +227,7 @@ loff_t vfs_llseek(struct file *file, loff_t offset, int origin)
 }
 EXPORT_SYMBOL(vfs_llseek);
 
-asmlinkage off_t sys_lseek(unsigned int fd, off_t offset, unsigned int origin)
+SYSCALL_DEFINE3(lseek, unsigned int, fd, off_t, offset, unsigned int, origin)
 {
 	off_t retval;
 	struct file * file;
@@ -136,7 +239,7 @@ asmlinkage off_t sys_lseek(unsigned int fd, off_t offset, unsigned int origin)
 		goto bad;
 
 	retval = -EINVAL;
-	if (origin <= 2) {
+	if (origin <= SEEK_MAX) {
 		loff_t res = vfs_llseek(file, offset, origin);
 		retval = res;
 		if (res != (loff_t)retval)
@@ -148,9 +251,9 @@ bad:
 }
 
 #ifdef __ARCH_WANT_SYS_LLSEEK
-asmlinkage long sys_llseek(unsigned int fd, unsigned long offset_high,
-			   unsigned long offset_low, loff_t __user * result,
-			   unsigned int origin)
+SYSCALL_DEFINE5(llseek, unsigned int, fd, unsigned long, offset_high,
+		unsigned long, offset_low, loff_t __user *, result,
+		unsigned int, origin)
 {
 	int retval;
 	struct file * file;
@@ -163,7 +266,7 @@ asmlinkage long sys_llseek(unsigned int fd, unsigned long offset_high,
 		goto bad;
 
 	retval = -EINVAL;
-	if (origin > 2)
+	if (origin > SEEK_MAX)
 		goto out_putf;
 
 	offset = vfs_llseek(file, ((loff_t) offset_high << 32) | offset_low,
@@ -183,34 +286,73 @@ bad:
 #endif
 
 
+/*
+ * rw_verify_area doesn't like huge counts. We limit
+ * them to something that fits in "int" so that others
+ * won't have to do range checks all the time.
+ */
 int rw_verify_area(int read_write, struct file *file, loff_t *ppos, size_t count)
 {
 	struct inode *inode;
 	loff_t pos;
+	int retval = -EINVAL;
 
-	if (unlikely(count > file->f_maxcount))
-		goto Einval;
+	inode = file->f_path.dentry->d_inode;
+	if (unlikely((ssize_t) count < 0))
+		return retval;
 	pos = *ppos;
-	if (unlikely((pos < 0) || (loff_t) (pos + count) < 0))
-		goto Einval;
+	if (unlikely(pos < 0)) {
+		if (!unsigned_offsets(file))
+			return retval;
+		if (count >= -pos) /* both values are in 0..LLONG_MAX */
+			return -EOVERFLOW;
+	} else if (unlikely((loff_t) (pos + count) < 0)) {
+		if (!unsigned_offsets(file))
+			return retval;
+	}
 
-	inode = file->f_dentry->d_inode;
-	if (inode->i_flock && MANDATORY_LOCK(inode))
-		return locks_mandatory_area(read_write == READ ? FLOCK_VERIFY_READ : FLOCK_VERIFY_WRITE, inode, file, pos, count);
-	return 0;
+	if (unlikely(inode->i_flock && mandatory_lock(inode))) {
+		retval = locks_mandatory_area(
+			read_write == READ ? FLOCK_VERIFY_READ : FLOCK_VERIFY_WRITE,
+			inode, file, pos, count);
+		if (retval < 0)
+			return retval;
+	}
+	retval = security_file_permission(file,
+				read_write == READ ? MAY_READ : MAY_WRITE);
+	if (retval)
+		return retval;
+	return count > MAX_RW_COUNT ? MAX_RW_COUNT : count;
+}
 
-Einval:
-	return -EINVAL;
+static void wait_on_retry_sync_kiocb(struct kiocb *iocb)
+{
+	set_current_state(TASK_UNINTERRUPTIBLE);
+	if (!kiocbIsKicked(iocb))
+		schedule();
+	else
+		kiocbClearKicked(iocb);
+	__set_current_state(TASK_RUNNING);
 }
 
 ssize_t do_sync_read(struct file *filp, char __user *buf, size_t len, loff_t *ppos)
 {
+	struct iovec iov = { .iov_base = buf, .iov_len = len };
 	struct kiocb kiocb;
 	ssize_t ret;
 
 	init_sync_kiocb(&kiocb, filp);
 	kiocb.ki_pos = *ppos;
-	ret = filp->f_op->aio_read(&kiocb, buf, len, kiocb.ki_pos);
+	kiocb.ki_left = len;
+	kiocb.ki_nbytes = len;
+
+	for (;;) {
+		ret = filp->f_op->aio_read(&kiocb, &iov, 1, kiocb.ki_pos);
+		if (ret != -EIOCBRETRY)
+			break;
+		wait_on_retry_sync_kiocb(&kiocb);
+	}
+
 	if (-EIOCBQUEUED == ret)
 		ret = wait_on_sync_kiocb(&kiocb);
 	*ppos = kiocb.ki_pos;
@@ -231,19 +373,17 @@ ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 		return -EFAULT;
 
 	ret = rw_verify_area(READ, file, pos, count);
-	if (!ret) {
-		ret = security_file_permission (file, MAY_READ);
-		if (!ret) {
-			if (file->f_op->read)
-				ret = file->f_op->read(file, buf, count, pos);
-			else
-				ret = do_sync_read(file, buf, count, pos);
-			if (ret > 0) {
-				dnotify_parent(file->f_dentry, DN_ACCESS);
-				current->rchar += ret;
-			}
-			current->syscr++;
+	if (ret >= 0) {
+		count = ret;
+		if (file->f_op->read)
+			ret = file->f_op->read(file, buf, count, pos);
+		else
+			ret = do_sync_read(file, buf, count, pos);
+		if (ret > 0) {
+			fsnotify_access(file);
+			add_rchar(current, ret);
 		}
+		inc_syscr(current);
 	}
 
 	return ret;
@@ -253,12 +393,22 @@ EXPORT_SYMBOL(vfs_read);
 
 ssize_t do_sync_write(struct file *filp, const char __user *buf, size_t len, loff_t *ppos)
 {
+	struct iovec iov = { .iov_base = (void __user *)buf, .iov_len = len };
 	struct kiocb kiocb;
 	ssize_t ret;
 
 	init_sync_kiocb(&kiocb, filp);
 	kiocb.ki_pos = *ppos;
-	ret = filp->f_op->aio_write(&kiocb, buf, len, kiocb.ki_pos);
+	kiocb.ki_left = len;
+	kiocb.ki_nbytes = len;
+
+	for (;;) {
+		ret = filp->f_op->aio_write(&kiocb, &iov, 1, kiocb.ki_pos);
+		if (ret != -EIOCBRETRY)
+			break;
+		wait_on_retry_sync_kiocb(&kiocb);
+	}
+
 	if (-EIOCBQUEUED == ret)
 		ret = wait_on_sync_kiocb(&kiocb);
 	*ppos = kiocb.ki_pos;
@@ -279,19 +429,17 @@ ssize_t vfs_write(struct file *file, const char __user *buf, size_t count, loff_
 		return -EFAULT;
 
 	ret = rw_verify_area(WRITE, file, pos, count);
-	if (!ret) {
-		ret = security_file_permission (file, MAY_WRITE);
-		if (!ret) {
-			if (file->f_op->write)
-				ret = file->f_op->write(file, buf, count, pos);
-			else
-				ret = do_sync_write(file, buf, count, pos);
-			if (ret > 0) {
-				dnotify_parent(file->f_dentry, DN_MODIFY);
-				current->wchar += ret;
-			}
-			current->syscw++;
+	if (ret >= 0) {
+		count = ret;
+		if (file->f_op->write)
+			ret = file->f_op->write(file, buf, count, pos);
+		else
+			ret = do_sync_write(file, buf, count, pos);
+		if (ret > 0) {
+			fsnotify_modify(file);
+			add_wchar(current, ret);
 		}
+		inc_syscw(current);
 	}
 
 	return ret;
@@ -309,7 +457,7 @@ static inline void file_pos_write(struct file *file, loff_t pos)
 	file->f_pos = pos;
 }
 
-asmlinkage ssize_t sys_read(unsigned int fd, char __user * buf, size_t count)
+SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
 {
 	struct file *file;
 	ssize_t ret = -EBADF;
@@ -325,9 +473,9 @@ asmlinkage ssize_t sys_read(unsigned int fd, char __user * buf, size_t count)
 
 	return ret;
 }
-EXPORT_SYMBOL_GPL(sys_read);
 
-asmlinkage ssize_t sys_write(unsigned int fd, const char __user * buf, size_t count)
+SYSCALL_DEFINE3(write, unsigned int, fd, const char __user *, buf,
+		size_t, count)
 {
 	struct file *file;
 	ssize_t ret = -EBADF;
@@ -344,8 +492,8 @@ asmlinkage ssize_t sys_write(unsigned int fd, const char __user * buf, size_t co
 	return ret;
 }
 
-asmlinkage ssize_t sys_pread64(unsigned int fd, char __user *buf,
-			     size_t count, loff_t pos)
+SYSCALL_DEFINE(pread64)(unsigned int fd, char __user *buf,
+			size_t count, loff_t pos)
 {
 	struct file *file;
 	ssize_t ret = -EBADF;
@@ -364,9 +512,17 @@ asmlinkage ssize_t sys_pread64(unsigned int fd, char __user *buf,
 
 	return ret;
 }
+#ifdef CONFIG_HAVE_SYSCALL_WRAPPERS
+asmlinkage long SyS_pread64(long fd, long buf, long count, loff_t pos)
+{
+	return SYSC_pread64((unsigned int) fd, (char __user *) buf,
+			    (size_t) count, pos);
+}
+SYSCALL_ALIAS(sys_pread64, SyS_pread64);
+#endif
 
-asmlinkage ssize_t sys_pwrite64(unsigned int fd, const char __user *buf,
-			      size_t count, loff_t pos)
+SYSCALL_DEFINE(pwrite64)(unsigned int fd, const char __user *buf,
+			 size_t count, loff_t pos)
 {
 	struct file *file;
 	ssize_t ret = -EBADF;
@@ -385,6 +541,14 @@ asmlinkage ssize_t sys_pwrite64(unsigned int fd, const char __user *buf,
 
 	return ret;
 }
+#ifdef CONFIG_HAVE_SYSCALL_WRAPPERS
+asmlinkage long SyS_pwrite64(long fd, long buf, long count, loff_t pos)
+{
+	return SYSC_pwrite64((unsigned int) fd, (const char __user *) buf,
+			     (size_t) count, pos);
+}
+SYSCALL_ALIAS(sys_pwrite64, SyS_pwrite64);
+#endif
 
 /*
  * Reduce an iovec's length in-place.  Return the resulting number of segments
@@ -405,103 +569,41 @@ unsigned long iov_shorten(struct iovec *iov, unsigned long nr_segs, size_t to)
 	}
 	return seg;
 }
-
 EXPORT_SYMBOL(iov_shorten);
 
-/* A write operation does a read from user space and vice versa */
-#define vrfy_dir(type) ((type) == READ ? VERIFY_WRITE : VERIFY_READ)
-
-static ssize_t do_readv_writev(int type, struct file *file,
-			       const struct iovec __user * uvector,
-			       unsigned long nr_segs, loff_t *pos)
+ssize_t do_sync_readv_writev(struct file *filp, const struct iovec *iov,
+		unsigned long nr_segs, size_t len, loff_t *ppos, iov_fn_t fn)
 {
-	typedef ssize_t (*io_fn_t)(struct file *, char __user *, size_t, loff_t *);
-	typedef ssize_t (*iov_fn_t)(struct file *, const struct iovec *, unsigned long, loff_t *);
-
-	size_t tot_len;
-	struct iovec iovstack[UIO_FASTIOV];
-	struct iovec *iov=iovstack, *vector;
+	struct kiocb kiocb;
 	ssize_t ret;
-	int seg;
-	io_fn_t fn;
-	iov_fn_t fnv;
 
-	/*
-	 * SuS says "The readv() function *may* fail if the iovcnt argument
-	 * was less than or equal to 0, or greater than {IOV_MAX}.  Linux has
-	 * traditionally returned zero for zero segments, so...
-	 */
-	ret = 0;
-	if (nr_segs == 0)
-		goto out;
+	init_sync_kiocb(&kiocb, filp);
+	kiocb.ki_pos = *ppos;
+	kiocb.ki_left = len;
+	kiocb.ki_nbytes = len;
 
-	/*
-	 * First get the "struct iovec" from user memory and
-	 * verify all the pointers
-	 */
-	ret = -EINVAL;
-	if ((nr_segs > UIO_MAXIOV) || (nr_segs <= 0))
-		goto out;
-	if (!file->f_op)
-		goto out;
-	if (nr_segs > UIO_FASTIOV) {
-		ret = -ENOMEM;
-		iov = kmalloc(nr_segs*sizeof(struct iovec), GFP_KERNEL);
-		if (!iov)
-			goto out;
-	}
-	ret = -EFAULT;
-	if (copy_from_user(iov, uvector, nr_segs*sizeof(*uvector)))
-		goto out;
-
-	/*
-	 * Single unix specification:
-	 * We should -EINVAL if an element length is not >= 0 and fitting an
-	 * ssize_t.  The total length is fitting an ssize_t
-	 *
-	 * Be careful here because iov_len is a size_t not an ssize_t
-	 */
-	tot_len = 0;
-	ret = -EINVAL;
-	for (seg = 0; seg < nr_segs; seg++) {
-		void __user *buf = iov[seg].iov_base;
-		ssize_t len = (ssize_t)iov[seg].iov_len;
-
-		if (unlikely(!access_ok(vrfy_dir(type), buf, len)))
-			goto Efault;
-		if (len < 0)	/* size_t not fitting an ssize_t .. */
-			goto out;
-		tot_len += len;
-		if ((ssize_t)tot_len < 0) /* maths overflow on the ssize_t */
-			goto out;
-	}
-	if (tot_len == 0) {
-		ret = 0;
-		goto out;
+	for (;;) {
+		ret = fn(&kiocb, iov, nr_segs, kiocb.ki_pos);
+		if (ret != -EIOCBRETRY)
+			break;
+		wait_on_retry_sync_kiocb(&kiocb);
 	}
 
-	ret = rw_verify_area(type, file, pos, tot_len);
-	if (ret)
-		goto out;
+	if (ret == -EIOCBQUEUED)
+		ret = wait_on_sync_kiocb(&kiocb);
+	*ppos = kiocb.ki_pos;
+	return ret;
+}
 
-	fnv = NULL;
-	if (type == READ) {
-		fn = file->f_op->read;
-		fnv = file->f_op->readv;
-	} else {
-		fn = (io_fn_t)file->f_op->write;
-		fnv = file->f_op->writev;
-	}
-	if (fnv) {
-		ret = fnv(file, iov, nr_segs, pos);
-		goto out;
-	}
+/* Do it by hand, with file-ops */
+ssize_t do_loop_readv_writev(struct file *filp, struct iovec *iov,
+		unsigned long nr_segs, loff_t *ppos, io_fn_t fn)
+{
+	struct iovec *vector = iov;
+	ssize_t ret = 0;
 
-	/* Do it by hand, with file-ops */
-	ret = 0;
-	vector = iov;
 	while (nr_segs > 0) {
-		void __user * base;
+		void __user *base;
 		size_t len;
 		ssize_t nr;
 
@@ -510,26 +612,151 @@ static ssize_t do_readv_writev(int type, struct file *file,
 		vector++;
 		nr_segs--;
 
-		nr = fn(file, base, len, pos);
+		nr = fn(filp, base, len, ppos);
 
 		if (nr < 0) {
-			if (!ret) ret = nr;
+			if (!ret)
+				ret = nr;
 			break;
 		}
 		ret += nr;
 		if (nr != len)
 			break;
 	}
+
+	return ret;
+}
+
+/* A write operation does a read from user space and vice versa */
+#define vrfy_dir(type) ((type) == READ ? VERIFY_WRITE : VERIFY_READ)
+
+ssize_t rw_copy_check_uvector(int type, const struct iovec __user * uvector,
+			      unsigned long nr_segs, unsigned long fast_segs,
+			      struct iovec *fast_pointer,
+			      struct iovec **ret_pointer,
+			      int check_access)
+{
+	unsigned long seg;
+	ssize_t ret;
+	struct iovec *iov = fast_pointer;
+
+	/*
+	 * SuS says "The readv() function *may* fail if the iovcnt argument
+	 * was less than or equal to 0, or greater than {IOV_MAX}.  Linux has
+	 * traditionally returned zero for zero segments, so...
+	 */
+	if (nr_segs == 0) {
+		ret = 0;
+		goto out;
+	}
+
+	/*
+	 * First get the "struct iovec" from user memory and
+	 * verify all the pointers
+	 */
+	if (nr_segs > UIO_MAXIOV) {
+		ret = -EINVAL;
+		goto out;
+	}
+	if (nr_segs > fast_segs) {
+		iov = kmalloc(nr_segs*sizeof(struct iovec), GFP_KERNEL);
+		if (iov == NULL) {
+			ret = -ENOMEM;
+			goto out;
+		}
+	}
+	if (copy_from_user(iov, uvector, nr_segs*sizeof(*uvector))) {
+		ret = -EFAULT;
+		goto out;
+	}
+
+	/*
+	 * According to the Single Unix Specification we should return EINVAL
+	 * if an element length is < 0 when cast to ssize_t or if the
+	 * total length would overflow the ssize_t return value of the
+	 * system call.
+	 *
+	 * Linux caps all read/write calls to MAX_RW_COUNT, and avoids the
+	 * overflow case.
+	 */
+	ret = 0;
+	for (seg = 0; seg < nr_segs; seg++) {
+		void __user *buf = iov[seg].iov_base;
+		ssize_t len = (ssize_t)iov[seg].iov_len;
+
+		/* see if we we're about to use an invalid len or if
+		 * it's about to overflow ssize_t */
+		if (len < 0) {
+			ret = -EINVAL;
+			goto out;
+		}
+		if (check_access
+		    && unlikely(!access_ok(vrfy_dir(type), buf, len))) {
+			ret = -EFAULT;
+			goto out;
+		}
+		if (len > MAX_RW_COUNT - ret) {
+			len = MAX_RW_COUNT - ret;
+			iov[seg].iov_len = len;
+		}
+		ret += len;
+	}
+out:
+	*ret_pointer = iov;
+	return ret;
+}
+
+static ssize_t do_readv_writev(int type, struct file *file,
+			       const struct iovec __user * uvector,
+			       unsigned long nr_segs, loff_t *pos)
+{
+	size_t tot_len;
+	struct iovec iovstack[UIO_FASTIOV];
+	struct iovec *iov = iovstack;
+	ssize_t ret;
+	io_fn_t fn;
+	iov_fn_t fnv;
+
+	if (!file->f_op) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = rw_copy_check_uvector(type, uvector, nr_segs,
+				    ARRAY_SIZE(iovstack), iovstack, &iov, 1);
+	if (ret <= 0)
+		goto out;
+
+	tot_len = ret;
+	ret = rw_verify_area(type, file, pos, tot_len);
+	if (ret < 0)
+		goto out;
+
+	fnv = NULL;
+	if (type == READ) {
+		fn = file->f_op->read;
+		fnv = file->f_op->aio_read;
+	} else {
+		fn = (io_fn_t)file->f_op->write;
+		fnv = file->f_op->aio_write;
+	}
+
+	if (fnv)
+		ret = do_sync_readv_writev(file, iov, nr_segs, tot_len,
+						pos, fnv);
+	else
+		ret = do_loop_readv_writev(file, iov, nr_segs, pos, fn);
+
 out:
 	if (iov != iovstack)
 		kfree(iov);
-	if ((ret + (type == READ)) > 0)
-		dnotify_parent(file->f_dentry,
-				(type == READ) ? DN_ACCESS : DN_MODIFY);
+	if ((ret + (type == READ)) > 0) {
+		if (type == READ)
+			fsnotify_access(file);
+		else
+			fsnotify_modify(file);
+	}
 	return ret;
-Efault:
-	ret = -EFAULT;
-	goto out;
 }
 
 ssize_t vfs_readv(struct file *file, const struct iovec __user *vec,
@@ -537,7 +764,7 @@ ssize_t vfs_readv(struct file *file, const struct iovec __user *vec,
 {
 	if (!(file->f_mode & FMODE_READ))
 		return -EBADF;
-	if (!file->f_op || (!file->f_op->readv && !file->f_op->read))
+	if (!file->f_op || (!file->f_op->aio_read && !file->f_op->read))
 		return -EINVAL;
 
 	return do_readv_writev(READ, file, vec, vlen, pos);
@@ -550,7 +777,7 @@ ssize_t vfs_writev(struct file *file, const struct iovec __user *vec,
 {
 	if (!(file->f_mode & FMODE_WRITE))
 		return -EBADF;
-	if (!file->f_op || (!file->f_op->writev && !file->f_op->write))
+	if (!file->f_op || (!file->f_op->aio_write && !file->f_op->write))
 		return -EINVAL;
 
 	return do_readv_writev(WRITE, file, vec, vlen, pos);
@@ -558,8 +785,8 @@ ssize_t vfs_writev(struct file *file, const struct iovec __user *vec,
 
 EXPORT_SYMBOL(vfs_writev);
 
-asmlinkage ssize_t
-sys_readv(unsigned long fd, const struct iovec __user *vec, unsigned long vlen)
+SYSCALL_DEFINE3(readv, unsigned long, fd, const struct iovec __user *, vec,
+		unsigned long, vlen)
 {
 	struct file *file;
 	ssize_t ret = -EBADF;
@@ -574,13 +801,13 @@ sys_readv(unsigned long fd, const struct iovec __user *vec, unsigned long vlen)
 	}
 
 	if (ret > 0)
-		current->rchar += ret;
-	current->syscr++;
+		add_rchar(current, ret);
+	inc_syscr(current);
 	return ret;
 }
 
-asmlinkage ssize_t
-sys_writev(unsigned long fd, const struct iovec __user *vec, unsigned long vlen)
+SYSCALL_DEFINE3(writev, unsigned long, fd, const struct iovec __user *, vec,
+		unsigned long, vlen)
 {
 	struct file *file;
 	ssize_t ret = -EBADF;
@@ -595,8 +822,64 @@ sys_writev(unsigned long fd, const struct iovec __user *vec, unsigned long vlen)
 	}
 
 	if (ret > 0)
-		current->wchar += ret;
-	current->syscw++;
+		add_wchar(current, ret);
+	inc_syscw(current);
+	return ret;
+}
+
+static inline loff_t pos_from_hilo(unsigned long high, unsigned long low)
+{
+#define HALF_LONG_BITS (BITS_PER_LONG / 2)
+	return (((loff_t)high << HALF_LONG_BITS) << HALF_LONG_BITS) | low;
+}
+
+SYSCALL_DEFINE5(preadv, unsigned long, fd, const struct iovec __user *, vec,
+		unsigned long, vlen, unsigned long, pos_l, unsigned long, pos_h)
+{
+	loff_t pos = pos_from_hilo(pos_h, pos_l);
+	struct file *file;
+	ssize_t ret = -EBADF;
+	int fput_needed;
+
+	if (pos < 0)
+		return -EINVAL;
+
+	file = fget_light(fd, &fput_needed);
+	if (file) {
+		ret = -ESPIPE;
+		if (file->f_mode & FMODE_PREAD)
+			ret = vfs_readv(file, vec, vlen, &pos);
+		fput_light(file, fput_needed);
+	}
+
+	if (ret > 0)
+		add_rchar(current, ret);
+	inc_syscr(current);
+	return ret;
+}
+
+SYSCALL_DEFINE5(pwritev, unsigned long, fd, const struct iovec __user *, vec,
+		unsigned long, vlen, unsigned long, pos_l, unsigned long, pos_h)
+{
+	loff_t pos = pos_from_hilo(pos_h, pos_l);
+	struct file *file;
+	ssize_t ret = -EBADF;
+	int fput_needed;
+
+	if (pos < 0)
+		return -EINVAL;
+
+	file = fget_light(fd, &fput_needed);
+	if (file) {
+		ret = -ESPIPE;
+		if (file->f_mode & FMODE_PWRITE)
+			ret = vfs_writev(file, vec, vlen, &pos);
+		fput_light(file, fput_needed);
+	}
+
+	if (ret > 0)
+		add_wchar(current, ret);
+	inc_syscw(current);
 	return ret;
 }
 
@@ -607,7 +890,7 @@ static ssize_t do_sendfile(int out_fd, int in_fd, loff_t *ppos,
 	struct inode * in_inode, * out_inode;
 	loff_t pos;
 	ssize_t retval;
-	int fput_needed_in, fput_needed_out;
+	int fput_needed_in, fput_needed_out, fl;
 
 	/*
 	 * Get input file, and verify that it is ok..
@@ -618,12 +901,6 @@ static ssize_t do_sendfile(int out_fd, int in_fd, loff_t *ppos,
 		goto out;
 	if (!(in_file->f_mode & FMODE_READ))
 		goto fput_in;
-	retval = -EINVAL;
-	in_inode = in_file->f_dentry->d_inode;
-	if (!in_inode)
-		goto fput_in;
-	if (!in_file->f_op || !in_file->f_op->sendfile)
-		goto fput_in;
 	retval = -ESPIPE;
 	if (!ppos)
 		ppos = &in_file->f_pos;
@@ -631,12 +908,9 @@ static ssize_t do_sendfile(int out_fd, int in_fd, loff_t *ppos,
 		if (!(in_file->f_mode & FMODE_PREAD))
 			goto fput_in;
 	retval = rw_verify_area(READ, in_file, ppos, count);
-	if (retval)
+	if (retval < 0)
 		goto fput_in;
-
-	retval = security_file_permission (in_file, MAY_READ);
-	if (retval)
-		goto fput_in;
+	count = retval;
 
 	/*
 	 * Get output file, and verify that it is ok..
@@ -648,24 +922,17 @@ static ssize_t do_sendfile(int out_fd, int in_fd, loff_t *ppos,
 	if (!(out_file->f_mode & FMODE_WRITE))
 		goto fput_out;
 	retval = -EINVAL;
-	if (!out_file->f_op || !out_file->f_op->sendpage)
-		goto fput_out;
-	out_inode = out_file->f_dentry->d_inode;
+	in_inode = in_file->f_path.dentry->d_inode;
+	out_inode = out_file->f_path.dentry->d_inode;
 	retval = rw_verify_area(WRITE, out_file, &out_file->f_pos, count);
-	if (retval)
+	if (retval < 0)
 		goto fput_out;
-
-	retval = security_file_permission (out_file, MAY_WRITE);
-	if (retval)
-		goto fput_out;
+	count = retval;
 
 	if (!max)
 		max = min(in_inode->i_sb->s_maxbytes, out_inode->i_sb->s_maxbytes);
 
 	pos = *ppos;
-	retval = -EINVAL;
-	if (unlikely(pos < 0))
-		goto fput_out;
 	if (unlikely(pos + count > max)) {
 		retval = -EOVERFLOW;
 		if (pos >= max)
@@ -673,15 +940,26 @@ static ssize_t do_sendfile(int out_fd, int in_fd, loff_t *ppos,
 		count = max - pos;
 	}
 
-	retval = in_file->f_op->sendfile(in_file, ppos, count, file_send_actor, out_file);
+	fl = 0;
+#if 0
+	/*
+	 * We need to debate whether we can enable this or not. The
+	 * man page documents EAGAIN return for the output at least,
+	 * and the application is arguably buggy if it doesn't expect
+	 * EAGAIN on a non-blocking file descriptor.
+	 */
+	if (in_file->f_flags & O_NONBLOCK)
+		fl = SPLICE_F_NONBLOCK;
+#endif
+	retval = do_splice_direct(in_file, ppos, out_file, count, fl);
 
 	if (retval > 0) {
-		current->rchar += retval;
-		current->wchar += retval;
+		add_rchar(current, retval);
+		add_wchar(current, retval);
 	}
-	current->syscr++;
-	current->syscw++;
 
+	inc_syscr(current);
+	inc_syscw(current);
 	if (*ppos > max)
 		retval = -EOVERFLOW;
 
@@ -693,7 +971,7 @@ out:
 	return retval;
 }
 
-asmlinkage ssize_t sys_sendfile(int out_fd, int in_fd, off_t __user *offset, size_t count)
+SYSCALL_DEFINE4(sendfile, int, out_fd, int, in_fd, off_t __user *, offset, size_t, count)
 {
 	loff_t pos;
 	off_t off;
@@ -712,7 +990,7 @@ asmlinkage ssize_t sys_sendfile(int out_fd, int in_fd, off_t __user *offset, siz
 	return do_sendfile(out_fd, in_fd, NULL, count, 0);
 }
 
-asmlinkage ssize_t sys_sendfile64(int out_fd, int in_fd, loff_t __user *offset, size_t count)
+SYSCALL_DEFINE4(sendfile64, int, out_fd, int, in_fd, loff_t __user *, offset, size_t, count)
 {
 	loff_t pos;
 	ssize_t ret;

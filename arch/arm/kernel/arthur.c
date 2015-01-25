@@ -18,6 +18,7 @@
 #include <linux/stddef.h>
 #include <linux/signal.h>
 #include <linux/init.h>
+#include <linux/sched.h>
 
 #include <asm/ptrace.h>
 
@@ -89,3 +90,5 @@ static void __exit arthur_exit(void)
 
 module_init(arthur_init);
 module_exit(arthur_exit);
+
+MODULE_LICENSE("GPL");

@@ -21,16 +21,15 @@
  *
  */
 #include <linux/compat.h>
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/highuid.h>
 #include <linux/init.h>
 #include <linux/msg.h>
 #include <linux/shm.h>
-#include <linux/slab.h>
 #include <linux/syscalls.h>
+#include <linux/ptrace.h>
 
-#include <asm/semaphore.h>
+#include <linux/mutex.h>
 #include <asm/uaccess.h>
 
 #include "util.h"
@@ -42,10 +41,10 @@ struct compat_msgbuf {
 
 struct compat_ipc_perm {
 	key_t key;
-	compat_uid_t uid;
-	compat_gid_t gid;
-	compat_uid_t cuid;
-	compat_gid_t cgid;
+	__compat_uid_t uid;
+	__compat_gid_t gid;
+	__compat_uid_t cuid;
+	__compat_gid_t cgid;
 	compat_mode_t mode;
 	unsigned short seq;
 };
@@ -116,10 +115,10 @@ struct compat_shm_info {
 
 extern int sem_ctls[];
 #define sc_semopm	(sem_ctls[2])
-#define MAXBUF (64*1024)
 
 static inline int compat_ipc_parse_version(int *cmd)
 {
+#ifdef CONFIG_ARCH_WANT_OLD_COMPAT_IPC
 	int version = *cmd & IPC_64;
 
 	/* this is tricky: architectures that have support for the old
@@ -131,6 +130,10 @@ static inline int compat_ipc_parse_version(int *cmd)
 	*cmd &= ~IPC_64;
 #endif
 	return version;
+#else
+	/* With the asm-generic APIs, we always use the 64-bit versions. */
+	return IPC_64;
+#endif
 }
 
 static inline int __get_compat_ipc64_perm(struct ipc64_perm *p64,
@@ -174,8 +177,8 @@ static inline int __put_compat_ipc_perm(struct ipc64_perm *p,
 					struct compat_ipc_perm __user *up)
 {
 	int err;
-	compat_uid_t u;
-	compat_gid_t g;
+	__compat_uid_t u;
+	__compat_gid_t g;
 
 	err  = __put_user(p->key, &up->key);
 	SET_UID(u, p->uid);
@@ -227,7 +230,7 @@ static inline int put_compat_semid_ds(struct semid64_ds *s,
 	int err;
 
 	if (!access_ok (VERIFY_WRITE, up, sizeof(*up)))
-		err = -EFAULT;
+		return -EFAULT;
 	err  = __put_compat_ipc_perm(&s->sem_perm, &up->sem_perm);
 	err |= __put_user(s->sem_otime, &up->sem_otime);
 	err |= __put_user(s->sem_ctime, &up->sem_ctime);
@@ -235,19 +238,16 @@ static inline int put_compat_semid_ds(struct semid64_ds *s,
 	return err;
 }
 
-long compat_sys_semctl(int first, int second, int third, void __user *uptr)
+static long do_compat_semctl(int first, int second, int third, u32 pad)
 {
 	union semun fourth;
-	u32 pad;
 	int err, err2;
 	struct semid64_ds s64;
 	struct semid64_ds __user *up64;
 	int version = compat_ipc_parse_version(&third);
 
-	if (!uptr)
-		return -EINVAL;
-	if (get_user(pad, (u32 __user *) uptr))
-		return -EFAULT;
+	memset(&s64, 0, sizeof(s64));
+
 	if ((third & (~IPC_64)) == SETVAL)
 		fourth.val = (int) pad;
 	else
@@ -306,37 +306,44 @@ long compat_sys_semctl(int first, int second, int third, void __user *uptr)
 	return err;
 }
 
+#ifdef CONFIG_ARCH_WANT_OLD_COMPAT_IPC
+long compat_sys_semctl(int first, int second, int third, void __user *uptr)
+{
+	u32 pad;
+
+	if (!uptr)
+		return -EINVAL;
+	if (get_user(pad, (u32 __user *) uptr))
+		return -EFAULT;
+	return do_compat_semctl(first, second, third, pad);
+}
+
 long compat_sys_msgsnd(int first, int second, int third, void __user *uptr)
 {
-	struct msgbuf __user *p;
 	struct compat_msgbuf __user *up = uptr;
 	long type;
 
 	if (first < 0)
 		return -EINVAL;
-	if (second < 0 || (second >= MAXBUF - sizeof(struct msgbuf)))
+	if (second < 0)
 		return -EINVAL;
 
-	p = compat_alloc_user_space(second + sizeof(struct msgbuf));
-	if (get_user(type, &up->mtype) ||
-	    put_user(type, &p->mtype) ||
-	    copy_in_user(p->mtext, up->mtext, second))
+	if (get_user(type, &up->mtype))
 		return -EFAULT;
 
-	return sys_msgsnd(first, p, second, third);
+	return do_msgsnd(first, type, up->mtext, second, third);
 }
 
 long compat_sys_msgrcv(int first, int second, int msgtyp, int third,
 			   int version, void __user *uptr)
 {
-	struct msgbuf __user *p;
 	struct compat_msgbuf __user *up;
 	long type;
 	int err;
 
 	if (first < 0)
 		return -EINVAL;
-	if (second < 0 || (second >= MAXBUF - sizeof(struct msgbuf)))
+	if (second < 0)
 		return -EINVAL;
 
 	if (!version) {
@@ -350,18 +357,46 @@ long compat_sys_msgrcv(int first, int second, int msgtyp, int third,
 		uptr = compat_ptr(ipck.msgp);
 		msgtyp = ipck.msgtyp;
 	}
-	p = compat_alloc_user_space(second + sizeof(struct msgbuf));
-	err = sys_msgrcv(first, p, second, msgtyp, third);
+	up = uptr;
+	err = do_msgrcv(first, &type, up->mtext, second, msgtyp, third);
 	if (err < 0)
 		goto out;
-	up = uptr;
-	if (get_user(type, &p->mtype) ||
-	    put_user(type, &up->mtype) ||
-	    copy_in_user(up->mtext, p->mtext, err))
+	if (put_user(type, &up->mtype))
 		err = -EFAULT;
 out:
 	return err;
 }
+#else
+long compat_sys_semctl(int semid, int semnum, int cmd, int arg)
+{
+	return do_compat_semctl(semid, semnum, cmd, arg);
+}
+
+long compat_sys_msgsnd(int msqid, struct compat_msgbuf __user *msgp,
+		       size_t msgsz, int msgflg)
+{
+	compat_long_t mtype;
+
+	if (get_user(mtype, &msgp->mtype))
+		return -EFAULT;
+	return do_msgsnd(msqid, mtype, msgp->mtext, msgsz, msgflg);
+}
+
+long compat_sys_msgrcv(int msqid, struct compat_msgbuf __user *msgp,
+		       size_t msgsz, long msgtyp, int msgflg)
+{
+	long err, mtype;
+
+	err =  do_msgrcv(msqid, &mtype, msgp->mtext, msgsz, msgtyp, msgflg);
+	if (err < 0)
+		goto out;
+
+	if (put_user(mtype, &msgp->mtype))
+		err = -EFAULT;
+ out:
+	return err;
+}
+#endif
 
 static inline int get_compat_msqid64(struct msqid64_ds *m64,
 				     struct compat_msqid64_ds __user *up64)
@@ -432,6 +467,8 @@ long compat_sys_msgctl(int first, int second, void __user *uptr)
 	int version = compat_ipc_parse_version(&second);
 	void __user *p;
 
+	memset(&m64, 0, sizeof(m64));
+
 	switch (second & (~IPC_64)) {
 	case IPC_INFO:
 	case IPC_RMID:
@@ -477,6 +514,7 @@ long compat_sys_msgctl(int first, int second, void __user *uptr)
 	return err;
 }
 
+#ifdef CONFIG_ARCH_WANT_OLD_COMPAT_IPC
 long compat_sys_shmat(int first, int second, compat_uptr_t third, int version,
 			void __user *uptr)
 {
@@ -492,6 +530,19 @@ long compat_sys_shmat(int first, int second, compat_uptr_t third, int version,
 	uaddr = compat_ptr(third);
 	return put_user(raddr, uaddr);
 }
+#else
+long compat_sys_shmat(int shmid, compat_uptr_t shmaddr, int shmflg)
+{
+	unsigned long ret;
+	long err;
+
+	err = do_shmat(shmid, compat_ptr(shmaddr), shmflg, &ret);
+	if (err)
+		return err;
+	force_successful_syscall_return();
+	return (long)ret;
+}
+#endif
 
 static inline int get_compat_shmid64_ds(struct shmid64_ds *s64,
 					struct compat_shmid64_ds __user *up64)
@@ -552,6 +603,8 @@ static inline int put_compat_shminfo64(struct shminfo64 *smi,
 
 	if (!access_ok(VERIFY_WRITE, up64, sizeof(*up64)))
 		return -EFAULT;
+	if (smi->shmmax > INT_MAX)
+		smi->shmmax = INT_MAX;
 	err  = __put_user(smi->shmmax, &up64->shmmax);
 	err |= __put_user(smi->shmmin, &up64->shmmin);
 	err |= __put_user(smi->shmmni, &up64->shmmni);
@@ -567,11 +620,14 @@ static inline int put_compat_shminfo(struct shminfo64 *smi,
 
 	if (!access_ok(VERIFY_WRITE, up, sizeof(*up)))
 		return -EFAULT;
+	if (smi->shmmax > INT_MAX)
+		smi->shmmax = INT_MAX;
 	err  = __put_user(smi->shmmax, &up->shmmax);
 	err |= __put_user(smi->shmmin, &up->shmmin);
 	err |= __put_user(smi->shmmni, &up->shmmni);
 	err |= __put_user(smi->shmseg, &up->shmseg);
 	err |= __put_user(smi->shmall, &up->shmall);
+	return err;
 }
 
 static inline int put_compat_shm_info(struct shm_info __user *ip,
@@ -599,6 +655,8 @@ long compat_sys_shmctl(int first, int second, void __user *uptr)
 	struct shminfo64 smi;
 	int err, err2;
 	int version = compat_ipc_parse_version(&second);
+
+	memset(&s64, 0, sizeof(s64));
 
 	switch (second & (~IPC_64)) {
 	case IPC_RMID:

@@ -9,9 +9,9 @@
 #ifndef _LINUX_HFS_FS_H
 #define _LINUX_HFS_FS_H
 
-#include <linux/version.h>
 #include <linux/slab.h>
 #include <linux/types.h>
+#include <linux/mutex.h>
 #include <linux/buffer_head.h>
 #include <linux/fs.h>
 
@@ -36,9 +36,6 @@
 #define dprint(flg, fmt, args...) \
 	if (flg & DBG_MASK) printk(fmt , ## args)
 
-#define hfs_warn(format, args...) printk(KERN_WARNING format , ## args)
-#define hfs_error(format, args...) printk(KERN_ERR format , ## args)
-
 /*
  * struct hfs_inode_info
  *
@@ -57,7 +54,7 @@ struct hfs_inode_info {
 	struct list_head open_dir_list;
 	struct inode *rsrc_inode;
 
-	struct semaphore extents_lock;
+	struct mutex extents_lock;
 
 	u16 alloc_blocks, clump_blocks;
 	sector_t fs_blocks;
@@ -141,15 +138,15 @@ struct hfs_sb_info {
 
 	int session, part;
 
-	struct semaphore bitmap_lock;
+	struct nls_table *nls_io, *nls_disk;
+
+	struct mutex bitmap_lock;
 
 	unsigned long flags;
 
 	u16 blockoffset;
 
 	int fs_div;
-
-	struct hlist_head rsrc_inodes;
 };
 
 #define HFS_FLG_BITMAP_DIRTY	0
@@ -168,11 +165,11 @@ extern int hfs_cat_create(u32, struct inode *, struct qstr *, struct inode *);
 extern int hfs_cat_delete(u32, struct inode *, struct qstr *);
 extern int hfs_cat_move(u32, struct inode *, struct qstr *,
 			struct inode *, struct qstr *);
-extern void hfs_cat_build_key(btree_key *, u32, struct qstr *);
+extern void hfs_cat_build_key(struct super_block *, btree_key *, u32, struct qstr *);
 
 /* dir.c */
-extern struct file_operations hfs_dir_operations;
-extern struct inode_operations hfs_dir_inode_operations;
+extern const struct file_operations hfs_dir_operations;
+extern const struct inode_operations hfs_dir_inode_operations;
 
 /* extent.c */
 extern int hfs_ext_keycmp(const btree_key *, const btree_key *);
@@ -184,17 +181,17 @@ extern void hfs_file_truncate(struct inode *);
 extern int hfs_get_block(struct inode *, sector_t, struct buffer_head *, int);
 
 /* inode.c */
-extern struct address_space_operations hfs_aops;
-extern struct address_space_operations hfs_btree_aops;
+extern const struct address_space_operations hfs_aops;
+extern const struct address_space_operations hfs_btree_aops;
 
-extern struct inode *hfs_new_inode(struct inode *, struct qstr *, int);
+extern struct inode *hfs_new_inode(struct inode *, struct qstr *, umode_t);
 extern void hfs_inode_write_fork(struct inode *, struct hfs_extent *, __be32 *, __be32 *);
-extern int hfs_write_inode(struct inode *, int);
+extern int hfs_write_inode(struct inode *, struct writeback_control *);
 extern int hfs_inode_setattr(struct dentry *, struct iattr *);
 extern void hfs_inode_read_fork(struct inode *inode, struct hfs_extent *ext,
 			__be32 log_size, __be32 phys_size, u32 clump_size);
 extern struct inode *hfs_iget(struct super_block *, struct hfs_cat_key *, hfs_cat_rec *);
-extern void hfs_clear_inode(struct inode *);
+extern void hfs_evict_inode(struct inode *);
 extern void hfs_delete_inode(struct inode *);
 
 /* attr.c */
@@ -214,16 +211,20 @@ extern void hfs_mdb_put(struct super_block *);
 extern int hfs_part_find(struct super_block *, sector_t *, sector_t *);
 
 /* string.c */
-extern struct dentry_operations hfs_dentry_operations;
+extern const struct dentry_operations hfs_dentry_operations;
 
-extern int hfs_hash_dentry(struct dentry *, struct qstr *);
+extern int hfs_hash_dentry(const struct dentry *, const struct inode *,
+		struct qstr *);
 extern int hfs_strcmp(const unsigned char *, unsigned int,
 		      const unsigned char *, unsigned int);
-extern int hfs_compare_dentry(struct dentry *, struct qstr *, struct qstr *);
+extern int hfs_compare_dentry(const struct dentry *parent,
+		const struct inode *pinode,
+		const struct dentry *dentry, const struct inode *inode,
+		unsigned int len, const char *str, const struct qstr *name);
 
 /* trans.c */
-extern void hfs_triv2mac(struct hfs_name *, struct qstr *);
-extern int hfs_mac2triv(char *, const struct hfs_name *);
+extern void hfs_asc2mac(struct super_block *, struct hfs_name *, struct qstr *);
+extern int hfs_mac2asc(struct super_block *, char *, const struct hfs_name *);
 
 extern struct timezone sys_tz;
 
@@ -253,17 +254,6 @@ static inline void hfs_bitmap_dirty(struct super_block *sb)
 {
 	set_bit(HFS_FLG_BITMAP_DIRTY, &HFS_SB(sb)->flags);
 	sb->s_dirt = 1;
-}
-
-static inline void hfs_buffer_sync(struct buffer_head *bh)
-{
-	while (buffer_locked(bh)) {
-		wait_on_buffer(bh);
-	}
-	if (buffer_dirty(bh)) {
-		ll_rw_block(WRITE, 1, &bh);
-		wait_on_buffer(bh);
-	}
 }
 
 #define sb_bread512(sb, sec, data) ({			\

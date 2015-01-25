@@ -15,10 +15,9 @@
     GNU General Public License for more details.
 *******************************************************************************/
 
-extern struct sk_buff *dn_alloc_skb(struct sock *sk, int size, int pri);
-extern int dn_route_output_sock(struct dst_entry **pprt, struct flowi *, struct sock *sk, int flags);
+extern struct sk_buff *dn_alloc_skb(struct sock *sk, int size, gfp_t pri);
+extern int dn_route_output_sock(struct dst_entry **pprt, struct flowidn *, struct sock *sk, int flags);
 extern int dn_cache_dump(struct sk_buff *skb, struct netlink_callback *cb);
-extern int dn_cache_getroute(struct sk_buff *skb, struct nlmsghdr *nlh, void *arg);
 extern void dn_rt_cache_flush(int delay);
 
 /* Masks for flags field */
@@ -66,23 +65,30 @@ extern void dn_rt_cache_flush(int delay);
  * packets to the originating host.
  */
 struct dn_route {
-	union {
-		struct dst_entry dst;
-		struct dn_route *rt_next;
-	} u;
+	struct dst_entry dst;
 
-	__u16 rt_saddr;
-	__u16 rt_daddr;
-	__u16 rt_gateway;
-	__u16 rt_local_src;	/* Source used for forwarding packets */
-	__u16 rt_src_map;
-	__u16 rt_dst_map;
+	struct flowidn fld;
+
+	__le16 rt_saddr;
+	__le16 rt_daddr;
+	__le16 rt_gateway;
+	__le16 rt_local_src;	/* Source used for forwarding packets */
+	__le16 rt_src_map;
+	__le16 rt_dst_map;
 
 	unsigned rt_flags;
 	unsigned rt_type;
-
-	struct flowi fl;
 };
+
+static inline bool dn_is_input_route(struct dn_route *rt)
+{
+	return rt->fld.flowidn_iif != 0;
+}
+
+static inline bool dn_is_output_route(struct dn_route *rt)
+{
+	return rt->fld.flowidn_iif == 0;
+}
 
 extern void dn_route_init(void);
 extern void dn_route_cleanup(void);
@@ -102,8 +108,7 @@ static inline void dn_rt_finish_output(struct sk_buff *skb, char *dst, char *src
 	if ((dev->type != ARPHRD_ETHER) && (dev->type != ARPHRD_LOOPBACK))
 		dst = NULL;
 
-	if (!dev->hard_header || (dev->hard_header(skb, dev, ETH_P_DNA_RT,
-			dst, src, skb->len) >= 0))
+	if (dev_hard_header(skb, dev, ETH_P_DNA_RT, dst, src, skb->len) >= 0)
 		dn_rt_send(skb);
 	else
 		kfree_skb(skb);

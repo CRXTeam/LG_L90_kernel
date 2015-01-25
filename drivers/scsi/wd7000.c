@@ -146,13 +146,13 @@
  *
  * use host->host_lock, not io_request_lock, cleanups
  *
- * 2002/10/04 - Alan Cox <alan@redhat.com>
+ * 2002/10/04 - Alan Cox <alan@lxorguk.ukuu.org.uk>
  *
- * Use dev_id for interrupts, kill __FUNCTION__ pasting
+ * Use dev_id for interrupts, kill __func__ pasting
  * Add a lock for the scb pool, clean up all other cli/sti usage stuff
  * Use the adapter lock for the other places we had the cli's
  *
- * 2002/10/06 - Alan Cox <alan@redhat.com>
+ * 2002/10/06 - Alan Cox <alan@lxorguk.ukuu.org.uk>
  *
  * Switch to new style error handling
  * Clean up delay to udelay, and yielding sleeps
@@ -161,7 +161,7 @@
  *
  * 2003/02/12 - Christoph Hellwig <hch@infradead.org>
  *
- * Cleaned up host template defintion
+ * Cleaned up host template definition
  * Removed now obsolete wd7000.h
  */
 
@@ -171,17 +171,15 @@
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/string.h>
-#include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/ioport.h>
 #include <linux/proc_fs.h>
 #include <linux/blkdev.h>
 #include <linux/init.h>
 #include <linux/stat.h>
+#include <linux/io.h>
 
-#include <asm/system.h>
 #include <asm/dma.h>
-#include <asm/io.h>
 
 #include <scsi/scsi.h>
 #include <scsi/scsi_cmnd.h>
@@ -267,7 +265,7 @@ static const long wd7000_biosaddr[] = {
 	0xc0000, 0xc2000, 0xc4000, 0xc6000, 0xc8000, 0xca000, 0xcc000, 0xce000,
 	0xd0000, 0xd2000, 0xd4000, 0xd6000, 0xd8000, 0xda000, 0xdc000, 0xde000
 };
-#define NUM_ADDRS (sizeof(wd7000_biosaddr)/sizeof(long))
+#define NUM_ADDRS ARRAY_SIZE(wd7000_biosaddr)
 
 static const unsigned short wd7000_iobase[] = {
 	0x0300, 0x0308, 0x0310, 0x0318, 0x0320, 0x0328, 0x0330, 0x0338,
@@ -275,13 +273,13 @@ static const unsigned short wd7000_iobase[] = {
 	0x0380, 0x0388, 0x0390, 0x0398, 0x03a0, 0x03a8, 0x03b0, 0x03b8,
 	0x03c0, 0x03c8, 0x03d0, 0x03d8, 0x03e0, 0x03e8, 0x03f0, 0x03f8
 };
-#define NUM_IOPORTS (sizeof(wd7000_iobase)/sizeof(unsigned short))
+#define NUM_IOPORTS ARRAY_SIZE(wd7000_iobase)
 
 static const short wd7000_irq[] = { 3, 4, 5, 7, 9, 10, 11, 12, 14, 15 };
-#define NUM_IRQS (sizeof(wd7000_irq)/sizeof(short))
+#define NUM_IRQS ARRAY_SIZE(wd7000_irq)
 
 static const short wd7000_dma[] = { 5, 6, 7 };
-#define NUM_DMAS (sizeof(wd7000_dma)/sizeof(short))
+#define NUM_DMAS ARRAY_SIZE(wd7000_dma)
 
 /*
  * The following is set up by wd7000_detect, and used thereafter for
@@ -317,7 +315,7 @@ static Config configs[] = {
 	{7, 6, 0x350, BUS_ON, BUS_OFF},	/* My configuration (Zaga)     */
 	{-1, -1, 0x0, BUS_ON, BUS_OFF}	/* Empty slot                  */
 };
-#define NUM_CONFIGS (sizeof(configs)/sizeof(Config))
+#define NUM_CONFIGS ARRAY_SIZE(configs)
 
 /*
  *  The following list defines strings to look for in the BIOS that identify
@@ -333,7 +331,7 @@ typedef struct signature {
 static const Signature signatures[] = {
 	{"SSTBIOS", 0x0000d, 7}	/* "SSTBIOS" @ offset 0x0000d */
 };
-#define NUM_SIGNATURES (sizeof(signatures)/sizeof(Signature))
+#define NUM_SIGNATURES ARRAY_SIZE(signatures)
 
 
 /*
@@ -640,12 +638,12 @@ static int __init wd7000_setup(char *str)
 	(void) get_options(str, ARRAY_SIZE(ints), ints);
 
 	if (wd7000_card_num >= NUM_CONFIGS) {
-		printk(KERN_ERR "%s: Too many \"wd7000=\" configurations in " "command line!\n", __FUNCTION__);
+		printk(KERN_ERR "%s: Too many \"wd7000=\" configurations in " "command line!\n", __func__);
 		return 0;
 	}
 
 	if ((ints[0] < 3) || (ints[0] > 5)) {
-		printk(KERN_ERR "%s: Error in command line!  " "Usage: wd7000=<IRQ>,<DMA>,IO>[,<BUS_ON>" "[,<BUS_OFF>]]\n", __FUNCTION__);
+		printk(KERN_ERR "%s: Error in command line!  " "Usage: wd7000=<IRQ>,<DMA>,IO>[,<BUS_ON>" "[,<BUS_OFF>]]\n", __func__);
 	} else {
 		for (i = 0; i < NUM_IRQS; i++)
 			if (ints[1] == wd7000_irq[i])
@@ -838,7 +836,7 @@ static inline Scb *alloc_scbs(struct Scsi_Host *host, int needed)
 		}
 	}
 
-	/* Take the lock, then check we didnt get beaten, if so try again */
+	/* Take the lock, then check we didn't get beaten, if so try again */
 	spin_lock_irqsave(&scbpool_lock, flags);
 	if (freescbs < needed) {
 		spin_unlock_irqrestore(&scbpool_lock, flags);
@@ -998,7 +996,7 @@ static int make_code(unsigned hosterr, unsigned scsierr)
 #define wd7000_intr_ack(host)   outb (0, host->iobase + ASC_INTR_ACK)
 
 
-static irqreturn_t wd7000_intr(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t wd7000_intr(int irq, void *dev_id)
 {
 	Adapter *host = (Adapter *) dev_id;
 	int flag, icmb, errstatus, icmb_status;
@@ -1083,7 +1081,7 @@ static irqreturn_t wd7000_intr(int irq, void *dev_id, struct pt_regs *regs)
 	return IRQ_HANDLED;
 }
 
-static int wd7000_queuecommand(struct scsi_cmnd *SCpnt,
+static int wd7000_queuecommand_lck(struct scsi_cmnd *SCpnt,
 		void (*done)(struct scsi_cmnd *))
 {
 	Scb *scb;
@@ -1091,6 +1089,7 @@ static int wd7000_queuecommand(struct scsi_cmnd *SCpnt,
 	unchar *cdb = (unchar *) SCpnt->cmnd;
 	unchar idlun;
 	short cdblen;
+	int nseg;
 	Adapter *host = (Adapter *) SCpnt->device->host->hostdata;
 
 	cdblen = SCpnt->cmd_len;
@@ -1106,28 +1105,29 @@ static int wd7000_queuecommand(struct scsi_cmnd *SCpnt,
 	SCpnt->host_scribble = (unchar *) scb;
 	scb->host = host;
 
-	if (SCpnt->use_sg) {
-		struct scatterlist *sg = (struct scatterlist *) SCpnt->request_buffer;
+	nseg = scsi_sg_count(SCpnt);
+	if (nseg > 1) {
+		struct scatterlist *sg;
 		unsigned i;
 
-		if (SCpnt->device->host->sg_tablesize == SG_NONE) {
-			panic("wd7000_queuecommand: scatter/gather not supported.\n");
-		}
-		dprintk("Using scatter/gather with %d elements.\n", SCpnt->use_sg);
+		dprintk("Using scatter/gather with %d elements.\n", nseg);
 
 		sgb = scb->sgb;
 		scb->op = 1;
 		any2scsi(scb->dataptr, (int) sgb);
-		any2scsi(scb->maxlen, SCpnt->use_sg * sizeof(Sgb));
+		any2scsi(scb->maxlen, nseg * sizeof(Sgb));
 
-		for (i = 0; i < SCpnt->use_sg; i++) {
-			any2scsi(sgb[i].ptr, isa_page_to_bus(sg[i].page) + sg[i].offset);
-			any2scsi(sgb[i].len, sg[i].length);
+		scsi_for_each_sg(SCpnt, sg, nseg, i) {
+			any2scsi(sgb[i].ptr, isa_page_to_bus(sg_page(sg)) + sg->offset);
+			any2scsi(sgb[i].len, sg->length);
 		}
 	} else {
 		scb->op = 0;
-		any2scsi(scb->dataptr, isa_virt_to_bus(SCpnt->request_buffer));
-		any2scsi(scb->maxlen, SCpnt->request_bufflen);
+		if (nseg) {
+			struct scatterlist *sg = scsi_sglist(SCpnt);
+			any2scsi(scb->dataptr, isa_page_to_bus(sg_page(sg)) + sg->offset);
+		}
+		any2scsi(scb->maxlen, scsi_bufflen(SCpnt));
 	}
 
 	/* FIXME: drop lock and yield here ? */
@@ -1137,6 +1137,8 @@ static int wd7000_queuecommand(struct scsi_cmnd *SCpnt,
 
 	return 0;
 }
+
+static DEF_SCSI_QCMD(wd7000_queuecommand)
 
 static int wd7000_diagnostics(Adapter * host, int code)
 {
@@ -1250,7 +1252,7 @@ static int wd7000_init(Adapter * host)
 		return 0;
 
 
-	if (request_irq(host->irq, wd7000_intr, SA_INTERRUPT, "wd7000", host)) {
+	if (request_irq(host->irq, wd7000_intr, IRQF_DISABLED, "wd7000", host)) {
 		printk("wd7000_init: can't get IRQ %d.\n", host->irq);
 		return (0);
 	}
@@ -1391,7 +1393,7 @@ static int wd7000_proc_info(struct Scsi_Host *host, char *buffer, char **start, 
  *
  */
 
-static int wd7000_detect(struct scsi_host_template *tpnt)
+static __init int wd7000_detect(struct scsi_host_template *tpnt)
 {
 	short present = 0, biosaddr_ptr, sig_ptr, i, pass;
 	short biosptr[NUM_CONFIGS];
@@ -1522,7 +1524,7 @@ static int wd7000_detect(struct scsi_host_template *tpnt)
 				 *  For boards before rev 6.0, scatter/gather isn't supported.
 				 */
 				if (host->rev1 < 6)
-					sh->sg_tablesize = SG_NONE;
+					sh->sg_tablesize = 1;
 
 				present++;	/* count it */
 
@@ -1586,9 +1588,16 @@ static int wd7000_host_reset(struct scsi_cmnd *SCpnt)
 {
 	Adapter *host = (Adapter *) SCpnt->device->host->hostdata;
 
-	if (wd7000_adapter_reset(host) < 0)
+	spin_lock_irq(SCpnt->device->host->host_lock);
+
+	if (wd7000_adapter_reset(host) < 0) {
+		spin_unlock_irq(SCpnt->device->host->host_lock);
 		return FAILED;
+	}
+
 	wd7000_enable_intr(host);
+
+	spin_unlock_irq(SCpnt->device->host->host_lock);
 	return SUCCESS;
 }
 
@@ -1633,7 +1642,7 @@ static int wd7000_biosparam(struct scsi_device *sdev,
 			ip[2] = info[2];
 
 			if (info[0] == 255)
-				printk(KERN_INFO "%s: current partition table is " "using extended translation.\n", __FUNCTION__);
+				printk(KERN_INFO "%s: current partition table is " "using extended translation.\n", __func__);
 		}
 	}
 

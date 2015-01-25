@@ -1,52 +1,38 @@
 /*
- *  arch/s390/kernel/process.c
+ * This file handles the architecture dependent parts of process handling.
  *
- *  S390 version
- *    Copyright (C) 1999 IBM Deutschland Entwicklung GmbH, IBM Corporation
- *    Author(s): Martin Schwidefsky (schwidefsky@de.ibm.com),
- *               Hartmut Penner (hp@de.ibm.com),
- *               Denis Joseph Barrow (djbarrow@de.ibm.com,barrow_dj@yahoo.com),
- *
- *  Derived from "arch/i386/kernel/process.c"
- *    Copyright (C) 1995, Linus Torvalds
+ *    Copyright IBM Corp. 1999,2009
+ *    Author(s): Martin Schwidefsky <schwidefsky@de.ibm.com>,
+ *		 Hartmut Penner <hp@de.ibm.com>,
+ *		 Denis Joseph Barrow,
  */
 
-/*
- * This file handles the architecture-dependent parts of process handling..
- */
-
-#include <linux/config.h>
 #include <linux/compiler.h>
 #include <linux/cpu.h>
-#include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/elfcore.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
-#include <linux/stddef.h>
-#include <linux/unistd.h>
-#include <linux/ptrace.h>
 #include <linux/slab.h>
-#include <linux/vmalloc.h>
-#include <linux/user.h>
-#include <linux/a.out.h>
 #include <linux/interrupt.h>
-#include <linux/delay.h>
-#include <linux/reboot.h>
-#include <linux/init.h>
+#include <linux/tick.h>
+#include <linux/personality.h>
+#include <linux/syscalls.h>
+#include <linux/compat.h>
+#include <linux/kprobes.h>
+#include <linux/random.h>
 #include <linux/module.h>
-#include <linux/notifier.h>
-
-#include <asm/uaccess.h>
-#include <asm/pgtable.h>
-#include <asm/system.h>
 #include <asm/io.h>
 #include <asm/processor.h>
 #include <asm/irq.h>
 #include <asm/timer.h>
+#include <asm/nmi.h>
+#include <asm/smp.h>
+#include <asm/switch_to.h>
+#include "entry.h"
 
-asmlinkage void ret_from_fork(void) __asm__("ret_from_fork");
+asmlinkage void ret_from_fork(void) asm ("ret_from_fork");
 
 /*
  * Return saved PC of a blocked thread. used in kernel/sched.
@@ -58,143 +44,77 @@ asmlinkage void ret_from_fork(void) __asm__("ret_from_fork");
  */
 unsigned long thread_saved_pc(struct task_struct *tsk)
 {
-	struct stack_frame *sf;
+	struct stack_frame *sf, *low, *high;
 
-	sf = (struct stack_frame *) tsk->thread.ksp;
-	sf = (struct stack_frame *) sf->back_chain;
+	if (!tsk || !task_stack_page(tsk))
+		return 0;
+	low = task_stack_page(tsk);
+	high = (struct stack_frame *) task_pt_regs(tsk);
+	sf = (struct stack_frame *) (tsk->thread.ksp & PSW_ADDR_INSN);
+	if (sf <= low || sf > high)
+		return 0;
+	sf = (struct stack_frame *) (sf->back_chain & PSW_ADDR_INSN);
+	if (sf <= low || sf > high)
+		return 0;
 	return sf->gprs[8];
-}
-
-/*
- * Need to know about CPUs going idle?
- */
-static struct notifier_block *idle_chain;
-
-int register_idle_notifier(struct notifier_block *nb)
-{
-	return notifier_chain_register(&idle_chain, nb);
-}
-EXPORT_SYMBOL(register_idle_notifier);
-
-int unregister_idle_notifier(struct notifier_block *nb)
-{
-	return notifier_chain_unregister(&idle_chain, nb);
-}
-EXPORT_SYMBOL(unregister_idle_notifier);
-
-void do_monitor_call(struct pt_regs *regs, long interruption_code)
-{
-	/* disable monitor call class 0 */
-	__ctl_clear_bit(8, 15);
-
-	notifier_call_chain(&idle_chain, CPU_NOT_IDLE,
-			    (void *)(long) smp_processor_id());
 }
 
 /*
  * The idle loop on a S390...
  */
-void default_idle(void)
+static void default_idle(void)
 {
-	psw_t wait_psw;
-	unsigned long reg;
-	int cpu, rc;
-
+	if (cpu_is_offline(smp_processor_id()))
+		cpu_die();
 	local_irq_disable();
-        if (need_resched()) {
-		local_irq_enable();
-                schedule();
-                return;
-        }
-
-	/* CPU is going idle. */
-	cpu = smp_processor_id();
-	rc = notifier_call_chain(&idle_chain, CPU_IDLE, (void *)(long) cpu);
-	if (rc != NOTIFY_OK && rc != NOTIFY_DONE)
-		BUG();
-	if (rc != NOTIFY_OK) {
+	if (need_resched()) {
 		local_irq_enable();
 		return;
 	}
-
-	/* enable monitor call class 0 */
-	__ctl_set_bit(8, 15);
-
-#ifdef CONFIG_HOTPLUG_CPU
-	if (cpu_is_offline(smp_processor_id()))
-		cpu_die();
-#endif
-
-	/* 
-	 * Wait for external, I/O or machine check interrupt and
-	 * switch off machine check bit after the wait has ended.
-	 */
-	wait_psw.mask = PSW_KERNEL_BITS | PSW_MASK_MCHECK | PSW_MASK_WAIT |
-		PSW_MASK_IO | PSW_MASK_EXT;
-#ifndef CONFIG_ARCH_S390X
-	asm volatile (
-		"    basr %0,0\n"
-		"0:  la   %0,1f-0b(%0)\n"
-		"    st   %0,4(%1)\n"
-		"    oi   4(%1),0x80\n"
-		"    lpsw 0(%1)\n"
-		"1:  la   %0,2f-1b(%0)\n"
-		"    st   %0,4(%1)\n"
-		"    oi   4(%1),0x80\n"
-		"    ni   1(%1),0xf9\n"
-		"    lpsw 0(%1)\n"
-		"2:"
-		: "=&a" (reg) : "a" (&wait_psw) : "memory", "cc" );
-#else /* CONFIG_ARCH_S390X */
-	asm volatile (
-		"    larl  %0,0f\n"
-		"    stg   %0,8(%1)\n"
-		"    lpswe 0(%1)\n"
-		"0:  larl  %0,1f\n"
-		"    stg   %0,8(%1)\n"
-		"    ni    1(%1),0xf9\n"
-		"    lpswe 0(%1)\n"
-		"1:"
-		: "=&a" (reg) : "a" (&wait_psw) : "memory", "cc" );
-#endif /* CONFIG_ARCH_S390X */
+	local_mcck_disable();
+	if (test_thread_flag(TIF_MCCK_PENDING)) {
+		local_mcck_enable();
+		local_irq_enable();
+		return;
+	}
+	/* Halt the cpu and keep track of cpu time accounting. */
+	vtime_stop_cpu();
 }
 
 void cpu_idle(void)
 {
-	for (;;)
-		default_idle();
+	for (;;) {
+		tick_nohz_idle_enter();
+		rcu_idle_enter();
+		while (!need_resched() && !test_thread_flag(TIF_MCCK_PENDING))
+			default_idle();
+		rcu_idle_exit();
+		tick_nohz_idle_exit();
+		if (test_thread_flag(TIF_MCCK_PENDING))
+			s390_handle_mcck();
+		schedule_preempt_disabled();
+	}
 }
 
-void show_regs(struct pt_regs *regs)
-{
-	struct task_struct *tsk = current;
+extern void __kprobes kernel_thread_starter(void);
 
-        printk("CPU:    %d    %s\n", tsk->thread_info->cpu, print_tainted());
-        printk("Process %s (pid: %d, task: %p, ksp: %p)\n",
-	       current->comm, current->pid, (void *) tsk,
-	       (void *) tsk->thread.ksp);
-
-	show_registers(regs);
-	/* Show stack backtrace if pt_regs is from kernel mode */
-	if (!(regs->psw.mask & PSW_MASK_PSTATE))
-		show_trace(0,(unsigned long *) regs->gprs[15]);
-}
-
-extern void kernel_thread_starter(void);
-
-__asm__(".align 4\n"
+asm(
+	".section .kprobes.text, \"ax\"\n"
+	".global kernel_thread_starter\n"
 	"kernel_thread_starter:\n"
 	"    la    2,0(10)\n"
 	"    basr  14,9\n"
 	"    la    2,0\n"
-	"    br    11\n");
+	"    br    11\n"
+	".previous\n");
 
 int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 {
 	struct pt_regs regs;
 
 	memset(&regs, 0, sizeof(regs));
-	regs.psw.mask = PSW_KERNEL_BITS | PSW_MASK_IO | PSW_MASK_EXT;
+	regs.psw.mask = psw_kernel_bits |
+		PSW_MASK_DAT | PSW_MASK_IO | PSW_MASK_EXT | PSW_MASK_MCHECK;
 	regs.psw.addr = (unsigned long) kernel_thread_starter | PSW_ADDR_AMODE;
 	regs.gprs[9] = (unsigned long) fn;
 	regs.gprs[10] = (unsigned long) arg;
@@ -205,6 +125,7 @@ int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 	return do_fork(flags | CLONE_VM | CLONE_UNTRACED,
 		       0, &regs, 0, NULL, NULL);
 }
+EXPORT_SYMBOL(kernel_thread);
 
 /*
  * Free current thread data structures etc..
@@ -215,94 +136,92 @@ void exit_thread(void)
 
 void flush_thread(void)
 {
-	clear_used_math();
-	clear_tsk_thread_flag(current, TIF_USEDFPU);
 }
 
 void release_thread(struct task_struct *dead_task)
 {
 }
 
-int copy_thread(int nr, unsigned long clone_flags, unsigned long new_stackp,
-	unsigned long unused,
-        struct task_struct * p, struct pt_regs * regs)
+int copy_thread(unsigned long clone_flags, unsigned long new_stackp,
+		unsigned long unused,
+		struct task_struct *p, struct pt_regs *regs)
 {
-        struct fake_frame
-          {
-	    struct stack_frame sf;
-            struct pt_regs childregs;
-          } *frame;
+	struct thread_info *ti;
+	struct fake_frame
+	{
+		struct stack_frame sf;
+		struct pt_regs childregs;
+	} *frame;
 
-        frame = ((struct fake_frame *)
-		 (THREAD_SIZE + (unsigned long) p->thread_info)) - 1;
-        p->thread.ksp = (unsigned long) frame;
+	frame = container_of(task_pt_regs(p), struct fake_frame, childregs);
+	p->thread.ksp = (unsigned long) frame;
 	/* Store access registers to kernel stack of new process. */
-        frame->childregs = *regs;
+	frame->childregs = *regs;
 	frame->childregs.gprs[2] = 0;	/* child returns 0 on fork. */
-        frame->childregs.gprs[15] = new_stackp;
-        frame->sf.back_chain = 0;
+	frame->childregs.gprs[15] = new_stackp;
+	frame->sf.back_chain = 0;
 
-        /* new return point is ret_from_fork */
-        frame->sf.gprs[8] = (unsigned long) ret_from_fork;
+	/* new return point is ret_from_fork */
+	frame->sf.gprs[8] = (unsigned long) ret_from_fork;
 
-        /* fake return stack for resume(), don't go back to schedule */
-        frame->sf.gprs[9] = (unsigned long) frame;
+	/* fake return stack for resume(), don't go back to schedule */
+	frame->sf.gprs[9] = (unsigned long) frame;
 
 	/* Save access registers to new thread structure. */
 	save_access_regs(&p->thread.acrs[0]);
 
-#ifndef CONFIG_ARCH_S390X
-        /*
+#ifndef CONFIG_64BIT
+	/*
 	 * save fprs to current->thread.fp_regs to merge them with
 	 * the emulated registers and then copy the result to the child.
 	 */
 	save_fp_regs(&current->thread.fp_regs);
 	memcpy(&p->thread.fp_regs, &current->thread.fp_regs,
 	       sizeof(s390_fp_regs));
-        p->thread.user_seg = __pa((unsigned long) p->mm->pgd) | _SEGMENT_TABLE;
 	/* Set a new TLS ?  */
 	if (clone_flags & CLONE_SETTLS)
 		p->thread.acrs[0] = regs->gprs[6];
-#else /* CONFIG_ARCH_S390X */
+#else /* CONFIG_64BIT */
 	/* Save the fpu registers to new thread structure. */
 	save_fp_regs(&p->thread.fp_regs);
-        p->thread.user_seg = __pa((unsigned long) p->mm->pgd) | _REGION_TABLE;
 	/* Set a new TLS ?  */
 	if (clone_flags & CLONE_SETTLS) {
-		if (test_thread_flag(TIF_31BIT)) {
+		if (is_compat_task()) {
 			p->thread.acrs[0] = (unsigned int) regs->gprs[6];
 		} else {
 			p->thread.acrs[0] = (unsigned int)(regs->gprs[6] >> 32);
 			p->thread.acrs[1] = (unsigned int) regs->gprs[6];
 		}
 	}
-#endif /* CONFIG_ARCH_S390X */
+#endif /* CONFIG_64BIT */
 	/* start new process with ar4 pointing to the correct address space */
 	p->thread.mm_segment = get_fs();
-        /* Don't copy debug registers */
-        memset(&p->thread.per_info,0,sizeof(p->thread.per_info));
-
-        return 0;
+	/* Don't copy debug registers */
+	memset(&p->thread.per_user, 0, sizeof(p->thread.per_user));
+	memset(&p->thread.per_event, 0, sizeof(p->thread.per_event));
+	clear_tsk_thread_flag(p, TIF_SINGLE_STEP);
+	clear_tsk_thread_flag(p, TIF_PER_TRAP);
+	/* Initialize per thread user and system timer values */
+	ti = task_thread_info(p);
+	ti->user_timer = 0;
+	ti->system_timer = 0;
+	return 0;
 }
 
-asmlinkage long sys_fork(struct pt_regs regs)
+SYSCALL_DEFINE0(fork)
 {
-	return do_fork(SIGCHLD, regs.gprs[15], &regs, 0, NULL, NULL);
+	struct pt_regs *regs = task_pt_regs(current);
+	return do_fork(SIGCHLD, regs->gprs[15], regs, 0, NULL, NULL);
 }
 
-asmlinkage long sys_clone(struct pt_regs regs)
+SYSCALL_DEFINE4(clone, unsigned long, newsp, unsigned long, clone_flags,
+		int __user *, parent_tidptr, int __user *, child_tidptr)
 {
-        unsigned long clone_flags;
-        unsigned long newsp;
-	int __user *parent_tidptr, *child_tidptr;
+	struct pt_regs *regs = task_pt_regs(current);
 
-        clone_flags = regs.gprs[3];
-        newsp = regs.orig_gpr2;
-	parent_tidptr = (int __user *) regs.gprs[4];
-	child_tidptr = (int __user *) regs.gprs[5];
-        if (!newsp)
-                newsp = regs.gprs[15];
-        return do_fork(clone_flags, newsp, &regs, 0,
+	if (!newsp)
+		newsp = regs->gprs[15];
+	return do_fork(clone_flags, newsp, regs, 0,
 		       parent_tidptr, child_tidptr);
 }
 
@@ -316,78 +235,63 @@ asmlinkage long sys_clone(struct pt_regs regs)
  * do not have enough call-clobbered registers to hold all
  * the information you need.
  */
-asmlinkage long sys_vfork(struct pt_regs regs)
+SYSCALL_DEFINE0(vfork)
 {
+	struct pt_regs *regs = task_pt_regs(current);
 	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD,
-		       regs.gprs[15], &regs, 0, NULL, NULL);
+		       regs->gprs[15], regs, 0, NULL, NULL);
+}
+
+asmlinkage void execve_tail(void)
+{
+	current->thread.fp_regs.fpc = 0;
+	if (MACHINE_HAS_IEEE)
+		asm volatile("sfpc %0,%0" : : "d" (0));
 }
 
 /*
  * sys_execve() executes a new program.
  */
-asmlinkage long sys_execve(struct pt_regs regs)
+SYSCALL_DEFINE3(execve, const char __user *, name,
+		const char __user *const __user *, argv,
+		const char __user *const __user *, envp)
 {
-        int error;
-        char * filename;
+	struct pt_regs *regs = task_pt_regs(current);
+	char *filename;
+	long rc;
 
-        filename = getname((char __user *) regs.orig_gpr2);
-        error = PTR_ERR(filename);
-        if (IS_ERR(filename))
-                goto out;
-        error = do_execve(filename, (char __user * __user *) regs.gprs[3],
-			  (char __user * __user *) regs.gprs[4], &regs);
-	if (error == 0) {
-		task_lock(current);
-		current->ptrace &= ~PT_DTRACE;
-		task_unlock(current);
-		current->thread.fp_regs.fpc = 0;
-		if (MACHINE_HAS_IEEE)
-			asm volatile("sfpc %0,%0" : : "d" (0));
-	}
-        putname(filename);
+	filename = getname(name);
+	rc = PTR_ERR(filename);
+	if (IS_ERR(filename))
+		return rc;
+	rc = do_execve(filename, argv, envp, regs);
+	if (rc)
+		goto out;
+	execve_tail();
+	rc = regs->gprs[2];
 out:
-        return error;
+	putname(filename);
+	return rc;
 }
-
 
 /*
  * fill in the FPU structure for a core dump.
  */
 int dump_fpu (struct pt_regs * regs, s390_fp_regs *fpregs)
 {
-#ifndef CONFIG_ARCH_S390X
-        /*
+#ifndef CONFIG_64BIT
+	/*
 	 * save fprs to current->thread.fp_regs to merge them with
 	 * the emulated registers and then copy the result to the dump.
 	 */
 	save_fp_regs(&current->thread.fp_regs);
 	memcpy(fpregs, &current->thread.fp_regs, sizeof(s390_fp_regs));
-#else /* CONFIG_ARCH_S390X */
+#else /* CONFIG_64BIT */
 	save_fp_regs(fpregs);
-#endif /* CONFIG_ARCH_S390X */
+#endif /* CONFIG_64BIT */
 	return 1;
 }
-
-/*
- * fill in the user structure for a core dump..
- */
-void dump_thread(struct pt_regs * regs, struct user * dump)
-{
-
-/* changed the size calculations - should hopefully work better. lbt */
-	dump->magic = CMAGIC;
-	dump->start_code = 0;
-	dump->start_stack = regs->gprs[15] & ~(PAGE_SIZE - 1);
-	dump->u_tsize = current->mm->end_code >> PAGE_SHIFT;
-	dump->u_dsize = (current->mm->brk + PAGE_SIZE - 1) >> PAGE_SHIFT;
-	dump->u_dsize -= dump->u_tsize;
-	dump->u_ssize = 0;
-	if (dump->start_stack < TASK_SIZE)
-		dump->u_ssize = (TASK_SIZE - dump->start_stack) >> PAGE_SHIFT;
-	memcpy(&dump->regs, regs, sizeof(s390_regs));
-	dump_fpu (regs, &dump->regs.fp_regs);
-	dump->regs.per_info = current->thread.per_info;
-}
+EXPORT_SYMBOL(dump_fpu);
 
 unsigned long get_wchan(struct task_struct *p)
 {
@@ -395,11 +299,10 @@ unsigned long get_wchan(struct task_struct *p)
 	unsigned long return_address;
 	int count;
 
-	if (!p || p == current || p->state == TASK_RUNNING || !p->thread_info)
+	if (!p || p == current || p->state == TASK_RUNNING || !task_stack_page(p))
 		return 0;
-	low = (struct stack_frame *) p->thread_info;
-	high = (struct stack_frame *)
-		((unsigned long) p->thread_info + THREAD_SIZE) - 1;
+	low = task_stack_page(p);
+	high = (struct stack_frame *) task_pt_regs(p);
 	sf = (struct stack_frame *) (p->thread.ksp & PSW_ADDR_INSN);
 	if (sf <= low || sf > high)
 		return 0;
@@ -414,3 +317,38 @@ unsigned long get_wchan(struct task_struct *p)
 	return 0;
 }
 
+unsigned long arch_align_stack(unsigned long sp)
+{
+	if (!(current->personality & ADDR_NO_RANDOMIZE) && randomize_va_space)
+		sp -= get_random_int() & ~PAGE_MASK;
+	return sp & ~0xf;
+}
+
+static inline unsigned long brk_rnd(void)
+{
+	/* 8MB for 32bit, 1GB for 64bit */
+	if (is_32bit_task())
+		return (get_random_int() & 0x7ffUL) << PAGE_SHIFT;
+	else
+		return (get_random_int() & 0x3ffffUL) << PAGE_SHIFT;
+}
+
+unsigned long arch_randomize_brk(struct mm_struct *mm)
+{
+	unsigned long ret = PAGE_ALIGN(mm->brk + brk_rnd());
+
+	if (ret < mm->brk)
+		return mm->brk;
+	return ret;
+}
+
+unsigned long randomize_et_dyn(unsigned long base)
+{
+	unsigned long ret = PAGE_ALIGN(base + brk_rnd());
+
+	if (!(current->flags & PF_RANDOMIZE))
+		return base;
+	if (ret < base)
+		return base;
+	return ret;
+}

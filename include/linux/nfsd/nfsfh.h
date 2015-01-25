@@ -14,15 +14,14 @@
 #ifndef _LINUX_NFSD_FH_H
 #define _LINUX_NFSD_FH_H
 
-#include <asm/types.h>
+#include <linux/types.h>
+#include <linux/nfs.h>
+#include <linux/nfs2.h>
+#include <linux/nfs3.h>
+#include <linux/nfs4.h>
 #ifdef __KERNEL__
-# include <linux/config.h>
-# include <linux/types.h>
-# include <linux/string.h>
-# include <linux/fs.h>
+# include <linux/sunrpc/svc.h>
 #endif
-#include <linux/nfsd/const.h>
-#include <linux/nfsd/debug.h>
 
 /*
  * This is the old "dentry style" Linux NFSv2 file handle.
@@ -44,16 +43,16 @@ struct nfs_fhbase_old {
  * This is the new flexible, extensible style NFSv2/v3 file handle.
  * by Neil Brown <neilb@cse.unsw.edu.au> - March 2000
  *
- * The file handle is seens as a list of 4byte words.
- * The first word contains a version number (1) and four descriptor bytes
+ * The file handle starts with a sequence of four-byte words.
+ * The first word contains a version number (1) and three descriptor bytes
  * that tell how the remaining 3 variable length fields should be handled.
  * These three bytes are auth_type, fsid_type and fileid_type.
  *
- * All 4byte values are in host-byte-order.
+ * All four-byte values are in host-byte-order.
  *
  * The auth_type field specifies how the filehandle can be authenticated
  * This might allow a file to be confirmed to be in a writable part of a
- * filetree without checking the path from it upto the root.
+ * filetree without checking the path from it up to the root.
  * Current values:
  *     0  - No authentication.  fb_auth is 0 bytes long
  * Possible future values:
@@ -69,6 +68,10 @@ struct nfs_fhbase_old {
  *     1  - 4 byte user specified identifier
  *     2  - 4 byte major, 4 byte minor, 4 byte inode number - DEPRECATED
  *     3  - 4 byte device id, encoded for user-space, 4 byte inode number
+ *     4  - 4 byte inode number and 4 byte uuid
+ *     5  - 8 byte uuid
+ *     6  - 16 byte uuid
+ *     7  - 8 byte inode number and 16 byte uuid
  *
  * The fileid_type identified how the file within the filesystem is encoded.
  * This is (will be) passed to, and set by, the underlying filesystem if it supports
@@ -149,194 +152,19 @@ typedef struct svc_fh {
 	__u64			fh_pre_size;	/* size before operation */
 	struct timespec		fh_pre_mtime;	/* mtime before oper */
 	struct timespec		fh_pre_ctime;	/* ctime before oper */
+	/*
+	 * pre-op nfsv4 change attr: note must check IS_I_VERSION(inode)
+	 *  to find out if it is valid.
+	 */
+	u64			fh_pre_change;
 
 	/* Post-op attributes saved in fh_unlock */
-	umode_t			fh_post_mode;	/* i_mode */
-	nlink_t			fh_post_nlink;	/* i_nlink */
-	uid_t			fh_post_uid;	/* i_uid */
-	gid_t			fh_post_gid;	/* i_gid */
-	__u64			fh_post_size;	/* i_size */
-	unsigned long		fh_post_blocks; /* i_blocks */
-	unsigned long		fh_post_blksize;/* i_blksize */
-	__u32			fh_post_rdev[2];/* i_rdev */
-	struct timespec		fh_post_atime;	/* i_atime */
-	struct timespec		fh_post_mtime;	/* i_mtime */
-	struct timespec		fh_post_ctime;	/* i_ctime */
+	struct kstat		fh_post_attr;	/* full attrs after operation */
+	u64			fh_post_change; /* nfsv4 change; see above */
 #endif /* CONFIG_NFSD_V3 */
 
 } svc_fh;
 
-static inline void mk_fsid_v0(u32 *fsidv, dev_t dev, ino_t ino)
-{
-	fsidv[0] = htonl((MAJOR(dev)<<16) |
-			MINOR(dev));
-	fsidv[1] = ino_t_to_u32(ino);
-}
-
-static inline void mk_fsid_v1(u32 *fsidv, u32 fsid)
-{
-	fsidv[0] = fsid;
-}
-
-static inline void mk_fsid_v2(u32 *fsidv, dev_t dev, ino_t ino)
-{
-	fsidv[0] = htonl(MAJOR(dev));
-	fsidv[1] = htonl(MINOR(dev));
-	fsidv[2] = ino_t_to_u32(ino);
-}
-
-static inline void mk_fsid_v3(u32 *fsidv, dev_t dev, ino_t ino)
-{
-	fsidv[0] = new_encode_dev(dev);
-	fsidv[1] = ino_t_to_u32(ino);
-}
-
-static inline int key_len(int type)
-{
-	switch(type) {
-	case 0: return 8;
-	case 1: return 4;
-	case 2: return 12;
-	case 3: return 8;
-	default: return 0;
-	}
-}
-
-/*
- * Shorthand for dprintk()'s
- */
-extern char * SVCFH_fmt(struct svc_fh *fhp);
-
-/*
- * Function prototypes
- */
-u32	fh_verify(struct svc_rqst *, struct svc_fh *, int, int);
-int	fh_compose(struct svc_fh *, struct svc_export *, struct dentry *, struct svc_fh *);
-int	fh_update(struct svc_fh *);
-void	fh_put(struct svc_fh *);
-
-static __inline__ struct svc_fh *
-fh_copy(struct svc_fh *dst, struct svc_fh *src)
-{
-	if (src->fh_dentry || src->fh_locked) {
-		struct dentry *dentry = src->fh_dentry;
-		printk(KERN_ERR "fh_copy: copying %s/%s, already verified!\n",
-			dentry->d_parent->d_name.name, dentry->d_name.name);
-	}
-			
-	*dst = *src;
-	return dst;
-}
-
-static __inline__ struct svc_fh *
-fh_init(struct svc_fh *fhp, int maxsize)
-{
-	memset(fhp, 0, sizeof(*fhp));
-	fhp->fh_maxsize = maxsize;
-	return fhp;
-}
-
-#ifdef CONFIG_NFSD_V3
-/*
- * Fill in the pre_op attr for the wcc data
- */
-static inline void
-fill_pre_wcc(struct svc_fh *fhp)
-{
-	struct inode    *inode;
-
-	inode = fhp->fh_dentry->d_inode;
-	if (!fhp->fh_pre_saved) {
-		fhp->fh_pre_mtime = inode->i_mtime;
-		fhp->fh_pre_ctime = inode->i_ctime;
-			fhp->fh_pre_size  = inode->i_size;
-			fhp->fh_pre_saved = 1;
-	}
-}
-
-/*
- * Fill in the post_op attr for the wcc data
- */
-static inline void
-fill_post_wcc(struct svc_fh *fhp)
-{
-	struct inode    *inode = fhp->fh_dentry->d_inode;
-
-	if (fhp->fh_post_saved)
-		printk("nfsd: inode locked twice during operation.\n");
-
-	fhp->fh_post_mode       = inode->i_mode;
-	fhp->fh_post_nlink      = inode->i_nlink;
-	fhp->fh_post_uid	= inode->i_uid;
-	fhp->fh_post_gid	= inode->i_gid;
-	fhp->fh_post_size       = inode->i_size;
-	if (inode->i_blksize) {
-		fhp->fh_post_blksize    = inode->i_blksize;
-		fhp->fh_post_blocks     = inode->i_blocks;
-	} else {
-		fhp->fh_post_blksize    = BLOCK_SIZE;
-		/* how much do we care for accuracy with MinixFS? */
-		fhp->fh_post_blocks     = (inode->i_size+511) >> 9;
-	}
-	fhp->fh_post_rdev[0]    = htonl((u32)imajor(inode));
-	fhp->fh_post_rdev[1]    = htonl((u32)iminor(inode));
-	fhp->fh_post_atime      = inode->i_atime;
-	fhp->fh_post_mtime      = inode->i_mtime;
-	fhp->fh_post_ctime      = inode->i_ctime;
-	fhp->fh_post_saved      = 1;
-}
-#else
-#define	fill_pre_wcc(ignored)
-#define fill_post_wcc(notused)
-#endif /* CONFIG_NFSD_V3 */
-
-
-/*
- * Lock a file handle/inode
- * NOTE: both fh_lock and fh_unlock are done "by hand" in
- * vfs.c:nfsd_rename as it needs to grab 2 i_sem's at once
- * so, any changes here should be reflected there.
- */
-static inline void
-fh_lock(struct svc_fh *fhp)
-{
-	struct dentry	*dentry = fhp->fh_dentry;
-	struct inode	*inode;
-
-	dfprintk(FILEOP, "nfsd: fh_lock(%s) locked = %d\n",
-			SVCFH_fmt(fhp), fhp->fh_locked);
-
-	if (!fhp->fh_dentry) {
-		printk(KERN_ERR "fh_lock: fh not verified!\n");
-		return;
-	}
-	if (fhp->fh_locked) {
-		printk(KERN_WARNING "fh_lock: %s/%s already locked!\n",
-			dentry->d_parent->d_name.name, dentry->d_name.name);
-		return;
-	}
-
-	inode = dentry->d_inode;
-	down(&inode->i_sem);
-	fill_pre_wcc(fhp);
-	fhp->fh_locked = 1;
-}
-
-/*
- * Unlock a file handle/inode
- */
-static inline void
-fh_unlock(struct svc_fh *fhp)
-{
-	if (!fhp->fh_dentry)
-		printk(KERN_ERR "fh_unlock: fh not verified!\n");
-
-	if (fhp->fh_locked) {
-		fill_post_wcc(fhp);
-		up(&fhp->fh_dentry->d_inode->i_sem);
-		fhp->fh_locked = 0;
-	}
-}
 #endif /* __KERNEL__ */
 
 

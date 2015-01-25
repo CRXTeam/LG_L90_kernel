@@ -1,5 +1,5 @@
 /*
- * linux/ipc/util.c
+ * linux/ipc/msgutil.c
  * Copyright (C) 1999, 2004 Manfred Spraul
  *
  * This file is released under GNU General Public Licence version 2 or
@@ -13,9 +13,26 @@
 #include <linux/security.h>
 #include <linux/slab.h>
 #include <linux/ipc.h>
+#include <linux/msg.h>
+#include <linux/ipc_namespace.h>
+#include <linux/utsname.h>
 #include <asm/uaccess.h>
 
 #include "util.h"
+
+DEFINE_SPINLOCK(mq_lock);
+
+/*
+ * The next 2 defines are here bc this is the only file
+ * compiled when either CONFIG_SYSVIPC and CONFIG_POSIX_MQUEUE
+ * and not CONFIG_IPC_NS.
+ */
+struct ipc_namespace init_ipc_ns = {
+	.count		= ATOMIC_INIT(1),
+	.user_ns = &init_user_ns,
+};
+
+atomic_t nr_ipc_ns = ATOMIC_INIT(1);
 
 struct msg_msgseg {
 	struct msg_msgseg* next;
@@ -36,7 +53,7 @@ struct msg_msg *load_msg(const void __user *src, int len)
 	if (alen > DATALEN_MSG)
 		alen = DATALEN_MSG;
 
-	msg = (struct msg_msg *)kmalloc(sizeof(*msg) + alen, GFP_KERNEL);
+	msg = kmalloc(sizeof(*msg) + alen, GFP_KERNEL);
 	if (msg == NULL)
 		return ERR_PTR(-ENOMEM);
 
@@ -56,7 +73,7 @@ struct msg_msg *load_msg(const void __user *src, int len)
 		alen = len;
 		if (alen > DATALEN_SEG)
 			alen = DATALEN_SEG;
-		seg = (struct msg_msgseg *)kmalloc(sizeof(*seg) + alen,
+		seg = kmalloc(sizeof(*seg) + alen,
 						 GFP_KERNEL);
 		if (seg == NULL) {
 			err = -ENOMEM;

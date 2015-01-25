@@ -15,22 +15,23 @@
  * binaries.
  */
 #include <linux/compiler.h>
+#include <linux/compat.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/errno.h>
 #include <linux/ptrace.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/user.h>
 #include <linux/security.h>
 
 #include <asm/cpu.h>
+#include <asm/dsp.h>
 #include <asm/fpu.h>
 #include <asm/mipsregs.h>
+#include <asm/mipsmtregs.h>
 #include <asm/pgtable.h>
 #include <asm/page.h>
-#include <asm/system.h>
 #include <asm/uaccess.h>
 #include <asm/bootinfo.h>
 
@@ -38,63 +39,41 @@
  * Tracing a 32-bit process with a 64-bit strace and vice versa will not
  * work.  I don't know how to fix this.
  */
-asmlinkage int sys32_ptrace(int request, int pid, int addr, int data)
+long compat_arch_ptrace(struct task_struct *child, compat_long_t request,
+			compat_ulong_t caddr, compat_ulong_t cdata)
 {
-	struct task_struct *child;
+	int addr = caddr;
+	int data = cdata;
 	int ret;
 
-#if 0
-	printk("ptrace(r=%d,pid=%d,addr=%08lx,data=%08lx)\n",
-	       (int) request, (int) pid, (unsigned long) addr,
-	       (unsigned long) data);
-#endif
-	lock_kernel();
-	ret = -EPERM;
-	if (request == PTRACE_TRACEME) {
-		/* are we already being traced? */
-		if (current->ptrace & PT_PTRACED)
-			goto out;
-		if ((ret = security_ptrace(current->parent, current)))
-			goto out;
-		/* set the ptrace bit in the process flags. */
-		current->ptrace |= PT_PTRACED;
-		ret = 0;
-		goto out;
-	}
-	ret = -ESRCH;
-	read_lock(&tasklist_lock);
-	child = find_task_by_pid(pid);
-	if (child)
-		get_task_struct(child);
-	read_unlock(&tasklist_lock);
-	if (!child)
-		goto out;
-
-	ret = -EPERM;
-	if (pid == 1)		/* you may not mess with init */
-		goto out_tsk;
-
-	if (request == PTRACE_ATTACH) {
-		ret = ptrace_attach(child);
-		goto out_tsk;
-	}
-
-	ret = ptrace_check_attach(child, request == PTRACE_KILL);
-	if (ret < 0)
-		goto out_tsk;
-
 	switch (request) {
-	/* when I and D space are separate, these will need to be fixed. */
-	case PTRACE_PEEKTEXT: /* read word at location addr. */
-	case PTRACE_PEEKDATA: {
-		unsigned int tmp;
-		int copied;
 
-		copied = access_process_vm(child, addr, &tmp, sizeof(tmp), 0);
+	/*
+	 * Read 4 bytes of the other process' storage
+	 *  data is a pointer specifying where the user wants the
+	 *	4 bytes copied into
+	 *  addr is a pointer in the user's storage that contains an 8 byte
+	 *	address in the other process of the 4 bytes that is to be read
+	 * (this is run in a 32-bit process looking at a 64-bit process)
+	 * when I and D space are separate, these will need to be fixed.
+	 */
+	case PTRACE_PEEKTEXT_3264:
+	case PTRACE_PEEKDATA_3264: {
+		u32 tmp;
+		int copied;
+		u32 __user * addrOthers;
+
 		ret = -EIO;
+
+		/* Get the addr in the other process that we want to read */
+		if (get_user(addrOthers, (u32 __user * __user *) (unsigned long) addr) != 0)
+			break;
+
+		copied = access_process_vm(child, (u64)addrOthers, &tmp,
+				sizeof(tmp), 0);
 		if (copied != sizeof(tmp))
 			break;
-		ret = put_user(tmp, (unsigned int *) (unsigned long) data);
+		ret = put_user(tmp, (u32 __user *) (unsigned long) data);
 		break;
 	}
 
@@ -103,8 +82,7 @@ asmlinkage int sys32_ptrace(int request, int pid, int addr, int data)
 		struct pt_regs *regs;
 		unsigned int tmp;
 
-		regs = (struct pt_regs *) ((unsigned long) child->thread_info +
-		       THREAD_SIZE - 32 - sizeof(struct pt_regs));
+		regs = task_pt_regs(child);
 		ret = 0;  /* Default return value. */
 
 		switch (addr) {
@@ -144,47 +122,106 @@ asmlinkage int sys32_ptrace(int request, int pid, int addr, int data)
 			tmp = regs->lo;
 			break;
 		case FPC_CSR:
-			if (cpu_has_fpu)
-				tmp = child->thread.fpu.hard.fcr31;
-			else
-				tmp = child->thread.fpu.soft.fcr31;
+			tmp = child->thread.fpu.fcr31;
 			break;
 		case FPC_EIR: {	/* implementation / version register */
 			unsigned int flags;
+#ifdef CONFIG_MIPS_MT_SMTC
+			unsigned int irqflags;
+			unsigned int mtflags;
+#endif /* CONFIG_MIPS_MT_SMTC */
 
-			if (!cpu_has_fpu)
+			preempt_disable();
+			if (!cpu_has_fpu) {
+				preempt_enable();
+				tmp = 0;
 				break;
+			}
 
-			flags = read_c0_status();
-			__enable_fpu();
-			__asm__ __volatile__("cfc1\t%0,$0": "=r" (tmp));
-			write_c0_status(flags);
+#ifdef CONFIG_MIPS_MT_SMTC
+			/* Read-modify-write of Status must be atomic */
+			local_irq_save(irqflags);
+			mtflags = dmt();
+#endif /* CONFIG_MIPS_MT_SMTC */
+
+			if (cpu_has_mipsmt) {
+				unsigned int vpflags = dvpe();
+				flags = read_c0_status();
+				__enable_fpu();
+				__asm__ __volatile__("cfc1\t%0,$0": "=r" (tmp));
+				write_c0_status(flags);
+				evpe(vpflags);
+			} else {
+				flags = read_c0_status();
+				__enable_fpu();
+				__asm__ __volatile__("cfc1\t%0,$0": "=r" (tmp));
+				write_c0_status(flags);
+			}
+#ifdef CONFIG_MIPS_MT_SMTC
+			emt(mtflags);
+			local_irq_restore(irqflags);
+#endif /* CONFIG_MIPS_MT_SMTC */
+			preempt_enable();
 			break;
 		}
+		case DSP_BASE ... DSP_BASE + 5: {
+			dspreg_t *dregs;
+
+			if (!cpu_has_dsp) {
+				tmp = 0;
+				ret = -EIO;
+				goto out;
+			}
+			dregs = __get_dsp_regs(child);
+			tmp = (unsigned long) (dregs[addr - DSP_BASE]);
+			break;
+		}
+		case DSP_CONTROL:
+			if (!cpu_has_dsp) {
+				tmp = 0;
+				ret = -EIO;
+				goto out;
+			}
+			tmp = child->thread.dsp.dspcontrol;
+			break;
 		default:
 			tmp = 0;
 			ret = -EIO;
-			goto out_tsk;
+			goto out;
 		}
-		ret = put_user(tmp, (unsigned *) (unsigned long) data);
+		ret = put_user(tmp, (unsigned __user *) (unsigned long) data);
 		break;
 	}
 
-	/* when I and D space are separate, this will have to be fixed. */
-	case PTRACE_POKETEXT: /* write the word at location addr. */
-	case PTRACE_POKEDATA:
+	/*
+	 * Write 4 bytes into the other process' storage
+	 *  data is the 4 bytes that the user wants written
+	 *  addr is a pointer in the user's storage that contains an
+	 *	8 byte address in the other process where the 4 bytes
+	 *	that is to be written
+	 * (this is run in a 32-bit process looking at a 64-bit process)
+	 * when I and D space are separate, these will need to be fixed.
+	 */
+	case PTRACE_POKETEXT_3264:
+	case PTRACE_POKEDATA_3264: {
+		u32 __user * addrOthers;
+
+		/* Get the addr in the other process that we want to write into */
+		ret = -EIO;
+		if (get_user(addrOthers, (u32 __user * __user *) (unsigned long) addr) != 0)
+			break;
 		ret = 0;
-		if (access_process_vm(child, addr, &data, sizeof(data), 1)
-		    == sizeof(data))
+		if (access_process_vm(child, (u64)addrOthers, &data,
+					sizeof(data), 1) == sizeof(data))
 			break;
 		ret = -EIO;
 		break;
+	}
 
 	case PTRACE_POKEUSR: {
 		struct pt_regs *regs;
 		ret = 0;
-		regs = (struct pt_regs *) ((unsigned long) child->thread_info +
-		       THREAD_SIZE - 32 - sizeof(struct pt_regs));
+		regs = task_pt_regs(child);
 
 		switch (addr) {
 		case 0 ... 31:
@@ -195,9 +232,9 @@ asmlinkage int sys32_ptrace(int request, int pid, int addr, int data)
 
 			if (!tsk_used_math(child)) {
 				/* FP not yet used  */
-				memset(&child->thread.fpu.hard, ~0,
-				       sizeof(child->thread.fpu.hard));
-				child->thread.fpu.hard.fcr31 = 0;
+				memset(&child->thread.fpu, ~0,
+				       sizeof(child->thread.fpu));
+				child->thread.fpu.fcr31 = 0;
 			}
 			/*
 			 * The odd registers are actually the high order bits
@@ -225,10 +262,26 @@ asmlinkage int sys32_ptrace(int request, int pid, int addr, int data)
 			regs->lo = data;
 			break;
 		case FPC_CSR:
-			if (cpu_has_fpu)
-				child->thread.fpu.hard.fcr31 = data;
-			else
-				child->thread.fpu.soft.fcr31 = data;
+			child->thread.fpu.fcr31 = data;
+			break;
+		case DSP_BASE ... DSP_BASE + 5: {
+			dspreg_t *dregs;
+
+			if (!cpu_has_dsp) {
+				ret = -EIO;
+				break;
+			}
+
+			dregs = __get_dsp_regs(child);
+			dregs[addr - DSP_BASE] = data;
+			break;
+		}
+		case DSP_CONTROL:
+			if (!cpu_has_dsp) {
+				ret = -EIO;
+				break;
+			}
+			child->thread.dsp.dspcontrol = data;
 			break;
 		default:
 			/* The rest are not allowed. */
@@ -238,48 +291,46 @@ asmlinkage int sys32_ptrace(int request, int pid, int addr, int data)
 		break;
 		}
 
-	case PTRACE_SYSCALL: /* continue and stop at next (return from) syscall */
-	case PTRACE_CONT: { /* restart after signal. */
-		ret = -EIO;
-		if ((unsigned int) data > _NSIG)
-			break;
-		if (request == PTRACE_SYSCALL) {
-			set_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
-		}
-		else {
-			clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
-		}
-		child->exit_code = data;
-		wake_up_process(child);
-		ret = 0;
-		break;
-	}
-
-	/*
-	 * make the child exit.  Best I can do is send it a sigkill.
-	 * perhaps it should be put in the status that it wants to
-	 * exit.
-	 */
-	case PTRACE_KILL:
-		ret = 0;
-		if (child->exit_state == EXIT_ZOMBIE)	/* already dead */
-			break;
-		child->exit_code = SIGKILL;
-		wake_up_process(child);
+	case PTRACE_GETREGS:
+		ret = ptrace_getregs(child, (__s64 __user *) (__u64) data);
 		break;
 
-	case PTRACE_DETACH: /* detach a process that was attached. */
-		ret = ptrace_detach(child, data);
+	case PTRACE_SETREGS:
+		ret = ptrace_setregs(child, (__s64 __user *) (__u64) data);
+		break;
+
+	case PTRACE_GETFPREGS:
+		ret = ptrace_getfpregs(child, (__u32 __user *) (__u64) data);
+		break;
+
+	case PTRACE_SETFPREGS:
+		ret = ptrace_setfpregs(child, (__u32 __user *) (__u64) data);
+		break;
+
+	case PTRACE_GET_THREAD_AREA:
+		ret = put_user(task_thread_info(child)->tp_value,
+				(unsigned int __user *) (unsigned long) data);
+		break;
+
+	case PTRACE_GET_THREAD_AREA_3264:
+		ret = put_user(task_thread_info(child)->tp_value,
+				(unsigned long __user *) (unsigned long) data);
+		break;
+
+	case PTRACE_GET_WATCH_REGS:
+		ret = ptrace_get_watch_regs(child,
+			(struct pt_watch_regs __user *) (unsigned long) addr);
+		break;
+
+	case PTRACE_SET_WATCH_REGS:
+		ret = ptrace_set_watch_regs(child,
+			(struct pt_watch_regs __user *) (unsigned long) addr);
 		break;
 
 	default:
-		ret = ptrace_request(child, request, addr, data);
+		ret = compat_ptrace_request(child, request, addr, data);
 		break;
 	}
-
-out_tsk:
-	put_task_struct(child);
 out:
-	unlock_kernel();
 	return ret;
 }

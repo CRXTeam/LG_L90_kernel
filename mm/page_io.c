@@ -1,3 +1,4 @@
+
 /*
  *  linux/mm/page_io.c
  *
@@ -12,27 +13,31 @@
 
 #include <linux/mm.h>
 #include <linux/kernel_stat.h>
+#include <linux/gfp.h>
 #include <linux/pagemap.h>
 #include <linux/swap.h>
 #include <linux/bio.h>
 #include <linux/swapops.h>
 #include <linux/writeback.h>
+#include <linux/blkdev.h>
+#include <linux/ratelimit.h>
 #include <asm/pgtable.h>
 
-static struct bio *get_swap_bio(unsigned int __nocast gfp_flags, pgoff_t index,
+/*
+ * We don't need to see swap errors more than once every 1 second to know
+ * that a problem is occurring.
+ */
+#define SWAP_ERROR_LOG_RATE_MS 1000
+
+static struct bio *get_swap_bio(gfp_t gfp_flags,
 				struct page *page, bio_end_io_t end_io)
 {
 	struct bio *bio;
 
 	bio = bio_alloc(gfp_flags, 1);
 	if (bio) {
-		struct swap_info_struct *sis;
-		swp_entry_t entry = { .val = index, };
-
-		sis = get_swap_info_struct(swp_type(entry));
-		bio->bi_sector = map_swap_page(sis, swp_offset(entry)) *
-					(PAGE_SIZE >> 9);
-		bio->bi_bdev = sis->bdev;
+		bio->bi_sector = map_swap_page(page, &bio->bi_bdev);
+		bio->bi_sector <<= PAGE_SHIFT - 9;
 		bio->bi_io_vec[0].bv_page = page;
 		bio->bi_io_vec[0].bv_len = PAGE_SIZE;
 		bio->bi_io_vec[0].bv_offset = 0;
@@ -44,38 +49,97 @@ static struct bio *get_swap_bio(unsigned int __nocast gfp_flags, pgoff_t index,
 	return bio;
 }
 
-static int end_swap_bio_write(struct bio *bio, unsigned int bytes_done, int err)
+static void end_swap_bio_write(struct bio *bio, int err)
 {
 	const int uptodate = test_bit(BIO_UPTODATE, &bio->bi_flags);
 	struct page *page = bio->bi_io_vec[0].bv_page;
+	static unsigned long swap_error_rs_time;
 
-	if (bio->bi_size)
-		return 1;
-
-	if (!uptodate)
+	if (!uptodate) {
 		SetPageError(page);
+		/*
+		 * We failed to write the page out to swap-space.
+		 * Re-dirty the page in order to avoid it being reclaimed.
+		 * Also print a dire warning that things will go BAD (tm)
+		 * very quickly.
+		 *
+		 * Also clear PG_reclaim to avoid rotate_reclaimable_page()
+		 */
+		set_page_dirty(page);
+		if (printk_timed_ratelimit(&swap_error_rs_time,
+					   SWAP_ERROR_LOG_RATE_MS))
+			printk(KERN_ALERT "Write-error on swap-device (%u:%u:%Lu)\n",
+				imajor(bio->bi_bdev->bd_inode),
+				iminor(bio->bi_bdev->bd_inode),
+				(unsigned long long)bio->bi_sector);
+		ClearPageReclaim(page);
+	}
 	end_page_writeback(page);
 	bio_put(bio);
-	return 0;
 }
 
-static int end_swap_bio_read(struct bio *bio, unsigned int bytes_done, int err)
+void end_swap_bio_read(struct bio *bio, int err)
 {
 	const int uptodate = test_bit(BIO_UPTODATE, &bio->bi_flags);
 	struct page *page = bio->bi_io_vec[0].bv_page;
-
-	if (bio->bi_size)
-		return 1;
 
 	if (!uptodate) {
 		SetPageError(page);
 		ClearPageUptodate(page);
-	} else {
-		SetPageUptodate(page);
+		printk(KERN_ALERT "Read-error on swap-device (%u:%u:%Lu)\n",
+				imajor(bio->bi_bdev->bd_inode),
+				iminor(bio->bi_bdev->bd_inode),
+				(unsigned long long)bio->bi_sector);
+		goto out;
 	}
+
+	SetPageUptodate(page);
+
+	/*
+	 * There is no guarantee that the page is in swap cache - the software
+	 * suspend code (at least) uses end_swap_bio_read() against a non-
+	 * swapcache page.  So we must check PG_swapcache before proceeding with
+	 * this optimization.
+	 */
+	if (likely(PageSwapCache(page))) {
+		struct swap_info_struct *sis;
+
+		sis = page_swap_info(page);
+		if (sis->flags & SWP_BLKDEV) {
+			/*
+			 * The swap subsystem performs lazy swap slot freeing,
+			 * expecting that the page will be swapped out again.
+			 * So we can avoid an unnecessary write if the page
+			 * isn't redirtied.
+			 * This is good for real swap storage because we can
+			 * reduce unnecessary I/O and enhance wear-leveling
+			 * if an SSD is used as the as swap device.
+			 * But if in-memory swap device (eg zram) is used,
+			 * this causes a duplicated copy between uncompressed
+			 * data in VM-owned memory and compressed data in
+			 * zram-owned memory.  So let's free zram-owned memory
+			 * and make the VM-owned decompressed page *dirty*,
+			 * so the page should be swapped out somewhere again if
+			 * we again wish to reclaim it.
+			 */
+			struct gendisk *disk = sis->bdev->bd_disk;
+			if (disk->fops->swap_slot_free_notify) {
+				swp_entry_t entry;
+				unsigned long offset;
+
+				entry.val = page_private(page);
+				offset = swp_offset(entry);
+
+				SetPageDirty(page);
+				disk->fops->swap_slot_free_notify(sis->bdev,
+						offset);
+			}
+		}
+	}
+
+out:
 	unlock_page(page);
 	bio_put(bio);
-	return 0;
 }
 
 /*
@@ -87,11 +151,11 @@ int swap_writepage(struct page *page, struct writeback_control *wbc)
 	struct bio *bio;
 	int ret = 0, rw = WRITE;
 
-	if (remove_exclusive_swap_page(page)) {
+	if (try_to_free_swap(page)) {
 		unlock_page(page);
 		goto out;
 	}
-	bio = get_swap_bio(GFP_NOIO, page->private, page, end_swap_bio_write);
+	bio = get_swap_bio(GFP_NOIO, page, end_swap_bio_write);
 	if (bio == NULL) {
 		set_page_dirty(page);
 		unlock_page(page);
@@ -99,8 +163,8 @@ int swap_writepage(struct page *page, struct writeback_control *wbc)
 		goto out;
 	}
 	if (wbc->sync_mode == WB_SYNC_ALL)
-		rw |= (1 << BIO_RW_SYNC);
-	inc_page_state(pswpout);
+		rw |= REQ_SYNC;
+	count_vm_event(PSWPOUT);
 	set_page_writeback(page);
 	unlock_page(page);
 	submit_bio(rw, bio);
@@ -108,53 +172,21 @@ out:
 	return ret;
 }
 
-int swap_readpage(struct file *file, struct page *page)
+int swap_readpage(struct page *page)
 {
 	struct bio *bio;
 	int ret = 0;
 
-	BUG_ON(!PageLocked(page));
-	ClearPageUptodate(page);
-	bio = get_swap_bio(GFP_KERNEL, page->private, page, end_swap_bio_read);
+	VM_BUG_ON(!PageLocked(page));
+	VM_BUG_ON(PageUptodate(page));
+	bio = get_swap_bio(GFP_KERNEL, page, end_swap_bio_read);
 	if (bio == NULL) {
 		unlock_page(page);
 		ret = -ENOMEM;
 		goto out;
 	}
-	inc_page_state(pswpin);
+	count_vm_event(PSWPIN);
 	submit_bio(READ, bio);
 out:
 	return ret;
 }
-
-#if defined(CONFIG_SOFTWARE_SUSPEND) || defined(CONFIG_PM_DISK)
-/*
- * A scruffy utility function to read or write an arbitrary swap page
- * and wait on the I/O.  The caller must have a ref on the page.
- *
- * We use end_swap_bio_read() even for writes, because it happens to do what
- * we want.
- */
-int rw_swap_page_sync(int rw, swp_entry_t entry, struct page *page)
-{
-	struct bio *bio;
-	int ret = 0;
-
-	lock_page(page);
-
-	bio = get_swap_bio(GFP_KERNEL, entry.val, page, end_swap_bio_read);
-	if (bio == NULL) {
-		unlock_page(page);
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	submit_bio(rw | (1 << BIO_RW_SYNC), bio);
-	wait_on_page_locked(page);
-
-	if (!PageUptodate(page) || PageError(page))
-		ret = -EIO;
-out:
-	return ret;
-}
-#endif

@@ -18,10 +18,7 @@
  *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
-#include <sound/driver.h>
 #include <linux/wait.h>
-#include <linux/sched.h>
-#include <linux/slab.h>
 #include <sound/core.h>
 #include <sound/emux_synth.h>
 #include <sound/info.h>
@@ -30,14 +27,14 @@
 #ifdef CONFIG_PROC_FS
 
 static void
-snd_emux_proc_info_read(snd_info_entry_t *entry, 
-			snd_info_buffer_t *buf)
+snd_emux_proc_info_read(struct snd_info_entry *entry, 
+			struct snd_info_buffer *buf)
 {
-	snd_emux_t *emu;
+	struct snd_emux *emu;
 	int i;
 
 	emu = entry->private_data;
-	down(&emu->register_mutex);
+	mutex_lock(&emu->register_mutex);
 	if (emu->name)
 		snd_iprintf(buf, "Device: %s\n", emu->name);
 	snd_iprintf(buf, "Ports: %d\n", emu->num_ports);
@@ -56,17 +53,17 @@ snd_emux_proc_info_read(snd_info_entry_t *entry,
 		snd_iprintf(buf, "Memory Size: 0\n");
 	}
 	if (emu->sflist) {
-		down(&emu->sflist->presets_mutex);
+		mutex_lock(&emu->sflist->presets_mutex);
 		snd_iprintf(buf, "SoundFonts: %d\n", emu->sflist->fonts_size);
 		snd_iprintf(buf, "Instruments: %d\n", emu->sflist->zone_counter);
 		snd_iprintf(buf, "Samples: %d\n", emu->sflist->sample_counter);
 		snd_iprintf(buf, "Locked Instruments: %d\n", emu->sflist->zone_locked);
 		snd_iprintf(buf, "Locked Samples: %d\n", emu->sflist->sample_locked);
-		up(&emu->sflist->presets_mutex);
+		mutex_unlock(&emu->sflist->presets_mutex);
 	}
 #if 0  /* debug */
 	if (emu->voices[0].state != SNDRV_EMUX_ST_OFF && emu->voices[0].ch >= 0) {
-		snd_emux_voice_t *vp = &emu->voices[0];
+		struct snd_emux_voice *vp = &emu->voices[0];
 		snd_iprintf(buf, "voice 0: on\n");
 		snd_iprintf(buf, "mod delay=%x, atkhld=%x, dcysus=%x, rel=%x\n",
 			    vp->reg.parm.moddelay,
@@ -103,13 +100,13 @@ snd_emux_proc_info_read(snd_info_entry_t *entry,
 		snd_iprintf(buf, "sample_mode=%x, rate=%x\n", vp->reg.sample_mode, vp->reg.rate_offset);
 	}
 #endif
-	up(&emu->register_mutex);
+	mutex_unlock(&emu->register_mutex);
 }
 
 
-void snd_emux_proc_init(snd_emux_t *emu, snd_card_t *card, int device)
+void snd_emux_proc_init(struct snd_emux *emu, struct snd_card *card, int device)
 {
-	snd_info_entry_t *entry;
+	struct snd_info_entry *entry;
 	char name[64];
 
 	sprintf(name, "wavetableD%d", device);
@@ -119,7 +116,6 @@ void snd_emux_proc_init(snd_emux_t *emu, snd_card_t *card, int device)
 
 	entry->content = SNDRV_INFO_CONTENT_TEXT;
 	entry->private_data = emu;
-	entry->c.text.read_size = 1024;
 	entry->c.text.read = snd_emux_proc_info_read;
 	if (snd_info_register(entry) < 0)
 		snd_info_free_entry(entry);
@@ -127,12 +123,10 @@ void snd_emux_proc_init(snd_emux_t *emu, snd_card_t *card, int device)
 		emu->proc = entry;
 }
 
-void snd_emux_proc_free(snd_emux_t *emu)
+void snd_emux_proc_free(struct snd_emux *emu)
 {
-	if (emu->proc) {
-		snd_info_unregister(emu->proc);
-		emu->proc = NULL;
-	}
+	snd_info_free_entry(emu->proc);
+	emu->proc = NULL;
 }
 
 #endif /* CONFIG_PROC_FS */

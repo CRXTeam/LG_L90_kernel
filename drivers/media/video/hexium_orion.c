@@ -3,7 +3,7 @@
 
     Visit http://www.mihu.de/linux/saa7146/ and follow the link
     to "hexium" for further details about this card.
-    
+
     Copyright (C) 2003 Michael Hunold <michael@mihu.de>
 
     This program is free software; you can redistribute it and/or modify
@@ -21,16 +21,19 @@
     Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #define DEBUG_VARIABLE debug
 
 #include <media/saa7146_vv.h>
+#include <linux/module.h>
 
-static int debug = 0;
+static int debug;
 module_param(debug, int, 0);
 MODULE_PARM_DESC(debug, "debug verbosity");
 
 /* global variables */
-static int hexium_num = 0;
+static int hexium_num;
 
 #define HEXIUM_HV_PCI6_ORION		1
 #define HEXIUM_ORION_1SVHS_3BNC		2
@@ -38,15 +41,15 @@ static int hexium_num = 0;
 
 #define HEXIUM_INPUTS	9
 static struct v4l2_input hexium_inputs[HEXIUM_INPUTS] = {
-	{ 0, "CVBS 1",	V4L2_INPUT_TYPE_CAMERA,	2, 0, V4L2_STD_PAL_BG|V4L2_STD_NTSC_M, 0 },
-	{ 1, "CVBS 2",	V4L2_INPUT_TYPE_CAMERA,	2, 0, V4L2_STD_PAL_BG|V4L2_STD_NTSC_M, 0 },
-	{ 2, "CVBS 3",	V4L2_INPUT_TYPE_CAMERA,	2, 0, V4L2_STD_PAL_BG|V4L2_STD_NTSC_M, 0 },
-	{ 3, "CVBS 4",	V4L2_INPUT_TYPE_CAMERA,	2, 0, V4L2_STD_PAL_BG|V4L2_STD_NTSC_M, 0 },
-	{ 4, "CVBS 5",	V4L2_INPUT_TYPE_CAMERA,	2, 0, V4L2_STD_PAL_BG|V4L2_STD_NTSC_M, 0 },
-	{ 5, "CVBS 6",	V4L2_INPUT_TYPE_CAMERA,	2, 0, V4L2_STD_PAL_BG|V4L2_STD_NTSC_M, 0 },
-	{ 6, "Y/C 1",	V4L2_INPUT_TYPE_CAMERA,	2, 0, V4L2_STD_PAL_BG|V4L2_STD_NTSC_M, 0 },
-	{ 7, "Y/C 2",	V4L2_INPUT_TYPE_CAMERA,	2, 0, V4L2_STD_PAL_BG|V4L2_STD_NTSC_M, 0 },
-	{ 8, "Y/C 3",	V4L2_INPUT_TYPE_CAMERA,	2, 0, V4L2_STD_PAL_BG|V4L2_STD_NTSC_M, 0 },
+	{ 0, "CVBS 1",	V4L2_INPUT_TYPE_CAMERA,	2, 0, V4L2_STD_PAL_BG|V4L2_STD_NTSC_M, 0, V4L2_IN_CAP_STD },
+	{ 1, "CVBS 2",	V4L2_INPUT_TYPE_CAMERA,	2, 0, V4L2_STD_PAL_BG|V4L2_STD_NTSC_M, 0, V4L2_IN_CAP_STD },
+	{ 2, "CVBS 3",	V4L2_INPUT_TYPE_CAMERA,	2, 0, V4L2_STD_PAL_BG|V4L2_STD_NTSC_M, 0, V4L2_IN_CAP_STD },
+	{ 3, "CVBS 4",	V4L2_INPUT_TYPE_CAMERA,	2, 0, V4L2_STD_PAL_BG|V4L2_STD_NTSC_M, 0, V4L2_IN_CAP_STD },
+	{ 4, "CVBS 5",	V4L2_INPUT_TYPE_CAMERA,	2, 0, V4L2_STD_PAL_BG|V4L2_STD_NTSC_M, 0, V4L2_IN_CAP_STD },
+	{ 5, "CVBS 6",	V4L2_INPUT_TYPE_CAMERA,	2, 0, V4L2_STD_PAL_BG|V4L2_STD_NTSC_M, 0, V4L2_IN_CAP_STD },
+	{ 6, "Y/C 1",	V4L2_INPUT_TYPE_CAMERA,	2, 0, V4L2_STD_PAL_BG|V4L2_STD_NTSC_M, 0, V4L2_IN_CAP_STD },
+	{ 7, "Y/C 2",	V4L2_INPUT_TYPE_CAMERA,	2, 0, V4L2_STD_PAL_BG|V4L2_STD_NTSC_M, 0, V4L2_IN_CAP_STD },
+	{ 8, "Y/C 3",	V4L2_INPUT_TYPE_CAMERA,	2, 0, V4L2_STD_PAL_BG|V4L2_STD_NTSC_M, 0, V4L2_IN_CAP_STD },
 };
 
 #define HEXIUM_AUDIOS	0
@@ -57,19 +60,11 @@ struct hexium_data
 	u8 byte;
 };
 
-static struct saa7146_extension_ioctls ioctls[] = {
-	{ VIDIOC_G_INPUT,	SAA7146_EXCLUSIVE },
-	{ VIDIOC_S_INPUT,	SAA7146_EXCLUSIVE },
-	{ VIDIOC_ENUMINPUT, 	SAA7146_EXCLUSIVE },
-	{ VIDIOC_S_STD,		SAA7146_AFTER },
-	{ 0,			0 }
-};
-
 struct hexium
 {
 	int type;
 	struct video_device	*video_dev;
-	struct i2c_adapter	i2c_adapter;	
+	struct i2c_adapter	i2c_adapter;
 
 	int cur_input;	/* current input */
 };
@@ -86,7 +81,7 @@ static u8 hexium_saa7110[53]={
 };
 
 static struct {
-	struct hexium_data data[8];	
+	struct hexium_data data[8];
 } hexium_input_select[] = {
 {
 	{ /* cvbs 1 */
@@ -153,7 +148,7 @@ static struct {
 		{ 0x30, 0x60 },
 		{ 0x31, 0xB5 }, // ??
 		{ 0x21, 0x03 },
-	} 
+	}
 }, {
 	{ /* y/c 1 */
 		{ 0x06, 0x80 },
@@ -187,7 +182,7 @@ static struct {
 		{ 0x31, 0x75 },
 		{ 0x21, 0x21 },
 	}
-}	
+}
 };
 
 static struct saa7146_standard hexium_standards[] = {
@@ -207,7 +202,7 @@ static struct saa7146_standard hexium_standards[] = {
 		.h_offset	= 1,	.h_pixels 	= 720,
 		.v_max_out	= 576,	.h_max_out	= 768,
 	}
-};		
+};
 
 /* this is only called for old HV-PCI6/Orion cards
    without eeprom */
@@ -217,19 +212,18 @@ static int hexium_probe(struct saa7146_dev *dev)
 	union i2c_smbus_data data;
 	int err = 0;
 
-	DEB_EE((".\n"));
+	DEB_EE("\n");
 
 	/* there are no hexium orion cards with revision 0 saa7146s */
 	if (0 == dev->revision) {
 		return -EFAULT;
 	}
 
-	hexium = (struct hexium *) kmalloc(sizeof(struct hexium), GFP_KERNEL);
+	hexium = kzalloc(sizeof(struct hexium), GFP_KERNEL);
 	if (NULL == hexium) {
-		printk("hexium_orion: hexium_probe: not enough kernel memory.\n");
+		pr_err("hexium_probe: not enough kernel memory\n");
 		return -ENOMEM;
 	}
-	memset(hexium, 0x0, sizeof(struct hexium));
 
 	/* enable i2c-port pins */
 	saa7146_write(dev, MC1, (MASK_08 | MASK_24 | MASK_10 | MASK_26));
@@ -239,12 +233,11 @@ static int hexium_probe(struct saa7146_dev *dev)
 	saa7146_write(dev, MC2, (MASK_09 | MASK_25 | MASK_10 | MASK_26));
 
 	hexium->i2c_adapter = (struct i2c_adapter) {
-		.class = I2C_CLASS_TV_ANALOG,
 		.name = "hexium orion",
 	};
 	saa7146_i2c_adapter_prepare(dev, &hexium->i2c_adapter, SAA7146_I2C_BUS_BIT_RATE_480);
 	if (i2c_add_adapter(&hexium->i2c_adapter) < 0) {
-		DEB_S(("cannot register i2c-device. skipping.\n"));
+		DEB_S("cannot register i2c-device. skipping.\n");
 		kfree(hexium);
 		return -EFAULT;
 	}
@@ -258,7 +251,7 @@ static int hexium_probe(struct saa7146_dev *dev)
 
 	/* detect newer Hexium Orion cards by subsystem ids */
 	if (0x17c8 == dev->pci->subsystem_vendor && 0x0101 == dev->pci->subsystem_device) {
-		printk("hexium_orion: device is a Hexium Orion w/ 1 SVHS + 3 BNC inputs.\n");
+		pr_info("device is a Hexium Orion w/ 1 SVHS + 3 BNC inputs\n");
 		/* we store the pointer in our private data field */
 		dev->ext_priv = hexium;
 		hexium->type = HEXIUM_ORION_1SVHS_3BNC;
@@ -266,17 +259,17 @@ static int hexium_probe(struct saa7146_dev *dev)
 	}
 
 	if (0x17c8 == dev->pci->subsystem_vendor && 0x2101 == dev->pci->subsystem_device) {
-		printk("hexium_orion: device is a Hexium Orion w/ 4 BNC inputs.\n");
+		pr_info("device is a Hexium Orion w/ 4 BNC inputs\n");
 		/* we store the pointer in our private data field */
 		dev->ext_priv = hexium;
 		hexium->type = HEXIUM_ORION_4BNC;
 		return 0;
 	}
 
-	/* check if this is an old hexium Orion card by looking at 
+	/* check if this is an old hexium Orion card by looking at
 	   a saa7110 at address 0x4e */
 	if (0 == (err = i2c_smbus_xfer(&hexium->i2c_adapter, 0x4e, 0, I2C_SMBUS_READ, 0x00, I2C_SMBUS_BYTE_DATA, &data))) {
-		printk("hexium_orion: device is a Hexium HV-PCI6/Orion (old).\n");
+		pr_info("device is a Hexium HV-PCI6/Orion (old)\n");
 		/* we store the pointer in our private data field */
 		dev->ext_priv = hexium;
 		hexium->type = HEXIUM_HV_PCI6_ORION;
@@ -298,13 +291,13 @@ static int hexium_init_done(struct saa7146_dev *dev)
 	union i2c_smbus_data data;
 	int i = 0;
 
-	DEB_D(("hexium_init_done called.\n"));
+	DEB_D("hexium_init_done called\n");
 
 	/* initialize the helper ics to useful values */
 	for (i = 0; i < sizeof(hexium_saa7110); i++) {
 		data.byte = hexium_saa7110[i];
 		if (0 != i2c_smbus_xfer(&hexium->i2c_adapter, 0x4e, 0, I2C_SMBUS_WRITE, i, I2C_SMBUS_BYTE_DATA, &data)) {
-			printk("hexium_orion: failed for address 0x%02x\n", i);
+			pr_err("failed for address 0x%02x\n", i);
 		}
 	}
 
@@ -315,8 +308,8 @@ static int hexium_set_input(struct hexium *hexium, int input)
 {
 	union i2c_smbus_data data;
 	int i = 0;
-	
-	DEB_D((".\n"));
+
+	DEB_D("\n");
 
 	for (i = 0; i < 8; i++) {
 		int adr = hexium_input_select[input].data[i].adr;
@@ -324,8 +317,46 @@ static int hexium_set_input(struct hexium *hexium, int input)
 		if (0 != i2c_smbus_xfer(&hexium->i2c_adapter, 0x4e, 0, I2C_SMBUS_WRITE, adr, I2C_SMBUS_BYTE_DATA, &data)) {
 			return -1;
 		}
-		printk("%d: 0x%02x => 0x%02x\n",input, adr,data.byte);
+		pr_debug("%d: 0x%02x => 0x%02x\n", input, adr, data.byte);
 	}
+
+	return 0;
+}
+
+static int vidioc_enum_input(struct file *file, void *fh, struct v4l2_input *i)
+{
+	DEB_EE("VIDIOC_ENUMINPUT %d\n", i->index);
+
+	if (i->index >= HEXIUM_INPUTS)
+		return -EINVAL;
+
+	memcpy(i, &hexium_inputs[i->index], sizeof(struct v4l2_input));
+
+	DEB_D("v4l2_ioctl: VIDIOC_ENUMINPUT %d\n", i->index);
+	return 0;
+}
+
+static int vidioc_g_input(struct file *file, void *fh, unsigned int *input)
+{
+	struct saa7146_dev *dev = ((struct saa7146_fh *)fh)->dev;
+	struct hexium *hexium = (struct hexium *) dev->ext_priv;
+
+	*input = hexium->cur_input;
+
+	DEB_D("VIDIOC_G_INPUT: %d\n", *input);
+	return 0;
+}
+
+static int vidioc_s_input(struct file *file, void *fh, unsigned int input)
+{
+	struct saa7146_dev *dev = ((struct saa7146_fh *)fh)->dev;
+	struct hexium *hexium = (struct hexium *) dev->ext_priv;
+
+	if (input >= HEXIUM_INPUTS)
+		return -EINVAL;
+
+	hexium->cur_input = input;
+	hexium_set_input(hexium, input);
 
 	return 0;
 }
@@ -337,15 +368,18 @@ static int hexium_attach(struct saa7146_dev *dev, struct saa7146_pci_extension_d
 {
 	struct hexium *hexium = (struct hexium *) dev->ext_priv;
 
-	DEB_EE((".\n"));
+	DEB_EE("\n");
 
 	saa7146_vv_init(dev, &vv_data);
+	vv_data.ops.vidioc_enum_input = vidioc_enum_input;
+	vv_data.ops.vidioc_g_input = vidioc_g_input;
+	vv_data.ops.vidioc_s_input = vidioc_s_input;
 	if (0 != saa7146_register_device(&hexium->video_dev, dev, "hexium orion", VFL_TYPE_GRABBER)) {
-		printk("hexium_orion: cannot register capture v4l2 device. skipping.\n");
+		pr_err("cannot register capture v4l2 device. skipping.\n");
 		return -1;
 	}
 
-	printk("hexium_orion: found 'hexium orion' frame grabber-%d.\n", hexium_num);
+	pr_err("found 'hexium orion' frame grabber-%d\n", hexium_num);
 	hexium_num++;
 
 	/* the rest */
@@ -359,7 +393,7 @@ static int hexium_detach(struct saa7146_dev *dev)
 {
 	struct hexium *hexium = (struct hexium *) dev->ext_priv;
 
-	DEB_EE(("dev:%p\n", dev));
+	DEB_EE("dev:%p\n", dev);
 
 	saa7146_unregister_device(&hexium->video_dev, dev);
 	saa7146_vv_release(dev);
@@ -368,58 +402,6 @@ static int hexium_detach(struct saa7146_dev *dev)
 
 	i2c_del_adapter(&hexium->i2c_adapter);
 	kfree(hexium);
-	return 0;
-}
-
-static int hexium_ioctl(struct saa7146_fh *fh, unsigned int cmd, void *arg)
-{
-	struct saa7146_dev *dev = fh->dev;
-	struct hexium *hexium = (struct hexium *) dev->ext_priv;
-/*
-	struct saa7146_vv *vv = dev->vv_data; 
-*/
-	switch (cmd) {
-	case VIDIOC_ENUMINPUT:
-		{
-			struct v4l2_input *i = arg;
-			DEB_EE(("VIDIOC_ENUMINPUT %d.\n", i->index));
-
-			if (i->index < 0 || i->index >= HEXIUM_INPUTS) {
-				return -EINVAL;
-			}
-
-			memcpy(i, &hexium_inputs[i->index], sizeof(struct v4l2_input));
-
-			DEB_D(("v4l2_ioctl: VIDIOC_ENUMINPUT %d.\n", i->index));
-			return 0;
-		}
-	case VIDIOC_G_INPUT:
-		{
-			int *input = (int *) arg;
-			*input = hexium->cur_input;
-
-			DEB_D(("VIDIOC_G_INPUT: %d\n", *input));
-			return 0;
-		}
-	case VIDIOC_S_INPUT:
-		{
-			int input = *(int *) arg;
-
-			if (input < 0 || input >= HEXIUM_INPUTS) {
-				return -EINVAL;
-			}
-
-			hexium->cur_input = input;
-			hexium_set_input(hexium, input);
-
-			return 0;
-		}
-	default:
-/*
-		DEB_D(("hexium_ioctl() does not handle this ioctl.\n"));
-*/
-		return -ENOIOCTLCMD;
-	}
 	return 0;
 }
 
@@ -480,12 +462,10 @@ static struct saa7146_ext_vv vv_data = {
 	.stds = &hexium_standards[0],
 	.num_stds = sizeof(hexium_standards) / sizeof(struct saa7146_standard),
 	.std_callback = &std_callback,
-	.ioctls = &ioctls[0],
-	.ioctl = hexium_ioctl,
 };
 
 static struct saa7146_extension extension = {
-	.name = "hexium HV-PCI6/Orion",
+	.name = "hexium HV-PCI6 Orion",
 	.flags = 0,		// SAA7146_USE_I2C_IRQ,
 
 	.pci_tbl = &pci_tbl[0],
@@ -502,7 +482,7 @@ static struct saa7146_extension extension = {
 static int __init hexium_init_module(void)
 {
 	if (0 != saa7146_register_extension(&extension)) {
-		DEB_S(("failed to register extension.\n"));
+		DEB_S("failed to register extension\n");
 		return -ENODEV;
 	}
 

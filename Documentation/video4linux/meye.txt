@@ -1,14 +1,13 @@
 Vaio Picturebook Motion Eye Camera Driver Readme
 ------------------------------------------------
 	Copyright (C) 2001-2004 Stelian Pop <stelian@popies.net>
-	Copyright (C) 2001-2002 Alcôve <www.alcove.com>
+	Copyright (C) 2001-2002 AlcÃ´ve <www.alcove.com>
 	Copyright (C) 2000 Andrew Tridgell <tridge@samba.org>
 
 This driver enable the use of video4linux compatible applications with the
-Motion Eye camera. This driver requires the "Sony Vaio Programmable I/O
-Control Device" driver (which can be found in the "Character drivers"
-section of the kernel configuration utility) to be compiled and installed
-(using its "camera=1" parameter).
+Motion Eye camera. This driver requires the "Sony Laptop Extras" driver (which
+can be found in the "Misc devices" section of the kernel configuration utility)
+to be compiled and installed (using its "camera=1" parameter).
 
 It can do at maximum 30 fps @ 320x240 or 15 fps @ 640x480.
 
@@ -29,7 +28,7 @@ driver (PCI vendor/device is 0x136b/0xff01)
 
 The third one, present in recent (more or less last year) Picturebooks
 (C1M* models), is not supported. The manufacturer has given the specs
-to the developers under a NDA (which allows the develoment of a GPL
+to the developers under a NDA (which allows the development of a GPL
 driver however), but things are not moving very fast (see
 http://r-engine.sourceforge.net/) (PCI vendor/device is 0x10cf/0x2011).
 
@@ -46,8 +45,6 @@ module argument syntax (<param>=<value> when passing the option to the
 module or meye.<param>=<value> on the kernel boot line when meye is
 statically linked into the kernel). Those options are:
 
-	forcev4l1:	force use of V4L1 API instead of V4L2
-
 	gbuffers:	number of capture buffers, default is 2 (32 max)
 
 	gbufsize:	size of each capture buffer, default is 614400
@@ -58,7 +55,7 @@ Module use:
 -----------
 
 In order to automatically load the meye module on use, you can put those lines
-in your /etc/modprobe.conf file:
+in your /etc/modprobe.d/meye.conf file:
 
 	alias char-major-81 videodev
 	alias char-major-81-0 meye
@@ -80,9 +77,8 @@ Usage:
 Private API:
 ------------
 
-	The driver supports frame grabbing with the video4linux API
-	(either v4l1 or v4l2), so all video4linux tools (like xawtv)
-	should work with this driver.
+	The driver supports frame grabbing with the video4linux API,
+	so all video4linux tools (like xawtv) should work with this driver.
 
 	Besides the video4linux interface, the driver has a private interface
 	for accessing the Motion Eye extended parameters (camera sharpness,
@@ -123,8 +119,5 @@ Private API:
 
 Bugs / Todo:
 ------------
-
-	- the driver could be much cleaned up by removing the v4l1 support.
-	  However, this means all v4l1-only applications will stop working.
 
 	- 'motioneye' still uses the meye private v4l1 API extensions.

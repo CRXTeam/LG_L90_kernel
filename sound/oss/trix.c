@@ -1,5 +1,5 @@
 /*
- * sound/trix.c
+ * sound/oss/trix.c
  *
  * Low level driver for the MediaTrix AudioTrix Pro
  * (MT-0002-PC Control Chip)
@@ -31,7 +31,7 @@
 
 static int mpu;
 
-static int joystick;
+static bool joystick;
 
 static unsigned char trix_read(int addr)
 {

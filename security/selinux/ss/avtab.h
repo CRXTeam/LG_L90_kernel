@@ -14,36 +14,34 @@
  *
  * Copyright (C) 2003 Tresys Technology, LLC
  *	This program is free software; you can redistribute it and/or modify
- *  	it under the terms of the GNU General Public License as published by
+ *	it under the terms of the GNU General Public License as published by
  *	the Free Software Foundation, version 2.
+ *
+ * Updated: Yuichi Nakamura <ynakam@hitachisoft.jp>
+ * 	Tuned number of hash slots for avtab to reduce memory usage
  */
 #ifndef _SS_AVTAB_H_
 #define _SS_AVTAB_H_
 
 struct avtab_key {
-	u32 source_type;	/* source type */
-	u32 target_type;	/* target type */
-	u32 target_class;	/* target object class */
+	u16 source_type;	/* source type */
+	u16 target_type;	/* target type */
+	u16 target_class;	/* target object class */
+#define AVTAB_ALLOWED		0x0001
+#define AVTAB_AUDITALLOW	0x0002
+#define AVTAB_AUDITDENY		0x0004
+#define AVTAB_AV		(AVTAB_ALLOWED | AVTAB_AUDITALLOW | AVTAB_AUDITDENY)
+#define AVTAB_TRANSITION	0x0010
+#define AVTAB_MEMBER		0x0020
+#define AVTAB_CHANGE		0x0040
+#define AVTAB_TYPE		(AVTAB_TRANSITION | AVTAB_MEMBER | AVTAB_CHANGE)
+#define AVTAB_ENABLED_OLD   0x80000000 /* reserved for used in cond_avtab */
+#define AVTAB_ENABLED		0x8000 /* reserved for used in cond_avtab */
+	u16 specified;	/* what field is specified */
 };
 
 struct avtab_datum {
-#define AVTAB_ALLOWED     1
-#define AVTAB_AUDITALLOW  2
-#define AVTAB_AUDITDENY   4
-#define AVTAB_AV         (AVTAB_ALLOWED | AVTAB_AUDITALLOW | AVTAB_AUDITDENY)
-#define AVTAB_TRANSITION 16
-#define AVTAB_MEMBER     32
-#define AVTAB_CHANGE     64
-#define AVTAB_TYPE       (AVTAB_TRANSITION | AVTAB_MEMBER | AVTAB_CHANGE)
-#define AVTAB_ENABLED    0x80000000 /* reserved for used in cond_avtab */
-	u32 specified;	/* what fields are specified */
-	u32 data[3];	/* access vectors or types */
-#define avtab_allowed(x) (x)->data[0]
-#define avtab_auditdeny(x) (x)->data[1]
-#define avtab_auditallow(x) (x)->data[2]
-#define avtab_transition(x) (x)->data[0]
-#define avtab_change(x) (x)->data[1]
-#define avtab_member(x) (x)->data[2]
+	u32 data; /* access vector or type value */
 };
 
 struct avtab_node {
@@ -55,31 +53,39 @@ struct avtab_node {
 struct avtab {
 	struct avtab_node **htable;
 	u32 nel;	/* number of elements */
+	u32 nslot;      /* number of hash slots */
+	u16 mask;       /* mask to compute hash func */
+
 };
 
 int avtab_init(struct avtab *);
-struct avtab_datum *avtab_search(struct avtab *h, struct avtab_key *k, int specified);
+int avtab_alloc(struct avtab *, u32);
+struct avtab_datum *avtab_search(struct avtab *h, struct avtab_key *k);
 void avtab_destroy(struct avtab *h);
 void avtab_hash_eval(struct avtab *h, char *tag);
 
-int avtab_read_item(void *fp, struct avtab_datum *avdatum, struct avtab_key *avkey);
-int avtab_read(struct avtab *a, void *fp, u32 config);
+struct policydb;
+int avtab_read_item(struct avtab *a, void *fp, struct policydb *pol,
+		    int (*insert)(struct avtab *a, struct avtab_key *k,
+				  struct avtab_datum *d, void *p),
+		    void *p);
+
+int avtab_read(struct avtab *a, void *fp, struct policydb *pol);
+int avtab_write_item(struct policydb *p, struct avtab_node *cur, void *fp);
+int avtab_write(struct policydb *p, struct avtab *a, void *fp);
 
 struct avtab_node *avtab_insert_nonunique(struct avtab *h, struct avtab_key *key,
 					  struct avtab_datum *datum);
 
-struct avtab_node *avtab_search_node(struct avtab *h, struct avtab_key *key, int specified);
+struct avtab_node *avtab_search_node(struct avtab *h, struct avtab_key *key);
 
 struct avtab_node *avtab_search_node_next(struct avtab_node *node, int specified);
 
 void avtab_cache_init(void);
 void avtab_cache_destroy(void);
 
-#define AVTAB_HASH_BITS 15
-#define AVTAB_HASH_BUCKETS (1 << AVTAB_HASH_BITS)
-#define AVTAB_HASH_MASK (AVTAB_HASH_BUCKETS-1)
-
-#define AVTAB_SIZE AVTAB_HASH_BUCKETS
+#define MAX_AVTAB_HASH_BITS 11
+#define MAX_AVTAB_HASH_BUCKETS (1 << MAX_AVTAB_HASH_BITS)
 
 #endif	/* _SS_AVTAB_H_ */
 

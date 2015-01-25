@@ -2,8 +2,8 @@
  *  ops-vr41xx.c, PCI configuration routines for the PCIU of NEC VR4100 series.
  *
  *  Copyright (C) 2001-2003 MontaVista Software Inc.
- *    Author: Yoichi Yuasa <yyuasa@mvista.com or source@mvista.com>
- *  Copyright (C) 2004  Yoichi Yuasa <yuasa@hh.iij4u.or.jp>
+ *    Author: Yoichi Yuasa <source@mvista.com>
+ *  Copyright (C) 2004-2005  Yoichi Yuasa <yuasa@linux-mips.org>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -21,7 +21,7 @@
  */
 /*
  * Changes:
- *  MontaVista Software Inc. <yyuasa@mvista.com> or <source@mvista.com>
+ *  MontaVista Software Inc. <source@mvista.com>
  *  - New creation, NEC VR4122 and VR4131 are supported.
  */
 #include <linux/pci.h>
@@ -29,8 +29,8 @@
 
 #include <asm/io.h>
 
-#define PCICONFDREG	KSEG1ADDR(0x0f000c14)
-#define PCICONFAREG	KSEG1ADDR(0x0f000c18)
+#define PCICONFDREG	(void __iomem *)KSEG1ADDR(0x0f000c14)
+#define PCICONFAREG	(void __iomem *)KSEG1ADDR(0x0f000c18)
 
 static inline int set_pci_configuration_address(unsigned char number,
                                                 unsigned int devfn, int where)

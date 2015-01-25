@@ -4,7 +4,6 @@
  *
  */
 
-#include <linux/version.h>
 #include <linux/errno.h>
 #include <asm/io.h>
 #include <linux/delay.h>
@@ -15,4 +14,3 @@
 #include <linux/timer.h>
 #include <linux/wait.h>
 #include <linux/isdnif.h>
-#include "debug.h"

@@ -19,7 +19,7 @@
  *
  */
 
-#include <sound/driver.h>
+#include <linux/export.h>
 #include <sound/core.h>
 #include "seq_lock.h"
 
@@ -39,10 +39,11 @@ void snd_use_lock_sync_helper(snd_use_lock_t *lockp, const char *file, int line)
 			snd_printk(KERN_WARNING "seq_lock: timeout [%d left] in %s:%d\n", atomic_read(lockp), file, line);
 			break;
 		}
-		set_current_state(TASK_UNINTERRUPTIBLE);
-		schedule_timeout(1);
+		schedule_timeout_uninterruptible(1);
 		max_count--;
 	}
 }
+
+EXPORT_SYMBOL(snd_use_lock_sync_helper);
 
 #endif

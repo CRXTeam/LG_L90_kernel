@@ -5,6 +5,7 @@
  *
  * Copyright (C) 2004 by Ralf Baechle
  */
+#include <linux/init.h>
 #include <linux/oprofile.h>
 #include <linux/interrupt.h>
 #include <linux/smp.h>
@@ -59,7 +60,7 @@ static void rm9000_reg_setup(struct op_counter_config *ctr)
 
 /* Program all of the registers in preparation for enabling profiling.  */
 
-static void rm9000_cpu_setup (void *args)
+static void rm9000_cpu_setup(void *args)
 {
 	uint64_t perfcount;
 
@@ -79,10 +80,10 @@ static void rm9000_cpu_stop(void *args)
 	write_c0_perfcontrol(0);
 }
 
-static irqreturn_t rm9000_perfcount_handler(int irq, void * dev_id,
-	struct pt_regs *regs)
+static irqreturn_t rm9000_perfcount_handler(int irq, void *dev_id)
 {
 	unsigned int control = read_c0_perfcontrol();
+	struct pt_regs *regs = get_irq_regs();
 	uint32_t counter1, counter2;
 	uint64_t counters;
 
@@ -114,7 +115,7 @@ static irqreturn_t rm9000_perfcount_handler(int irq, void * dev_id,
 	return IRQ_HANDLED;
 }
 
-static int rm9000_init(void)
+static int __init rm9000_init(void)
 {
 	return request_irq(rm9000_perfcount_irq, rm9000_perfcount_handler,
 	                   0, "Perfcounter", NULL);
@@ -125,7 +126,7 @@ static void rm9000_exit(void)
 	free_irq(rm9000_perfcount_irq, NULL);
 }
 
-struct op_mips_model op_model_rm9000 = {
+struct op_mips_model op_model_rm9000_ops = {
 	.reg_setup	= rm9000_reg_setup,
 	.cpu_setup	= rm9000_cpu_setup,
 	.init		= rm9000_init,

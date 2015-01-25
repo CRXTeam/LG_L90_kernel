@@ -1,9 +1,8 @@
 /* Acorn-like font definition, with PC graphics characters */
 
-#include <linux/config.h>
 #include <linux/font.h>
 
-static unsigned char acorndata_8x8[] = {
+static const unsigned char acorndata_8x8[] = {
 /* 00 */  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, /* ^@ */
 /* 01 */  0x7e, 0x81, 0xa5, 0x81, 0xbd, 0x99, 0x81, 0x7e, /* ^A */
 /* 02 */  0x7e, 0xff, 0xbd, 0xff, 0xc3, 0xe7, 0xff, 0x7e, /* ^B */
@@ -262,15 +261,15 @@ static unsigned char acorndata_8x8[] = {
 /* FF */  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
 
-struct font_desc font_acorn_8x8 = {
-	ACORN8x8_IDX,
-	"Acorn8x8",
-	8,
-	8,
-	acorndata_8x8,
+const struct font_desc font_acorn_8x8 = {
+	.idx	= ACORN8x8_IDX,
+	.name	= "Acorn8x8",
+	.width	= 8,
+	.height	= 8,
+	.data	= acorndata_8x8,
 #ifdef CONFIG_ARCH_ACORN
-	20
+	.pref	= 20,
 #else
-	0
+	.pref	= 0,
 #endif
 };

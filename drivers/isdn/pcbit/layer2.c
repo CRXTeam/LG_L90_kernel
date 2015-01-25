@@ -12,7 +12,7 @@
 /*
  * 19991203 - Fernando Carvalho - takion@superbofh.org
  * Hacked to compile with egcs and run with current version of isdn modules
-*/
+ */
 
 /*
  *        Based on documentation provided by Inesc:
@@ -24,10 +24,10 @@
  *              re-write/remove debug printks
  */
 
-#include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/workqueue.h>
@@ -36,7 +36,6 @@
 
 #include <linux/isdnif.h>
 
-#include <asm/system.h>
 #include <asm/io.h>
 
 
@@ -47,27 +46,10 @@
 #undef DEBUG_FRAG
 
 
-
-/*
- *  task queue struct
- */
-
-
-
-/*
- *  Layer 3 packet demultiplexer
- *  drv.c
- */
-
-extern void pcbit_l3_receive(struct pcbit_dev *dev, ulong msg,
-			     struct sk_buff *skb,
-			     ushort hdr_len, ushort refnum);
-
 /*
  *  Prototypes
  */
 
-void pcbit_deliver(void *data);
 static void pcbit_transmit(struct pcbit_dev *dev);
 
 static void pcbit_recv_ack(struct pcbit_dev *dev, unsigned char ack);
@@ -94,15 +76,15 @@ pcbit_l2_write(struct pcbit_dev *dev, ulong msg, ushort refnum,
 	       struct sk_buff *skb, unsigned short hdr_len)
 {
 	struct frame_buf *frame,
-	*ptr;
+		*ptr;
 	unsigned long flags;
 
 	if (dev->l2_state != L2_RUNNING && dev->l2_state != L2_LOADING) {
 		dev_kfree_skb(skb);
 		return -1;
 	}
-	if ((frame = (struct frame_buf *) kmalloc(sizeof(struct frame_buf),
-						  GFP_ATOMIC)) == NULL) {
+	if ((frame = kmalloc(sizeof(struct frame_buf),
+			     GFP_ATOMIC)) == NULL) {
 		printk(KERN_WARNING "pcbit_2_write: kmalloc failed\n");
 		dev_kfree_skb(skb);
 		return -1;
@@ -164,7 +146,7 @@ pcbit_transmit(struct pcbit_dev *dev)
 	int flen;               /* fragment frame length including all headers */
 	int free;
 	int count,
-	 cp_len;
+		cp_len;
 	unsigned long flags;
 	unsigned short tt;
 
@@ -194,7 +176,7 @@ pcbit_transmit(struct pcbit_dev *dev)
 
 			/* Type 0 frame */
 
-			ulong 	msg;
+			ulong	msg;
 
 			if (frame->skb)
 				flen = FRAME_HDR_LEN + PREHDR_LEN + frame->skb->len;
@@ -287,7 +269,7 @@ pcbit_transmit(struct pcbit_dev *dev)
 		spin_unlock_irqrestore(&dev->lock, flags);
 #ifdef DEBUG
 		printk(KERN_DEBUG "unacked %d free %d write_queue %s\n",
-		     unacked, dev->free, dev->write_queue ? "not empty" :
+		       unacked, dev->free, dev->write_queue ? "not empty" :
 		       "empty");
 #endif
 	}
@@ -299,11 +281,12 @@ pcbit_transmit(struct pcbit_dev *dev)
  */
 
 void
-pcbit_deliver(void *data)
+pcbit_deliver(struct work_struct *work)
 {
 	struct frame_buf *frame;
 	unsigned long flags, msg;
-	struct pcbit_dev *dev = (struct pcbit_dev *) data;
+	struct pcbit_dev *dev =
+		container_of(work, struct pcbit_dev, qdelivery);
 
 	spin_lock_irqsave(&dev->lock, flags);
 
@@ -311,13 +294,14 @@ pcbit_deliver(void *data)
 		dev->read_queue = frame->next;
 		spin_unlock_irqrestore(&dev->lock, flags);
 
+		msg = 0;
 		SET_MSG_CPU(msg, 0);
 		SET_MSG_PROC(msg, 0);
 		SET_MSG_CMD(msg, frame->skb->data[2]);
 		SET_MSG_SCMD(msg, frame->skb->data[3]);
 
-		frame->refnum = *((ushort *) frame->skb->data + 4);
-		frame->msg = *((ulong *) & msg);
+		frame->refnum = *((ushort *)frame->skb->data + 4);
+		frame->msg = *((ulong *)&msg);
 
 		skb_pull(frame->skb, 6);
 
@@ -341,7 +325,7 @@ pcbit_receive(struct pcbit_dev *dev)
 {
 	unsigned short tt;
 	u_char cpu,
-	 proc;
+		proc;
 	struct frame_buf *frame = NULL;
 	unsigned long flags;
 	u_char type1;
@@ -363,18 +347,16 @@ pcbit_receive(struct pcbit_dev *dev)
 		if (dev->read_frame) {
 			printk(KERN_DEBUG "pcbit_receive: Type 0 frame and read_frame != NULL\n");
 			/* discard previous queued frame */
-			if (dev->read_frame->skb)
-				kfree_skb(dev->read_frame->skb);
+			kfree_skb(dev->read_frame->skb);
 			kfree(dev->read_frame);
 			dev->read_frame = NULL;
 		}
-		frame = kmalloc(sizeof(struct frame_buf), GFP_ATOMIC);
+		frame = kzalloc(sizeof(struct frame_buf), GFP_ATOMIC);
 
 		if (frame == NULL) {
 			printk(KERN_WARNING "kmalloc failed\n");
 			return;
 		}
-		memset(frame, 0, sizeof(struct frame_buf));
 
 		cpu = pcbit_readb(dev);
 		proc = pcbit_readb(dev);
@@ -395,10 +377,10 @@ pcbit_receive(struct pcbit_dev *dev)
 		frame->dt_len = pcbit_readw(dev);
 
 		/*
-		   * 0 sized packet
-		   * I don't know if they are an error or not...
-		   * But they are very frequent
-		   * Not documented
+		 * 0 sized packet
+		 * I don't know if they are an error or not...
+		 * But they are very frequent
+		 * Not documented
 		 */
 
 		if (frame->hdr_len == 0) {
@@ -512,12 +494,12 @@ pcbit_firmware_bug(struct pcbit_dev *dev)
 }
 
 irqreturn_t
-pcbit_irq_handler(int interrupt, void *devptr, struct pt_regs *regs)
+pcbit_irq_handler(int interrupt, void *devptr)
 {
 	struct pcbit_dev *dev;
 	u_char info,
-	 ack_seq,
-	 read_seq;
+		ack_seq,
+		read_seq;
 
 	dev = (struct pcbit_dev *) devptr;
 
@@ -618,8 +600,7 @@ pcbit_l2_err_recover(unsigned long data)
 	dev->w_busy = dev->r_busy = 1;
 
 	if (dev->read_frame) {
-		if (dev->read_frame->skb)
-			kfree_skb(dev->read_frame->skb);
+		kfree_skb(dev->read_frame->skb);
 		kfree(dev->read_frame);
 		dev->read_frame = NULL;
 	}
@@ -684,7 +665,7 @@ static void
 pcbit_recv_ack(struct pcbit_dev *dev, unsigned char ack)
 {
 	int i,
-	 count;
+		count;
 	int unacked;
 
 	unacked = (dev->send_seq + (8 - dev->unack_seq)) & 0x07;
@@ -696,13 +677,13 @@ pcbit_recv_ack(struct pcbit_dev *dev, unsigned char ack)
 		if (dev->send_seq > dev->unack_seq) {
 			if (ack <= dev->unack_seq || ack > dev->send_seq) {
 				printk(KERN_DEBUG
-				     "layer 2 ack unacceptable - dev %d",
+				       "layer 2 ack unacceptable - dev %d",
 				       dev->id);
 
 				pcbit_l2_error(dev);
 			} else if (ack > dev->send_seq && ack <= dev->unack_seq) {
 				printk(KERN_DEBUG
-				     "layer 2 ack unacceptable - dev %d",
+				       "layer 2 ack unacceptable - dev %d",
 				       dev->id);
 				pcbit_l2_error(dev);
 			}

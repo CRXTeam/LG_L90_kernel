@@ -17,22 +17,22 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/types.h>
 #include <linux/string.h>
 #include <linux/mm.h>
+#include <linux/io.h>
 
-#include <asm/hardware.h>
-#include <asm/io.h>
+#include <mach/hardware.h>
 #include <asm/pgtable.h>
 #include <asm/page.h>
 #include <asm/setup.h>
+#include <asm/sizes.h>
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
-#include <asm/arch/syspld.h>
+#include <mach/syspld.h>
 
 #include "common.h"
 
@@ -42,13 +42,21 @@
  * We map both here.
  */
 static struct map_desc p720t_io_desc[] __initdata = {
-	{ SYSPLD_VIRT_BASE,	SYSPLD_PHYS_BASE, 1048576, MT_DEVICE },
-	{ 0xfe400000,		0x10400000,	  1048576, MT_DEVICE }
+	{
+		.virtual	= SYSPLD_VIRT_BASE,
+		.pfn		= __phys_to_pfn(SYSPLD_PHYS_BASE),
+		.length		= SZ_1M,
+		.type		= MT_DEVICE
+	}, {
+		.virtual	= 0xfe400000,
+		.pfn		= __phys_to_pfn(0x10400000),
+		.length		= SZ_1M,
+		.type		= MT_DEVICE
+	}
 };
 
 static void __init
-fixup_p720t(struct machine_desc *desc, struct tag *tag,
-	    char **cmdline, struct meminfo *mi)
+fixup_p720t(struct tag *tag, char **cmdline, struct meminfo *mi)
 {
 	/*
 	 * Our bootloader doesn't setup any tags (yet).
@@ -79,13 +87,13 @@ static void __init p720t_map_io(void)
 }
 
 MACHINE_START(P720T, "ARM-Prospector720T")
-	MAINTAINER("ARM Ltd/Deep Blue Solutions Ltd")
-	BOOT_MEM(0xc0000000, 0x80000000, 0xff000000)
-	BOOT_PARAMS(0xc0000100)
-	FIXUP(fixup_p720t)
-	MAPIO(p720t_map_io)
-	INITIRQ(clps711x_init_irq)
+	/* Maintainer: ARM Ltd/Deep Blue Solutions Ltd */
+	.atag_offset	= 0x100,
+	.fixup		= fixup_p720t,
+	.map_io		= p720t_map_io,
+	.init_irq	= clps711x_init_irq,
 	.timer		= &clps711x_timer,
+	.restart	= clps711x_restart,
 MACHINE_END
 
 static int p720t_hw_init(void)

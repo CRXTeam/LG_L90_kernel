@@ -4,7 +4,6 @@
 /*
  * MIPS floating point support
  * Copyright (C) 1994-2000 Algorithmics Ltd.
- * http://www.algor.co.uk
  *
  * ########################################################################
  *
@@ -37,7 +36,7 @@ static const unsigned table[] = {
 
 ieee754dp ieee754dp_sqrt(ieee754dp x)
 {
-	struct ieee754_csr oldcsr;
+	struct _ieee754_csr oldcsr;
 	ieee754dp y, z, t;
 	unsigned scalx, yh;
 	COMPXDP;

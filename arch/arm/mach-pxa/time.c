@@ -1,133 +1,134 @@
 /*
  * arch/arm/mach-pxa/time.c
  *
- * Author:	Nicolas Pitre
- * Created:	Jun 15, 2001
- * Copyright:	MontaVista Software Inc.
+ * PXA clocksource, clockevents, and OST interrupt handlers.
+ * Copyright (c) 2007 by Bill Gatliff <bgat@billgatliff.com>.
+ *
+ * Derived from Nicolas Pitre's PXA timer handler Copyright (c) 2001
+ * by MontaVista Software, Inc.  (Nico, your code rocks!)
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
-#include <linux/delay.h>
 #include <linux/interrupt.h>
-#include <linux/time.h>
-#include <linux/signal.h>
-#include <linux/errno.h>
-#include <linux/sched.h>
+#include <linux/clockchips.h>
 
-#include <asm/system.h>
-#include <asm/hardware.h>
-#include <asm/io.h>
-#include <asm/leds.h>
-#include <asm/irq.h>
+#include <asm/div64.h>
 #include <asm/mach/irq.h>
 #include <asm/mach/time.h>
-#include <asm/arch/pxa-regs.h>
+#include <asm/sched_clock.h>
+#include <mach/regs-ost.h>
+#include <mach/irqs.h>
 
+/*
+ * This is PXA's sched_clock implementation. This has a resolution
+ * of at least 308 ns and a maximum value of 208 days.
+ *
+ * The return value is guaranteed to be monotonic in that range as
+ * long as there is always less than 582 seconds between successive
+ * calls to sched_clock() which should always be the case in practice.
+ */
 
-static inline unsigned long pxa_get_rtc_time(void)
+static u32 notrace pxa_read_sched_clock(void)
 {
-	return RCNR;
+	return OSCR;
 }
 
-static int pxa_set_rtc(void)
-{
-	unsigned long current_time = xtime.tv_sec;
 
-	if (RTSR & RTSR_ALE) {
-		/* make sure not to forward the clock over an alarm */
-		unsigned long alarm = RTAR;
-		if (current_time >= alarm && alarm >= RCNR)
-			return -ERESTARTSYS;
-	}
-	RCNR = current_time;
-	return 0;
-}
-
-/* IRQs are disabled before entering here from do_gettimeofday() */
-static unsigned long pxa_gettimeoffset (void)
-{
-	long ticks_to_match, elapsed, usec;
-
-	/* Get ticks before next timer match */
-	ticks_to_match = OSMR0 - OSCR;
-
-	/* We need elapsed ticks since last match */
-	elapsed = LATCH - ticks_to_match;
-
-	/* don't get fooled by the workaround in pxa_timer_interrupt() */
-	if (elapsed <= 0)
-		return 0;
-
-	/* Now convert them to usec */
-	usec = (unsigned long)(elapsed * (tick_nsec / 1000))/LATCH;
-
-	return usec;
-}
+#define MIN_OSCR_DELTA 16
 
 static irqreturn_t
-pxa_timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+pxa_ost0_interrupt(int irq, void *dev_id)
 {
-	int next_match;
+	struct clock_event_device *c = dev_id;
 
-	write_seqlock(&xtime_lock);
-
-	/* Loop until we get ahead of the free running timer.
-	 * This ensures an exact clock tick count and time accuracy.
-	 * IRQs are disabled inside the loop to ensure coherence between
-	 * lost_ticks (updated in do_timer()) and the match reg value, so we
-	 * can use do_gettimeofday() from interrupt handlers.
-	 *
-	 * HACK ALERT: it seems that the PXA timer regs aren't updated right
-	 * away in all cases when a write occurs.  We therefore compare with
-	 * 8 instead of 0 in the while() condition below to avoid missing a
-	 * match if OSCR has already reached the next OSMR value.
-	 * Experience has shown that up to 6 ticks are needed to work around
-	 * this problem, but let's use 8 to be conservative.  Note that this
-	 * affect things only when the timer IRQ has been delayed by nearly
-	 * exactly one tick period which should be a pretty rare event.
-	 */
-	do {
-		timer_tick(regs);
-		OSSR = OSSR_M0;  /* Clear match on timer 0 */
-		next_match = (OSMR0 += LATCH);
-	} while( (signed long)(next_match - OSCR) <= 8 );
-
-	write_sequnlock(&xtime_lock);
+	/* Disarm the compare/match, signal the event. */
+	OIER &= ~OIER_E0;
+	OSSR = OSSR_M0;
+	c->event_handler(c);
 
 	return IRQ_HANDLED;
 }
 
-static struct irqaction pxa_timer_irq = {
-	.name		= "PXA Timer Tick",
-	.flags		= SA_INTERRUPT,
-	.handler	= pxa_timer_interrupt
+static int
+pxa_osmr0_set_next_event(unsigned long delta, struct clock_event_device *dev)
+{
+	unsigned long next, oscr;
+
+	OIER |= OIER_E0;
+	next = OSCR + delta;
+	OSMR0 = next;
+	oscr = OSCR;
+
+	return (signed)(next - oscr) <= MIN_OSCR_DELTA ? -ETIME : 0;
+}
+
+static void
+pxa_osmr0_set_mode(enum clock_event_mode mode, struct clock_event_device *dev)
+{
+	switch (mode) {
+	case CLOCK_EVT_MODE_ONESHOT:
+		OIER &= ~OIER_E0;
+		OSSR = OSSR_M0;
+		break;
+
+	case CLOCK_EVT_MODE_UNUSED:
+	case CLOCK_EVT_MODE_SHUTDOWN:
+		/* initializing, released, or preparing for suspend */
+		OIER &= ~OIER_E0;
+		OSSR = OSSR_M0;
+		break;
+
+	case CLOCK_EVT_MODE_RESUME:
+	case CLOCK_EVT_MODE_PERIODIC:
+		break;
+	}
+}
+
+static struct clock_event_device ckevt_pxa_osmr0 = {
+	.name		= "osmr0",
+	.features	= CLOCK_EVT_FEAT_ONESHOT,
+	.rating		= 200,
+	.set_next_event	= pxa_osmr0_set_next_event,
+	.set_mode	= pxa_osmr0_set_mode,
+};
+
+static struct irqaction pxa_ost0_irq = {
+	.name		= "ost0",
+	.flags		= IRQF_DISABLED | IRQF_TIMER | IRQF_IRQPOLL,
+	.handler	= pxa_ost0_interrupt,
+	.dev_id		= &ckevt_pxa_osmr0,
 };
 
 static void __init pxa_timer_init(void)
 {
-	struct timespec tv;
+	unsigned long clock_tick_rate = get_clock_tick_rate();
 
-	set_rtc = pxa_set_rtc;
+	OIER = 0;
+	OSSR = OSSR_M0 | OSSR_M1 | OSSR_M2 | OSSR_M3;
 
-	tv.tv_nsec = 0;
-	tv.tv_sec = pxa_get_rtc_time();
-	do_settimeofday(&tv);
+	setup_sched_clock(pxa_read_sched_clock, 32, clock_tick_rate);
 
-	OSMR0 = 0;		/* set initial match at 0 */
-	OSSR = 0xf;		/* clear status on all timers */
-	setup_irq(IRQ_OST0, &pxa_timer_irq);
-	OIER |= OIER_E0;	/* enable match on timer 0 to cause interrupts */
-	OSCR = 0;		/* initialize free-running timer, force first match */
+	clockevents_calc_mult_shift(&ckevt_pxa_osmr0, clock_tick_rate, 4);
+	ckevt_pxa_osmr0.max_delta_ns =
+		clockevent_delta2ns(0x7fffffff, &ckevt_pxa_osmr0);
+	ckevt_pxa_osmr0.min_delta_ns =
+		clockevent_delta2ns(MIN_OSCR_DELTA * 2, &ckevt_pxa_osmr0) + 1;
+	ckevt_pxa_osmr0.cpumask = cpumask_of(0);
+
+	setup_irq(IRQ_OST0, &pxa_ost0_irq);
+
+	clocksource_mmio_init(&OSCR, "oscr0", clock_tick_rate, 200, 32,
+		clocksource_mmio_readl_up);
+	clockevents_register_device(&ckevt_pxa_osmr0);
 }
 
 #ifdef CONFIG_PM
-static unsigned long osmr[4], oier;
+static unsigned long osmr[4], oier, oscr;
 
 static void pxa_timer_suspend(void)
 {
@@ -136,20 +137,26 @@ static void pxa_timer_suspend(void)
 	osmr[2] = OSMR2;
 	osmr[3] = OSMR3;
 	oier = OIER;
+	oscr = OSCR;
 }
 
 static void pxa_timer_resume(void)
 {
+	/*
+	 * Ensure that we have at least MIN_OSCR_DELTA between match
+	 * register 0 and the OSCR, to guarantee that we will receive
+	 * the one-shot timer interrupt.  We adjust OSMR0 in preference
+	 * to OSCR to guarantee that OSCR is monotonically incrementing.
+	 */
+	if (osmr[0] - oscr < MIN_OSCR_DELTA)
+		osmr[0] += MIN_OSCR_DELTA;
+
 	OSMR0 = osmr[0];
 	OSMR1 = osmr[1];
 	OSMR2 = osmr[2];
 	OSMR3 = osmr[3];
 	OIER = oier;
-
-	/*
-	 * OSMR0 is the system timer: make sure OSCR is sufficiently behind
-	 */
-	OSCR = OSMR0 - LATCH;
+	OSCR = oscr;
 }
 #else
 #define pxa_timer_suspend NULL
@@ -160,5 +167,4 @@ struct sys_timer pxa_timer = {
 	.init		= pxa_timer_init,
 	.suspend	= pxa_timer_suspend,
 	.resume		= pxa_timer_resume,
-	.offset		= pxa_gettimeoffset,
 };

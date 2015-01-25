@@ -2,7 +2,7 @@
 ** PARISC 1.1 Dynamic DMA mapping support.
 ** This implementation is for PA-RISC platforms that do not support
 ** I/O TLBs (aka DMA address translation hardware).
-** See Documentation/DMA-mapping.txt for interface definitions.
+** See Documentation/DMA-API-HOWTO.txt for interface definitions.
 **
 **      (c) Copyright 1999,2000 Hewlett-Packard Company
 **      (c) Copyright 2000 Grant Grundler
@@ -18,12 +18,15 @@
 */
 
 #include <linux/init.h>
+#include <linux/gfp.h>
 #include <linux/mm.h>
 #include <linux/pci.h>
 #include <linux/proc_fs.h>
-#include <linux/slab.h>
+#include <linux/seq_file.h>
 #include <linux/string.h>
 #include <linux/types.h>
+#include <linux/scatterlist.h>
+#include <linux/export.h>
 
 #include <asm/cacheflush.h>
 #include <asm/dma.h>    /* for DMA_CHUNK_SIZE */
@@ -31,12 +34,11 @@
 #include <asm/page.h>	/* get_order */
 #include <asm/pgalloc.h>
 #include <asm/uaccess.h>
+#include <asm/tlbflush.h>	/* for purge_tlb_*() macros */
 
-
-static struct proc_dir_entry * proc_gsc_root = NULL;
-static int pcxl_proc_info(char *buffer, char **start, off_t offset, int length);
-static unsigned long pcxl_used_bytes = 0;
-static unsigned long pcxl_used_pages = 0;
+static struct proc_dir_entry * proc_gsc_root __read_mostly = NULL;
+static unsigned long pcxl_used_bytes __read_mostly = 0;
+static unsigned long pcxl_used_pages __read_mostly = 0;
 
 extern unsigned long pcxl_dma_start; /* Start of pcxl dma mapping area */
 static spinlock_t   pcxl_res_lock;
@@ -89,12 +91,14 @@ static inline int map_pte_uncached(pte_t * pte,
 	if (end > PMD_SIZE)
 		end = PMD_SIZE;
 	do {
+		unsigned long flags;
+
 		if (!pte_none(*pte))
 			printk(KERN_ERR "map_pte_uncached: page already exists\n");
 		set_pte(pte, __mk_pte(*paddr_ptr, PAGE_KERNEL_UNC));
-		purge_tlb_start();
+		purge_tlb_start(flags);
 		pdtlb_kernel(orig_vaddr);
-		purge_tlb_end();
+		purge_tlb_end(flags);
 		vaddr += PAGE_SIZE;
 		orig_vaddr += PAGE_SIZE;
 		(*paddr_ptr) += PAGE_SIZE;
@@ -114,7 +118,7 @@ static inline int map_pmd_uncached(pmd_t * pmd, unsigned long vaddr,
 	if (end > PGDIR_SIZE)
 		end = PGDIR_SIZE;
 	do {
-		pte_t * pte = pte_alloc_kernel(&init_mm, pmd, vaddr);
+		pte_t * pte = pte_alloc_kernel(pmd, vaddr);
 		if (!pte)
 			return -ENOMEM;
 		if (map_pte_uncached(pte, orig_vaddr, end - vaddr, paddr_ptr))
@@ -167,11 +171,13 @@ static inline void unmap_uncached_pte(pmd_t * pmd, unsigned long vaddr,
 	if (end > PMD_SIZE)
 		end = PMD_SIZE;
 	do {
+		unsigned long flags;
 		pte_t page = *pte;
+
 		pte_clear(&init_mm, vaddr, pte);
-		purge_tlb_start();
+		purge_tlb_start(flags);
 		pdtlb_kernel(orig_vaddr);
-		purge_tlb_end();
+		purge_tlb_end(flags);
 		vaddr += PAGE_SIZE;
 		orig_vaddr += PAGE_SIZE;
 		pte++;
@@ -330,26 +336,84 @@ pcxl_free_range(unsigned long vaddr, size_t size)
 	dump_resmap();
 }
 
+static int proc_pcxl_dma_show(struct seq_file *m, void *v)
+{
+#if 0
+	u_long i = 0;
+	unsigned long *res_ptr = (u_long *)pcxl_res_map;
+#endif
+	unsigned long total_pages = pcxl_res_size << 3;   /* 8 bits per byte */
+
+	seq_printf(m, "\nDMA Mapping Area size    : %d bytes (%ld pages)\n",
+		PCXL_DMA_MAP_SIZE, total_pages);
+
+	seq_printf(m, "Resource bitmap : %d bytes\n", pcxl_res_size);
+
+	seq_puts(m,  "     	  total:    free:    used:   % used:\n");
+	seq_printf(m, "blocks  %8d %8ld %8ld %8ld%%\n", pcxl_res_size,
+		pcxl_res_size - pcxl_used_bytes, pcxl_used_bytes,
+		(pcxl_used_bytes * 100) / pcxl_res_size);
+
+	seq_printf(m, "pages   %8ld %8ld %8ld %8ld%%\n", total_pages,
+		total_pages - pcxl_used_pages, pcxl_used_pages,
+		(pcxl_used_pages * 100 / total_pages));
+
+#if 0
+	seq_puts(m, "\nResource bitmap:");
+
+	for(; i < (pcxl_res_size / sizeof(u_long)); ++i, ++res_ptr) {
+		if ((i & 7) == 0)
+		    seq_puts(m,"\n   ");
+		seq_printf(m, "%s %08lx", buf, *res_ptr);
+	}
+#endif
+	seq_putc(m, '\n');
+	return 0;
+}
+
+static int proc_pcxl_dma_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, proc_pcxl_dma_show, NULL);
+}
+
+static const struct file_operations proc_pcxl_dma_ops = {
+	.owner		= THIS_MODULE,
+	.open		= proc_pcxl_dma_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
 static int __init
 pcxl_dma_init(void)
 {
-    if (pcxl_dma_start == 0)
-	return 0;
+	if (pcxl_dma_start == 0)
+		return 0;
 
-    spin_lock_init(&pcxl_res_lock);
-    pcxl_res_size = PCXL_DMA_MAP_SIZE >> (PAGE_SHIFT + 3);
-    pcxl_res_hint = 0;
-    pcxl_res_map = (char *)__get_free_pages(GFP_KERNEL,
+	spin_lock_init(&pcxl_res_lock);
+	pcxl_res_size = PCXL_DMA_MAP_SIZE >> (PAGE_SHIFT + 3);
+	pcxl_res_hint = 0;
+	pcxl_res_map = (char *)__get_free_pages(GFP_KERNEL,
 					    get_order(pcxl_res_size));
-    memset(pcxl_res_map, 0, pcxl_res_size);
-    proc_gsc_root = proc_mkdir("gsc", 0);
-    create_proc_info_entry("dino", 0, proc_gsc_root, pcxl_proc_info);
-    return 0;
+	memset(pcxl_res_map, 0, pcxl_res_size);
+	proc_gsc_root = proc_mkdir("gsc", NULL);
+	if (!proc_gsc_root)
+    		printk(KERN_WARNING
+			"pcxl_dma_init: Unable to create gsc /proc dir entry\n");
+	else {
+		struct proc_dir_entry* ent;
+		ent = proc_create("pcxl_dma", 0, proc_gsc_root,
+				  &proc_pcxl_dma_ops);
+		if (!ent)
+			printk(KERN_WARNING
+				"pci-dma.c: Unable to create pcxl_dma /proc entry.\n");
+	}
+	return 0;
 }
 
 __initcall(pcxl_dma_init);
 
-static void * pa11_dma_alloc_consistent (struct device *dev, size_t size, dma_addr_t *dma_handle, int flag)
+static void * pa11_dma_alloc_consistent (struct device *dev, size_t size, dma_addr_t *dma_handle, gfp_t flag)
 {
 	unsigned long vaddr;
 	unsigned long paddr;
@@ -388,10 +452,7 @@ static void pa11_dma_free_consistent (struct device *dev, size_t size, void *vad
 
 static dma_addr_t pa11_dma_map_single(struct device *dev, void *addr, size_t size, enum dma_data_direction direction)
 {
-	if (direction == DMA_NONE) {
-		printk(KERN_ERR "pa11_dma_map_single(PCI_DMA_NONE) called by %p\n", __builtin_return_address(0));
-		BUG();
-	}
+	BUG_ON(direction == DMA_NONE);
 
 	flush_kernel_dcache_range((unsigned long) addr, size);
 	return virt_to_phys(addr);
@@ -399,10 +460,7 @@ static dma_addr_t pa11_dma_map_single(struct device *dev, void *addr, size_t siz
 
 static void pa11_dma_unmap_single(struct device *dev, dma_addr_t dma_handle, size_t size, enum dma_data_direction direction)
 {
-	if (direction == DMA_NONE) {
-		printk(KERN_ERR "pa11_dma_unmap_single(PCI_DMA_NONE) called by %p\n", __builtin_return_address(0));
-		BUG();
-	}
+	BUG_ON(direction == DMA_NONE);
 
 	if (direction == DMA_TO_DEVICE)
 	    return;
@@ -421,8 +479,7 @@ static int pa11_dma_map_sg(struct device *dev, struct scatterlist *sglist, int n
 {
 	int i;
 
-	if (direction == DMA_NONE)
-	    BUG();
+	BUG_ON(direction == DMA_NONE);
 
 	for (i = 0; i < nents; i++, sglist++ ) {
 		unsigned long vaddr = sg_virt_addr(sglist);
@@ -437,8 +494,7 @@ static void pa11_dma_unmap_sg(struct device *dev, struct scatterlist *sglist, in
 {
 	int i;
 
-	if (direction == DMA_NONE)
-	    BUG();
+	BUG_ON(direction == DMA_NONE);
 
 	if (direction == DMA_TO_DEVICE)
 	    return;
@@ -452,16 +508,14 @@ static void pa11_dma_unmap_sg(struct device *dev, struct scatterlist *sglist, in
 
 static void pa11_dma_sync_single_for_cpu(struct device *dev, dma_addr_t dma_handle, unsigned long offset, size_t size, enum dma_data_direction direction)
 {
-	if (direction == DMA_NONE)
-	    BUG();
+	BUG_ON(direction == DMA_NONE);
 
 	flush_kernel_dcache_range((unsigned long) phys_to_virt(dma_handle) + offset, size);
 }
 
 static void pa11_dma_sync_single_for_device(struct device *dev, dma_addr_t dma_handle, unsigned long offset, size_t size, enum dma_data_direction direction)
 {
-	if (direction == DMA_NONE)
-	    BUG();
+	BUG_ON(direction == DMA_NONE);
 
 	flush_kernel_dcache_range((unsigned long) phys_to_virt(dma_handle) + offset, size);
 }
@@ -502,19 +556,18 @@ struct hppa_dma_ops pcxl_dma_ops = {
 };
 
 static void *fail_alloc_consistent(struct device *dev, size_t size,
-				   dma_addr_t *dma_handle, int flag)
+				   dma_addr_t *dma_handle, gfp_t flag)
 {
 	return NULL;
 }
 
 static void *pa11_dma_alloc_noncoherent(struct device *dev, size_t size,
-					  dma_addr_t *dma_handle, int flag)
+					  dma_addr_t *dma_handle, gfp_t flag)
 {
-	void *addr = NULL;
+	void *addr;
 
-	/* rely on kmalloc to be cacheline aligned */
-	addr = kmalloc(size, flag);
-	if(addr)
+	addr = (void *)__get_free_pages(flag, get_order(size));
+	if (addr)
 		*dma_handle = (dma_addr_t)virt_to_phys(addr);
 
 	return addr;
@@ -523,7 +576,7 @@ static void *pa11_dma_alloc_noncoherent(struct device *dev, size_t size,
 static void pa11_dma_free_noncoherent(struct device *dev, size_t size,
 					void *vaddr, dma_addr_t iova)
 {
-	kfree(vaddr);
+	free_pages((unsigned long)vaddr, get_order(size));
 	return;
 }
 
@@ -541,38 +594,3 @@ struct hppa_dma_ops pcx_dma_ops = {
 	.dma_sync_sg_for_cpu =		pa11_dma_sync_sg_for_cpu,
 	.dma_sync_sg_for_device =	pa11_dma_sync_sg_for_device,
 };
-
-
-static int pcxl_proc_info(char *buf, char **start, off_t offset, int len)
-{
-	u_long i = 0;
-	unsigned long *res_ptr = (u_long *)pcxl_res_map;
-	unsigned long total_pages = pcxl_res_size << 3;        /* 8 bits per byte */
-
-	sprintf(buf, "\nDMA Mapping Area size    : %d bytes (%d pages)\n",
-		PCXL_DMA_MAP_SIZE,
-		(pcxl_res_size << 3) ); /* 1 bit per page */
-	
-	sprintf(buf, "%sResource bitmap : %d bytes (%d pages)\n", 
-		buf, pcxl_res_size, pcxl_res_size << 3);   /* 8 bits per byte */
-
-	strcat(buf,  "     	  total:    free:    used:   % used:\n");
-	sprintf(buf, "%sblocks  %8d %8ld %8ld %8ld%%\n", buf, pcxl_res_size,
-		pcxl_res_size - pcxl_used_bytes, pcxl_used_bytes,
-		(pcxl_used_bytes * 100) / pcxl_res_size);
-
-	sprintf(buf, "%spages   %8ld %8ld %8ld %8ld%%\n", buf, total_pages,
-		total_pages - pcxl_used_pages, pcxl_used_pages,
-		(pcxl_used_pages * 100 / total_pages));
-	
-	strcat(buf, "\nResource bitmap:");
-
-	for(; i < (pcxl_res_size / sizeof(u_long)); ++i, ++res_ptr) {
-		if ((i & 7) == 0)
-		    strcat(buf,"\n   ");
-		sprintf(buf, "%s %08lx", buf, *res_ptr);
-	}
-	strcat(buf, "\n");
-	return strlen(buf);
-}
-

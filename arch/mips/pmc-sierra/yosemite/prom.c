@@ -8,18 +8,18 @@
  * Author: Manish Lachwani (lachwani@pmc-sierra.com)
  * Copyright (C) 2004 Ralf Baechle
  */
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/delay.h>
+#include <linux/pm.h>
 #include <linux/smp.h>
 
 #include <asm/io.h>
 #include <asm/pgtable.h>
 #include <asm/processor.h>
 #include <asm/reboot.h>
-#include <asm/system.h>
+#include <asm/smp-ops.h>
 #include <asm/bootinfo.h>
 #include <asm/pmon.h>
 
@@ -34,7 +34,7 @@ extern void prom_grab_secondary(void);
 struct callvectors *debug_vectors;
 
 extern unsigned long yosemite_base;
-extern unsigned long cpu_clock;
+extern unsigned long cpu_clock_freq;
 
 const char *get_system_type(void)
 {
@@ -63,7 +63,7 @@ static void prom_exit(void)
 #ifdef CONFIG_SMP
 	if (smp_processor_id())
 		/* CPU 1 */
-		smp_call_function(prom_cpu0_exit, NULL, 1, 1);
+		smp_call_function(prom_cpu0_exit, NULL, 1);
 #endif
 	prom_cpu0_exit(NULL);
 }
@@ -77,6 +77,8 @@ static void prom_halt(void)
 	while (1)
 		__asm__(".set\tmips3\n\t" "wait\n\t" ".set\tmips0");
 }
+
+extern struct plat_smp_ops yos_smp_ops;
 
 /*
  * Init routine which accepts the variables from PMON
@@ -92,14 +94,14 @@ void __init prom_init(void)
 	/* Callbacks for halt, restart */
 	_machine_restart = (void (*)(char *)) prom_exit;
 	_machine_halt = prom_halt;
-	_machine_power_off = prom_halt;
+	pm_power_off = prom_halt;
 
 	debug_vectors = cv;
 	arcs_cmdline[0] = '\0';
 
 	/* Get the boot parameters */
 	for (i = 1; i < argc; i++) {
-		if (strlen(arcs_cmdline) + strlen(arg[i] + 1) >=
+		if (strlen(arcs_cmdline) + strlen(arg[i]) + 1 >=
 		    sizeof(arcs_cmdline))
 			break;
 
@@ -119,17 +121,16 @@ void __init prom_init(void)
 					  16);
 
 		if (strncmp("cpuclock", *env, strlen("cpuclock")) == 0)
-			cpu_clock =
+			cpu_clock_freq =
 			    simple_strtol(*env + strlen("cpuclock="), NULL,
 					  10);
 
 		env++;
 	}
 
-	mips_machgroup = MACH_GROUP_TITAN;
-	mips_machtype = MACH_TITAN_YOSEMITE;
-
 	prom_grab_secondary();
+
+	register_smp_ops(&yos_smp_ops);
 }
 
 void __init prom_free_prom_memory(void)

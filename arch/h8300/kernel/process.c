@@ -22,28 +22,28 @@
  * This file handles the architecture-dependent parts of process handling..
  */
 
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/slab.h>
 #include <linux/user.h>
-#include <linux/a.out.h>
 #include <linux/interrupt.h>
 #include <linux/reboot.h>
+#include <linux/fs.h>
+#include <linux/slab.h>
 
 #include <asm/uaccess.h>
-#include <asm/system.h>
 #include <asm/traps.h>
 #include <asm/setup.h>
 #include <asm/pgtable.h>
+
+void (*pm_power_off)(void) = NULL;
+EXPORT_SYMBOL(pm_power_off);
 
 asmlinkage void ret_from_fork(void);
 
@@ -51,24 +51,20 @@ asmlinkage void ret_from_fork(void);
  * The idle loop on an H8/300..
  */
 #if !defined(CONFIG_H8300H_SIM) && !defined(CONFIG_H8S_SIM)
-void default_idle(void)
+static void default_idle(void)
 {
-	while(1) {
-		if (need_resched()) {
-			local_irq_enable();
-			__asm__("sleep");
-			local_irq_disable();
-		}
-		schedule();
-	}
+	local_irq_disable();
+	if (!need_resched()) {
+		local_irq_enable();
+		/* XXX: race here! What if need_resched() gets set now? */
+		__asm__("sleep");
+	} else
+		local_irq_enable();
 }
 #else
-void default_idle(void)
+static void default_idle(void)
 {
-	while(1) {
-		if (need_resched())
-			schedule();
-	}
+	cpu_relax();
 }
 #endif
 void (*idle)(void) = default_idle;
@@ -81,7 +77,11 @@ void (*idle)(void) = default_idle;
  */
 void cpu_idle(void)
 {
-	idle();
+	while (1) {
+		while (!need_resched())
+			idle();
+		schedule_preempt_disabled();
+	}
 }
 
 void machine_restart(char * __unused)
@@ -90,8 +90,6 @@ void machine_restart(char * __unused)
 	__asm__("jmp @@0"); 
 }
 
-EXPORT_SYMBOL(machine_restart);
-
 void machine_halt(void)
 {
 	local_irq_disable();
@@ -99,16 +97,12 @@ void machine_halt(void)
 	for (;;);
 }
 
-EXPORT_SYMBOL(machine_halt);
-
 void machine_power_off(void)
 {
 	local_irq_disable();
 	__asm__("sleep");
 	for (;;);
 }
-
-EXPORT_SYMBOL(machine_power_off);
 
 void show_regs(struct pt_regs * regs)
 {
@@ -193,13 +187,13 @@ asmlinkage int h8300_clone(struct pt_regs *regs)
 
 }
 
-int copy_thread(int nr, unsigned long clone_flags,
+int copy_thread(unsigned long clone_flags,
                 unsigned long usp, unsigned long topstk,
 		 struct task_struct * p, struct pt_regs * regs)
 {
 	struct pt_regs * childregs;
 
-	childregs = ((struct pt_regs *) (THREAD_SIZE + (unsigned long) p->thread_info)) - 1;
+	childregs = (struct pt_regs *) (THREAD_SIZE + task_stack_page(p)) - 1;
 
 	*childregs = *regs;
 	childregs->retpc = (unsigned long) ret_from_fork;
@@ -212,51 +206,23 @@ int copy_thread(int nr, unsigned long clone_flags,
 }
 
 /*
- * fill in the user structure for a core dump..
- */
-void dump_thread(struct pt_regs * regs, struct user * dump)
-{
-/* changed the size calculations - should hopefully work better. lbt */
-	dump->magic = CMAGIC;
-	dump->start_code = 0;
-	dump->start_stack = rdusp() & ~(PAGE_SIZE - 1);
-	dump->u_tsize = ((unsigned long) current->mm->end_code) >> PAGE_SHIFT;
-	dump->u_dsize = ((unsigned long) (current->mm->brk +
-					  (PAGE_SIZE-1))) >> PAGE_SHIFT;
-	dump->u_dsize -= dump->u_tsize;
-	dump->u_ssize = 0;
-
-	dump->u_ar0 = (struct user_regs_struct *)(((int)(&dump->regs)) -((int)(dump)));
-	dump->regs.er0 = regs->er0;
-	dump->regs.er1 = regs->er1;
-	dump->regs.er2 = regs->er2;
-	dump->regs.er3 = regs->er3;
-	dump->regs.er4 = regs->er4;
-	dump->regs.er5 = regs->er5;
-	dump->regs.er6 = regs->er6;
-	dump->regs.orig_er0 = regs->orig_er0;
-	dump->regs.ccr = regs->ccr;
-	dump->regs.pc  = regs->pc;
-}
-
-/*
  * sys_execve() executes a new program.
  */
-asmlinkage int sys_execve(char *name, char **argv, char **envp,int dummy,...)
+asmlinkage int sys_execve(const char *name,
+			  const char *const *argv,
+			  const char *const *envp,
+			  int dummy, ...)
 {
 	int error;
 	char * filename;
 	struct pt_regs *regs = (struct pt_regs *) ((unsigned char *)&dummy-4);
 
-	lock_kernel();
 	filename = getname(name);
 	error = PTR_ERR(filename);
 	if (IS_ERR(filename))
-		goto out;
+		return error;
 	error = do_execve(filename, argv, envp, regs);
 	putname(filename);
-out:
-	unlock_kernel();
 	return error;
 }
 

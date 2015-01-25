@@ -1,16 +1,18 @@
 /* fortunet.c memory map
  *
- * $Id: fortunet.c,v 1.9 2004/11/04 13:24:14 gleixner Exp $
  */
 
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
-#include <asm/io.h>
+#include <linux/string.h>
+
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
 #include <linux/mtd/partitions.h>
+
+#include <asm/io.h>
 
 #define MAX_NUM_REGIONS		4
 #define MAX_NUM_PARTITIONS	8
@@ -179,7 +181,7 @@ __setup("MTD_Partition=", MTD_New_Partition);
 /* Backwards-spelling-compatibility */
 __setup("MTD_Partion=", MTD_New_Partition);
 
-int __init init_fortunet(void)
+static int __init init_fortunet(void)
 {
 	int	ix,iy;
 	for(iy=ix=0;ix<MAX_NUM_REGIONS;ix++)
@@ -209,14 +211,17 @@ int __init init_fortunet(void)
 
 			map_regions[ix].map_info.phys =	map_regions[ix].window_addr_physical,
 
-			map_regions[ix].map_info.virt = 
+			map_regions[ix].map_info.virt =
 				ioremap_nocache(
 				map_regions[ix].window_addr_physical,
 				map_regions[ix].map_info.size);
 			if(!map_regions[ix].map_info.virt)
 			{
+				int j = 0;
 				printk(MTD_FORTUNET_PK "%s flash failed to ioremap!\n",
 					map_regions[ix].map_info.name);
+				for (j = 0 ; j < ix; j++)
+					iounmap(map_regions[j].map_info.virt);
 				return -ENXIO;
 			}
 			simple_map_init(&map_regions[ix].map_info);
@@ -238,8 +243,9 @@ int __init init_fortunet(void)
 					&map_regions[ix].map_info);
 			}
 			map_regions[ix].mymtd->owner = THIS_MODULE;
-			add_mtd_partitions(map_regions[ix].mymtd,
-				map_regions[ix].parts,map_regions_parts[ix]);
+			mtd_device_register(map_regions[ix].mymtd,
+					    map_regions[ix].parts,
+					    map_regions_parts[ix]);
 		}
 	}
 	if(iy)
@@ -256,7 +262,7 @@ static void __exit cleanup_fortunet(void)
 		{
 			if( map_regions[ix].mymtd )
 			{
-				del_mtd_partitions( map_regions[ix].mymtd );
+				mtd_device_unregister(map_regions[ix].mymtd);
 				map_destroy( map_regions[ix].mymtd );
 			}
 			iounmap((void *)map_regions[ix].map_info.virt);

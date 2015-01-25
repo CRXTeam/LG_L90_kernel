@@ -34,11 +34,11 @@
  * Send feedback to <scottm@somanetworks.com>
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/errno.h>
 #include <linux/pci.h>
+#include <linux/string.h>
 #include "cpci_hotplug.h"
 
 #define DRIVER_VERSION	"0.1"
@@ -62,7 +62,7 @@
 #define warn(format, arg...) printk(KERN_WARNING "%s: " format "\n", MY_NAME , ## arg)
 
 /* local variables */
-static int debug;
+static bool debug;
 static char *bridge;
 static u8 bridge_busnr;
 static u8 bridge_slot;
@@ -84,7 +84,7 @@ static int __init validate_parameters(void)
 
 	if(!bridge) {
 		info("not configured, disabling.");
-		return 1;
+		return -EINVAL;
 	}
 	str = bridge;
 	if(!*str)
@@ -147,19 +147,26 @@ static int __init cpcihp_generic_init(void)
 
 	info(DRIVER_DESC " version: " DRIVER_VERSION);
 	status = validate_parameters();
-	if(status != 0)
+	if (status)
 		return status;
 
 	r = request_region(port, 1, "#ENUM hotswap signal register");
 	if(!r)
 		return -EBUSY;
 
-	dev = pci_find_slot(bridge_busnr, PCI_DEVFN(bridge_slot, 0));
+	bus = pci_find_bus(0, bridge_busnr);
+	if (!bus) {
+		err("Invalid bus number %d", bridge_busnr);
+		return -EINVAL;
+	}
+	dev = pci_get_slot(bus, PCI_DEVFN(bridge_slot, 0));
 	if(!dev || dev->hdr_type != PCI_HEADER_TYPE_BRIDGE) {
 		err("Invalid bridge device %s", bridge);
+		pci_dev_put(dev);
 		return -EINVAL;
 	}
 	bus = dev->subordinate;
+	pci_dev_put(dev);
 
 	memset(&generic_hpc, 0, sizeof (struct cpci_hp_controller));
 	generic_hpc_ops.query_enum = query_enum;

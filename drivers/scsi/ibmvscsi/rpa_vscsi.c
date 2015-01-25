@@ -28,27 +28,30 @@
  */
 
 #include <asm/vio.h>
+#include <asm/prom.h>
 #include <asm/iommu.h>
 #include <asm/hvcall.h>
+#include <linux/delay.h>
 #include <linux/dma-mapping.h>
+#include <linux/gfp.h>
 #include <linux/interrupt.h>
 #include "ibmvscsi.h"
+
+static char partition_name[97] = "UNKNOWN";
+static unsigned int partition_number = -1;
 
 /* ------------------------------------------------------------
  * Routines for managing the command/response queue
  */
 /**
- * ibmvscsi_handle_event: - Interrupt handler for crq events
+ * rpavscsi_handle_event: - Interrupt handler for crq events
  * @irq:	number of irq to handle, not used
  * @dev_instance: ibmvscsi_host_data of host that received interrupt
- * @regs:	pt_regs with registers
  *
  * Disables interrupts and schedules srp_task
  * Always returns IRQ_HANDLED
  */
-static irqreturn_t ibmvscsi_handle_event(int irq,
-					 void *dev_instance,
-					 struct pt_regs *regs)
+static irqreturn_t rpavscsi_handle_event(int irq, void *dev_instance)
 {
 	struct ibmvscsi_host_data *hostdata =
 	    (struct ibmvscsi_host_data *)dev_instance;
@@ -65,17 +68,19 @@ static irqreturn_t ibmvscsi_handle_event(int irq,
  * Frees irq, deallocates a page for messages, unmaps dma, and unregisters
  * the crq with the hypervisor.
  */
-void ibmvscsi_release_crq_queue(struct crq_queue *queue,
-				struct ibmvscsi_host_data *hostdata,
-				int max_requests)
+static void rpavscsi_release_crq_queue(struct crq_queue *queue,
+				       struct ibmvscsi_host_data *hostdata,
+				       int max_requests)
 {
-	long rc;
+	long rc = 0;
 	struct vio_dev *vdev = to_vio_dev(hostdata->dev);
 	free_irq(vdev->irq, (void *)hostdata);
 	tasklet_kill(&hostdata->srp_task);
 	do {
+		if (rc)
+			msleep(100);
 		rc = plpar_hcall_norets(H_FREE_CRQ, vdev->unit_address);
-	} while ((rc == H_Busy) || (H_isLongBusy(rc)));
+	} while ((rc == H_BUSY) || (H_IS_LONG_BUSY(rc)));
 	dma_unmap_single(hostdata->dev,
 			 queue->msg_token,
 			 queue->size * sizeof(*queue->msgs), DMA_BIDIRECTIONAL);
@@ -107,12 +112,13 @@ static struct viosrp_crq *crq_queue_next_crq(struct crq_queue *queue)
 }
 
 /**
- * ibmvscsi_send_crq: - Send a CRQ
+ * rpavscsi_send_crq: - Send a CRQ
  * @hostdata:	the adapter
  * @word1:	the first 64 bits of the data
  * @word2:	the second 64 bits of the data
  */
-int ibmvscsi_send_crq(struct ibmvscsi_host_data *hostdata, u64 word1, u64 word2)
+static int rpavscsi_send_crq(struct ibmvscsi_host_data *hostdata,
+			     u64 word1, u64 word2)
 {
 	struct vio_dev *vdev = to_vio_dev(hostdata->dev);
 
@@ -120,10 +126,10 @@ int ibmvscsi_send_crq(struct ibmvscsi_host_data *hostdata, u64 word1, u64 word2)
 }
 
 /**
- * ibmvscsi_task: - Process srps asynchronously
+ * rpavscsi_task: - Process srps asynchronously
  * @data:	ibmvscsi_host_data of host
  */
-static void ibmvscsi_task(void *data)
+static void rpavscsi_task(void *data)
 {
 	struct ibmvscsi_host_data *hostdata = (struct ibmvscsi_host_data *)data;
 	struct vio_dev *vdev = to_vio_dev(hostdata->dev);
@@ -148,6 +154,84 @@ static void ibmvscsi_task(void *data)
 	}
 }
 
+static void gather_partition_info(void)
+{
+	struct device_node *rootdn;
+
+	const char *ppartition_name;
+	const unsigned int *p_number_ptr;
+
+	/* Retrieve information about this partition */
+	rootdn = of_find_node_by_path("/");
+	if (!rootdn) {
+		return;
+	}
+
+	ppartition_name = of_get_property(rootdn, "ibm,partition-name", NULL);
+	if (ppartition_name)
+		strncpy(partition_name, ppartition_name,
+				sizeof(partition_name));
+	p_number_ptr = of_get_property(rootdn, "ibm,partition-no", NULL);
+	if (p_number_ptr)
+		partition_number = *p_number_ptr;
+	of_node_put(rootdn);
+}
+
+static void set_adapter_info(struct ibmvscsi_host_data *hostdata)
+{
+	memset(&hostdata->madapter_info, 0x00,
+			sizeof(hostdata->madapter_info));
+
+	dev_info(hostdata->dev, "SRP_VERSION: %s\n", SRP_VERSION);
+	strcpy(hostdata->madapter_info.srp_version, SRP_VERSION);
+
+	strncpy(hostdata->madapter_info.partition_name, partition_name,
+			sizeof(hostdata->madapter_info.partition_name));
+
+	hostdata->madapter_info.partition_number = partition_number;
+
+	hostdata->madapter_info.mad_version = 1;
+	hostdata->madapter_info.os_type = 2;
+}
+
+/**
+ * reset_crq_queue: - resets a crq after a failure
+ * @queue:	crq_queue to initialize and register
+ * @hostdata:	ibmvscsi_host_data of host
+ *
+ */
+static int rpavscsi_reset_crq_queue(struct crq_queue *queue,
+				    struct ibmvscsi_host_data *hostdata)
+{
+	int rc = 0;
+	struct vio_dev *vdev = to_vio_dev(hostdata->dev);
+
+	/* Close the CRQ */
+	do {
+		if (rc)
+			msleep(100);
+		rc = plpar_hcall_norets(H_FREE_CRQ, vdev->unit_address);
+	} while ((rc == H_BUSY) || (H_IS_LONG_BUSY(rc)));
+
+	/* Clean out the queue */
+	memset(queue->msgs, 0x00, PAGE_SIZE);
+	queue->cur = 0;
+
+	set_adapter_info(hostdata);
+
+	/* And re-open it again */
+	rc = plpar_hcall_norets(H_REG_CRQ,
+				vdev->unit_address,
+				queue->msg_token, PAGE_SIZE);
+	if (rc == 2) {
+		/* Adapter is good, but other end is not ready */
+		dev_warn(hostdata->dev, "Partner adapter not ready\n");
+	} else if (rc != 0) {
+		dev_warn(hostdata->dev, "couldn't register crq--rc 0x%x\n", rc);
+	}
+	return rc;
+}
+
 /**
  * initialize_crq_queue: - Initializes and registers CRQ with hypervisor
  * @queue:	crq_queue to initialize and register
@@ -157,11 +241,12 @@ static void ibmvscsi_task(void *data)
  * the crq with the hypervisor.
  * Returns zero on success.
  */
-int ibmvscsi_init_crq_queue(struct crq_queue *queue,
-			    struct ibmvscsi_host_data *hostdata,
-			    int max_requests)
+static int rpavscsi_init_crq_queue(struct crq_queue *queue,
+				   struct ibmvscsi_host_data *hostdata,
+				   int max_requests)
 {
 	int rc;
+	int retrc;
 	struct vio_dev *vdev = to_vio_dev(hostdata->dev);
 
 	queue->msgs = (struct viosrp_crq *)get_zeroed_page(GFP_KERNEL);
@@ -174,47 +259,59 @@ int ibmvscsi_init_crq_queue(struct crq_queue *queue,
 					  queue->size * sizeof(*queue->msgs),
 					  DMA_BIDIRECTIONAL);
 
-	if (dma_mapping_error(queue->msg_token))
+	if (dma_mapping_error(hostdata->dev, queue->msg_token))
 		goto map_failed;
 
-	rc = plpar_hcall_norets(H_REG_CRQ,
+	gather_partition_info();
+	set_adapter_info(hostdata);
+
+	retrc = rc = plpar_hcall_norets(H_REG_CRQ,
 				vdev->unit_address,
 				queue->msg_token, PAGE_SIZE);
+	if (rc == H_RESOURCE)
+		/* maybe kexecing and resource is busy. try a reset */
+		rc = rpavscsi_reset_crq_queue(queue,
+					      hostdata);
+
 	if (rc == 2) {
 		/* Adapter is good, but other end is not ready */
-		printk(KERN_WARNING "ibmvscsi: Partner adapter not ready\n");
+		dev_warn(hostdata->dev, "Partner adapter not ready\n");
+		retrc = 0;
 	} else if (rc != 0) {
-		printk(KERN_WARNING "ibmvscsi: Error %d opening adapter\n", rc);
+		dev_warn(hostdata->dev, "Error %d opening adapter\n", rc);
 		goto reg_crq_failed;
-	}
-
-	if (request_irq(vdev->irq,
-			ibmvscsi_handle_event,
-			0, "ibmvscsi", (void *)hostdata) != 0) {
-		printk(KERN_ERR "ibmvscsi: couldn't register irq 0x%x\n",
-		       vdev->irq);
-		goto req_irq_failed;
-	}
-
-	rc = vio_enable_interrupts(vdev);
-	if (rc != 0) {
-		printk(KERN_ERR "ibmvscsi:  Error %d enabling interrupts!!!\n",
-		       rc);
-		goto req_irq_failed;
 	}
 
 	queue->cur = 0;
 	spin_lock_init(&queue->lock);
 
-	tasklet_init(&hostdata->srp_task, (void *)ibmvscsi_task,
+	tasklet_init(&hostdata->srp_task, (void *)rpavscsi_task,
 		     (unsigned long)hostdata);
 
-	return 0;
+	if (request_irq(vdev->irq,
+			rpavscsi_handle_event,
+			0, "ibmvscsi", (void *)hostdata) != 0) {
+		dev_err(hostdata->dev, "couldn't register irq 0x%x\n",
+			vdev->irq);
+		goto req_irq_failed;
+	}
+
+	rc = vio_enable_interrupts(vdev);
+	if (rc != 0) {
+		dev_err(hostdata->dev, "Error %d enabling interrupts!!!\n", rc);
+		goto req_irq_failed;
+	}
+
+	return retrc;
 
       req_irq_failed:
+	tasklet_kill(&hostdata->srp_task);
+	rc = 0;
 	do {
+		if (rc)
+			msleep(100);
 		rc = plpar_hcall_norets(H_FREE_CRQ, vdev->unit_address);
-	} while ((rc == H_Busy) || (H_isLongBusy(rc)));
+	} while ((rc == H_BUSY) || (H_IS_LONG_BUSY(rc)));
       reg_crq_failed:
 	dma_unmap_single(hostdata->dev,
 			 queue->msg_token,
@@ -226,35 +323,46 @@ int ibmvscsi_init_crq_queue(struct crq_queue *queue,
 }
 
 /**
- * reset_crq_queue: - resets a crq after a failure
+ * reenable_crq_queue: - reenables a crq after
  * @queue:	crq_queue to initialize and register
  * @hostdata:	ibmvscsi_host_data of host
  *
  */
-void ibmvscsi_reset_crq_queue(struct crq_queue *queue,
-			      struct ibmvscsi_host_data *hostdata)
+static int rpavscsi_reenable_crq_queue(struct crq_queue *queue,
+				       struct ibmvscsi_host_data *hostdata)
 {
-	int rc;
+	int rc = 0;
 	struct vio_dev *vdev = to_vio_dev(hostdata->dev);
 
-	/* Close the CRQ */
+	/* Re-enable the CRQ */
 	do {
-		rc = plpar_hcall_norets(H_FREE_CRQ, vdev->unit_address);
-	} while ((rc == H_Busy) || (H_isLongBusy(rc)));
+		if (rc)
+			msleep(100);
+		rc = plpar_hcall_norets(H_ENABLE_CRQ, vdev->unit_address);
+	} while ((rc == H_IN_PROGRESS) || (rc == H_BUSY) || (H_IS_LONG_BUSY(rc)));
 
-	/* Clean out the queue */
-	memset(queue->msgs, 0x00, PAGE_SIZE);
-	queue->cur = 0;
-
-	/* And re-open it again */
-	rc = plpar_hcall_norets(H_REG_CRQ,
-				vdev->unit_address,
-				queue->msg_token, PAGE_SIZE);
-	if (rc == 2) {
-		/* Adapter is good, but other end is not ready */
-		printk(KERN_WARNING "ibmvscsi: Partner adapter not ready\n");
-	} else if (rc != 0) {
-		printk(KERN_WARNING
-		       "ibmvscsi: couldn't register crq--rc 0x%x\n", rc);
-	}
+	if (rc)
+		dev_err(hostdata->dev, "Error %d enabling adapter\n", rc);
+	return rc;
 }
+
+/**
+ * rpavscsi_resume: - resume after suspend
+ * @hostdata:	ibmvscsi_host_data of host
+ *
+ */
+static int rpavscsi_resume(struct ibmvscsi_host_data *hostdata)
+{
+	vio_disable_interrupts(to_vio_dev(hostdata->dev));
+	tasklet_schedule(&hostdata->srp_task);
+	return 0;
+}
+
+struct ibmvscsi_ops rpavscsi_ops = {
+	.init_crq_queue = rpavscsi_init_crq_queue,
+	.release_crq_queue = rpavscsi_release_crq_queue,
+	.reset_crq_queue = rpavscsi_reset_crq_queue,
+	.reenable_crq_queue = rpavscsi_reenable_crq_queue,
+	.send_crq = rpavscsi_send_crq,
+	.resume = rpavscsi_resume,
+};

@@ -3,14 +3,14 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1995, 96, 97, 98, 99, 2000, 01, 02 by Ralf Baechle
+ * Copyright (C) 1995-99, 2000- 02, 06 Ralf Baechle <ralf@linux-mips.org>
  * Copyright (C) 2001 MIPS Technologies, Inc.
  * Copyright (C) 2004 Thiemo Seufer
  */
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <asm/asm.h>
 #include <asm/asmmacro.h>
+#include <asm/irqflags.h>
 #include <asm/mipsregs.h>
 #include <asm/regdef.h>
 #include <asm/stackframe.h>
@@ -19,7 +19,7 @@
 #include <asm/thread_info.h>
 #include <asm/unistd.h>
 #include <asm/war.h>
-#include <asm/offset.h>
+#include <asm/asm-offsets.h>
 
 /* Highest syscall used of any syscall flavour */
 #define MAX_SYSCALL_NO	__NR_O32_Linux + __NR_O32_Linux_syscalls
@@ -28,17 +28,14 @@
 NESTED(handle_sys, PT_SIZE, sp)
 	.set	noat
 	SAVE_SOME
+	TRACE_IRQS_ON_RELOAD
 	STI
 	.set	at
 
 	lw	t1, PT_EPC(sp)		# skip syscall on return
 
-#if defined(CONFIG_BINFMT_IRIX)
-	sltiu	t0, v0, MAX_SYSCALL_NO + 1 # check syscall number
-#else
 	subu	v0, v0, __NR_O32_Linux	# check syscall number
 	sltiu	t0, v0, __NR_O32_Linux_syscalls + 1
-#endif
 	addiu	t1, 4			# skip to next instruction
 	sw	t1, PT_EPC(sp)
 	beqz	t0, illegal_syscall
@@ -66,9 +63,9 @@ stack_done:
 	sw	t0, PT_R7(sp)		# set error flag
 	beqz	t0, 1f
 
+	lw	t1, PT_R2(sp)		# syscall number
 	negu	v0			# error
-	sw	v0, PT_R0(sp)		# set flag for syscall
-					# restarting
+	sw	t1, PT_R0(sp)		# save it for syscall restarting
 1:	sw	v0, PT_R2(sp)		# result
 
 o32_syscall_exit:
@@ -91,23 +88,24 @@ syscall_trace_entry:
 	SAVE_STATIC
 	move	s0, t2
 	move	a0, sp
-	li	a1, 0
-	jal	do_syscall_trace
+	jal	syscall_trace_enter
 
+	move	t0, s0
+	RESTORE_STATIC
 	lw	a0, PT_R4(sp)		# Restore argument registers
 	lw	a1, PT_R5(sp)
 	lw	a2, PT_R6(sp)
 	lw	a3, PT_R7(sp)
-	jalr	s0
+	jalr	t0
 
 	li	t0, -EMAXERRNO - 1	# error?
 	sltu	t0, t0, v0
 	sw	t0, PT_R7(sp)		# set error flag
 	beqz	t0, 1f
 
+	lw	t1, PT_R2(sp)		# syscall number
 	negu	v0			# error
-	sw	v0, PT_R0(sp)		# set flag for syscall
-					# restarting
+	sw	t1, PT_R0(sp)		# save it for syscall restarting
 1:	sw	v0, PT_R2(sp)		# result
 
 	j	syscall_exit
@@ -170,8 +168,7 @@ stackargs:
 	 * We probably should handle this case a bit more drastic.
 	 */
 bad_stack:
-	negu	v0				# error
-	sw	v0, PT_R0(sp)
+	li	v0, EFAULT
 	sw	v0, PT_R2(sp)
 	li	t0, 1				# set error flag
 	sw	t0, PT_R7(sp)
@@ -181,115 +178,20 @@ bad_stack:
 	 * The system call does not exist in this kernel
 	 */
 illegal_syscall:
-	li	v0, -ENOSYS			# error
+	li	v0, ENOSYS			# error
 	sw	v0, PT_R2(sp)
 	li	t0, 1				# set error flag
 	sw	t0, PT_R7(sp)
 	j	o32_syscall_exit
 	END(handle_sys)
 
-	LEAF(mips_atomic_set)
-	andi	v0, a1, 3			# must be word aligned
-	bnez	v0, bad_alignment
-
-	lw	v1, TI_ADDR_LIMIT($28)		# in legal address range?
-	addiu	a0, a1, 4
-	or	a0, a0, a1
-	and	a0, a0, v1
-	bltz	a0, bad_address
-
-#ifdef CONFIG_CPU_HAS_LLSC
-	/* Ok, this is the ll/sc case.  World is sane :-)  */
-1:	ll	v0, (a1)
-	move	a0, a2
-2:	sc	a0, (a1)
-#if R10000_LLSC_WAR
-	beqzl	a0, 1b
-#else
-	beqz	a0, 1b
-#endif
-
-	.section __ex_table,"a"
-	PTR	1b, bad_stack
-	PTR	2b, bad_stack
-	.previous
-#else
-	sw	a1, 16(sp)
-	sw	a2, 20(sp)
-
-	move	a0, sp
-	move	a2, a1
-	li	a1, 1
-	jal	do_page_fault
-
-	lw	a1, 16(sp)
-	lw	a2, 20(sp)
-
-	/*
-	 * At this point the page should be readable and writable unless
-	 * there was no more memory available.
-	 */
-1:	lw	v0, (a1)
-2:	sw	a2, (a1)
-
-	.section __ex_table,"a"
-	PTR	1b, no_mem
-	PTR	2b, no_mem
-	.previous
-#endif
-
-	sw	zero, PT_R7(sp)		# success
-	sw	v0, PT_R2(sp)		# result
-
-	/* Success, so skip usual error handling garbage.  */
-	lw	a2, TI_FLAGS($28)	# syscall tracing enabled?
-	li	t0, _TIF_SYSCALL_TRACE | _TIF_SYSCALL_AUDIT
-	and	t0, a2, t0
-	bnez	t0, 1f
-
-	j	o32_syscall_exit
-
-1:	SAVE_STATIC
-	move	a0, sp
-	li	a1, 1
-	jal	do_syscall_trace
-	j	syscall_exit
-
-no_mem:	li	v0, -ENOMEM
-	jr	ra
-
-bad_address:
-	li	v0, -EFAULT
-	jr	ra
-
-bad_alignment:
-	li	v0, -EINVAL
-	jr	ra
-	END(mips_atomic_set)
-
-	LEAF(sys_sysmips)
-	beq	a0, MIPS_ATOMIC_SET, mips_atomic_set
-	j	_sys_sysmips
-	END(sys_sysmips)
-
 	LEAF(sys_syscall)
-#if defined(CONFIG_BINFMT_IRIX)
-	sltiu	v0, a0, MAX_SYSCALL_NO + 1 # check syscall number
-#else
 	subu	t0, a0, __NR_O32_Linux	# check syscall number
 	sltiu	v0, t0, __NR_O32_Linux_syscalls + 1
-#endif
+	beqz	t0, einval		# do not recurse
 	sll	t1, t0, 3
 	beqz	v0, einval
-
 	lw	t2, sys_call_table(t1)		# syscall routine
-
-#if defined(CONFIG_BINFMT_IRIX)
-	li	v1, 4000			# nr of sys_syscall
-#else
-	li	v1, 4000 - __NR_O32_Linux	# index of sys_syscall
-#endif
-	beq	t0, v1, einval			# do not recurse
 
 	/* Some syscalls like execve get their arguments from struct pt_regs
 	   and claim zero arguments in the syscall table. Thus we have to
@@ -314,7 +216,7 @@ bad_alignment:
 	jr	t2
 	/* Unreached */
 
-einval:	li	v0, -EINVAL
+einval:	li	v0, -ENOSYS
 	jr	ra
 	END(sys_syscall)
 
@@ -333,13 +235,6 @@ einval:	li	v0, -EINVAL
 	.endm
 
 	.macro	syscalltable
-#if defined(CONFIG_BINFMT_IRIX)
-	mille	sys_ni_syscall		0	/*    0 -  999 SVR4 flavour */
-	mille	sys_ni_syscall		0	/* 1000 - 1999 32-bit IRIX */
-	mille	sys_ni_syscall		0	/* 2000 - 2999 BSD43 flavour */
-	mille	sys_ni_syscall		0	/* 3000 - 3999 POSIX flavour */
-#endif
-
 	sys	sys_syscall		8	/* 4000 */
 	sys	sys_exit		1
 	sys	sys_fork		0
@@ -382,7 +277,7 @@ einval:	li	v0, -EINVAL
 	sys	sys_mkdir		2
 	sys	sys_rmdir		1	/* 4040 */
 	sys	sys_dup			1
-	sys	sys_pipe		0
+	sys	sysm_pipe		0
 	sys	sys_times		1
 	sys	sys_ni_syscall		0
 	sys	sys_brk			1	/* 4045 */
@@ -429,8 +324,8 @@ einval:	li	v0, -EINVAL
 	sys	sys_uselib		1
 	sys	sys_swapon		2
 	sys	sys_reboot		3
-	sys	old_readdir		3
-	sys	old_mmap		6	/* 4090 */
+	sys	sys_old_readdir		3
+	sys	sys_mips_mmap		6	/* 4090 */
 	sys	sys_munmap		2
 	sys	sys_truncate		2
 	sys	sys_ftruncate		2
@@ -507,7 +402,7 @@ einval:	li	v0, -EINVAL
 	sys	sys_sched_get_priority_min 1
 	sys	sys_sched_rr_get_interval 2	/* 4165 */
 	sys	sys_nanosleep,		2
-	sys	sys_mremap,		4
+	sys	sys_mremap,		5
 	sys	sys_accept		3
 	sys	sys_bind		3
 	sys	sys_connect		3	/* 4170 */
@@ -529,7 +424,7 @@ einval:	li	v0, -EINVAL
 	sys	sys_getresuid		3
 	sys	sys_ni_syscall		0	/* was sys_query_module */
 	sys	sys_poll		3
-	sys	sys_nfsservctl		3
+	sys	sys_ni_syscall		0	/* was nfsservctl */
 	sys	sys_setresgid		3	/* 4190 */
 	sys	sys_getresgid		3
 	sys	sys_prctl		5
@@ -550,7 +445,7 @@ einval:	li	v0, -EINVAL
 	sys	sys_sendfile		4
 	sys	sys_ni_syscall		0
 	sys	sys_ni_syscall		0
-	sys	sys_mmap2		6	/* 4210 */
+	sys	sys_mips_mmap2		6	/* 4210 */
 	sys	sys_truncate64		4
 	sys	sys_ftruncate64		4
 	sys	sys_stat64		2
@@ -578,19 +473,30 @@ einval:	li	v0, -EINVAL
 	sys	sys_fremovexattr	2	/* 4235 */
 	sys	sys_tkill		2
 	sys	sys_sendfile64		5
-	sys	sys_futex		2
+	sys	sys_futex		6
+#ifdef CONFIG_MIPS_MT_FPAFF
+	/*
+	 * For FPU affinity scheduling on MIPS MT processors, we need to
+	 * intercept sys_sched_xxxaffinity() calls until we get a proper hook
+	 * in kernel/sched.c.  Considered only temporary we only support these
+	 * hooks for the 32-bit kernel - there is no MIPS64 MT processor atm.
+	 */
+	sys	mipsmt_sys_sched_setaffinity	3
+	sys	mipsmt_sys_sched_getaffinity	3
+#else
 	sys	sys_sched_setaffinity	3
 	sys	sys_sched_getaffinity	3	/* 4240 */
+#endif /* CONFIG_MIPS_MT_FPAFF */
 	sys	sys_io_setup		2
 	sys	sys_io_destroy		1
 	sys	sys_io_getevents	5
 	sys	sys_io_submit		3
 	sys	sys_io_cancel		3	/* 4245 */
 	sys	sys_exit_group		1
-	sys	sys_lookup_dcookie	3
+	sys	sys_lookup_dcookie	4
 	sys	sys_epoll_create	1
 	sys	sys_epoll_ctl		4
-	sys	sys_epoll_wait		3	/* 4250 */
+	sys	sys_epoll_wait		4	/* 4250 */
 	sys	sys_remap_file_pages	5
 	sys	sys_set_tid_address	1
 	sys	sys_restart_syscall	0
@@ -618,12 +524,75 @@ einval:	li	v0, -EINVAL
 	sys	sys_mq_notify		2	/* 4275 */
 	sys	sys_mq_getsetattr	3
 	sys	sys_ni_syscall		0	/* sys_vserver */
-	sys	sys_waitid		4
+	sys	sys_waitid		5
 	sys	sys_ni_syscall		0	/* available, was setaltroot */
-	sys	sys_add_key		5
+	sys	sys_add_key		5	/* 4280 */
 	sys	sys_request_key		4
 	sys	sys_keyctl		5
-
+	sys	sys_set_thread_area	1
+	sys	sys_inotify_init	0
+	sys	sys_inotify_add_watch	3	/* 4285 */
+	sys	sys_inotify_rm_watch	2
+	sys	sys_migrate_pages	4
+	sys	sys_openat		4
+	sys	sys_mkdirat		3
+	sys	sys_mknodat		4	/* 4290 */
+	sys	sys_fchownat		5
+	sys	sys_futimesat		3
+	sys	sys_fstatat64		4
+	sys	sys_unlinkat		3
+	sys	sys_renameat		4	/* 4295 */
+	sys	sys_linkat		5
+	sys	sys_symlinkat		3
+	sys	sys_readlinkat		4
+	sys	sys_fchmodat		3
+	sys	sys_faccessat		3	/* 4300 */
+	sys	sys_pselect6		6
+	sys	sys_ppoll		5
+	sys	sys_unshare		1
+	sys	sys_splice		6
+	sys	sys_sync_file_range	7	/* 4305 */
+	sys	sys_tee			4
+	sys	sys_vmsplice		4
+	sys	sys_move_pages		6
+	sys	sys_set_robust_list	2
+	sys	sys_get_robust_list	3	/* 4310 */
+	sys	sys_kexec_load		4
+	sys	sys_getcpu		3
+	sys	sys_epoll_pwait		6
+	sys	sys_ioprio_set		3
+	sys	sys_ioprio_get		2	/* 4315 */
+	sys	sys_utimensat		4
+	sys	sys_signalfd		3
+	sys	sys_ni_syscall		0	/* was timerfd */
+	sys	sys_eventfd		1
+	sys	sys_fallocate		6	/* 4320 */
+	sys	sys_timerfd_create	2
+	sys	sys_timerfd_gettime	2
+	sys	sys_timerfd_settime	4
+	sys	sys_signalfd4		4
+	sys	sys_eventfd2		2	/* 4325 */
+	sys	sys_epoll_create1	1
+	sys	sys_dup3		3
+	sys	sys_pipe2		2
+	sys	sys_inotify_init1	1
+	sys	sys_preadv		6	/* 4330 */
+	sys	sys_pwritev		6
+	sys	sys_rt_tgsigqueueinfo	4
+	sys	sys_perf_event_open	5
+	sys	sys_accept4		4
+	sys	sys_recvmmsg		5	/* 4335 */
+	sys	sys_fanotify_init	2
+	sys	sys_fanotify_mark	6
+	sys	sys_prlimit64		4
+	sys	sys_name_to_handle_at	5
+	sys	sys_open_by_handle_at	3	/* 4340 */
+	sys	sys_clock_adjtime	2
+	sys	sys_syncfs		1
+	sys	sys_sendmmsg		4
+	sys	sys_setns		2
+	sys	sys_process_vm_readv	6	/* 4345 */
+	sys	sys_process_vm_writev	6
 	.endm
 
 	/* We pre-compute the number of _instruction_ bytes needed to

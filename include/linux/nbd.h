@@ -15,6 +15,8 @@
 #ifndef LINUX_NBD_H
 #define LINUX_NBD_H
 
+#include <linux/types.h>
+
 #define NBD_SET_SOCK	_IO( 0xab, 0 )
 #define NBD_SET_BLKSIZE	_IO( 0xab, 1 )
 #define NBD_SET_SIZE	_IO( 0xab, 2 )
@@ -24,6 +26,7 @@
 #define NBD_PRINT_DEBUG	_IO( 0xab, 6 )
 #define NBD_SET_SIZE_BLOCKS	_IO( 0xab, 7 )
 #define NBD_DISCONNECT  _IO( 0xab, 8 )
+#define NBD_SET_TIMEOUT _IO( 0xab, 9 )
 
 enum {
 	NBD_CMD_READ = 0,
@@ -32,14 +35,18 @@ enum {
 };
 
 #define nbd_cmd(req) ((req)->cmd[0])
-#define MAX_NBD 128
 
 /* userspace doesn't need the nbd_device structure */
 #ifdef __KERNEL__
 
+#include <linux/wait.h>
+#include <linux/mutex.h>
+
 /* values for flags field */
 #define NBD_READ_ONLY 0x0001
 #define NBD_WRITE_NOCHK 0x0002
+
+struct request;
 
 struct nbd_device {
 	int flags;
@@ -47,12 +54,20 @@ struct nbd_device {
 	struct socket * sock;
 	struct file * file; 	/* If == NULL, device is not ready, yet	*/
 	int magic;
+
 	spinlock_t queue_lock;
-	struct list_head queue_head;/* Requests are added here...	*/
-	struct semaphore tx_lock;
+	struct list_head queue_head;	/* Requests waiting result */
+	struct request *active_req;
+	wait_queue_head_t active_wq;
+	struct list_head waiting_queue;	/* Requests to be sent */
+	wait_queue_head_t waiting_wq;
+
+	struct mutex tx_lock;
 	struct gendisk *disk;
 	int blksize;
 	u64 bytesize;
+	pid_t pid; /* pid of nbd-client, if attached */
+	int xmit_timeout;
 };
 
 #endif
@@ -68,24 +83,20 @@ struct nbd_device {
  * server. All data are in network byte order.
  */
 struct nbd_request {
-	u32 magic;
-	u32 type;	/* == READ || == WRITE 	*/
+	__be32 magic;
+	__be32 type;	/* == READ || == WRITE 	*/
 	char handle[8];
-	u64 from;
-	u32 len;
-}
-#ifdef __GNUC__
-	__attribute__ ((packed))
-#endif
-;
+	__be64 from;
+	__be32 len;
+} __attribute__((packed));
 
 /*
  * This is the reply packet that nbd-server sends back to the client after
  * it has completed an I/O request (or an error occurs).
  */
 struct nbd_reply {
-	u32 magic;
-	u32 error;		/* 0 = ok, else error	*/
+	__be32 magic;
+	__be32 error;		/* 0 = ok, else error	*/
 	char handle[8];		/* handle you got from request	*/
 };
 #endif

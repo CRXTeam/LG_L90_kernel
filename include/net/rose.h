@@ -14,6 +14,12 @@
 
 #define	ROSE_MIN_LEN			3
 
+#define	ROSE_CALL_REQ_ADDR_LEN_OFF	3
+#define	ROSE_CALL_REQ_ADDR_LEN_VAL	0xAA	/* each address is 10 digits */
+#define	ROSE_CALL_REQ_DEST_ADDR_OFF	4
+#define	ROSE_CALL_REQ_SRC_ADDR_OFF	9
+#define	ROSE_CALL_REQ_FACILITIES_OFF	14
+
 #define	ROSE_GFI			0x10
 #define	ROSE_Q_BIT			0x80
 #define	ROSE_D_BIT			0x40
@@ -49,14 +55,14 @@ enum {
 	ROSE_STATE_5			/* Deferred Call Acceptance */
 };
 
-#define ROSE_DEFAULT_T0			(180 * HZ)	/* Default T10 T20 value */
-#define ROSE_DEFAULT_T1			(200 * HZ)	/* Default T11 T21 value */
-#define ROSE_DEFAULT_T2			(180 * HZ)	/* Default T12 T22 value */
-#define	ROSE_DEFAULT_T3			(180 * HZ)	/* Default T13 T23 value */
-#define	ROSE_DEFAULT_HB			(5 * HZ)	/* Default Holdback value */
-#define	ROSE_DEFAULT_IDLE		(0 * 60 * HZ)	/* No Activity Timeout - none */
+#define ROSE_DEFAULT_T0			180000		/* Default T10 T20 value */
+#define ROSE_DEFAULT_T1			200000		/* Default T11 T21 value */
+#define ROSE_DEFAULT_T2			180000		/* Default T12 T22 value */
+#define	ROSE_DEFAULT_T3			180000		/* Default T13 T23 value */
+#define	ROSE_DEFAULT_HB			5000		/* Default Holdback value */
+#define	ROSE_DEFAULT_IDLE		0		/* No Activity Timeout - none */
 #define	ROSE_DEFAULT_ROUTING		1		/* Default routing flag */
-#define	ROSE_DEFAULT_FAIL_TIMEOUT	(120 * HZ)	/* Time until link considered usable */
+#define	ROSE_DEFAULT_FAIL_TIMEOUT	120000		/* Time until link considered usable */
 #define	ROSE_DEFAULT_MAXVC		50		/* Maximum number of VCs per neighbour */
 #define	ROSE_DEFAULT_WINDOW_SIZE	7		/* Default window size */
 
@@ -156,7 +162,7 @@ extern int  sysctl_rose_maximum_vcs;
 extern int  sysctl_rose_window_size;
 extern int  rosecmp(rose_address *, rose_address *);
 extern int  rosecmpm(rose_address *, rose_address *, unsigned short);
-extern const char *rose2asc(const rose_address *);
+extern char *rose2asc(char *buf, const rose_address *);
 extern struct sock *rose_find_socket(unsigned int, struct rose_neigh *);
 extern void rose_kill_by_neigh(struct rose_neigh *);
 extern unsigned int rose_new_lci(struct rose_neigh *);
@@ -189,19 +195,19 @@ extern void rose_enquiry_response(struct sock *);
 
 /* rose_route.c */
 extern struct rose_neigh *rose_loopback_neigh;
-extern struct file_operations rose_neigh_fops;
-extern struct file_operations rose_nodes_fops;
-extern struct file_operations rose_routes_fops;
+extern const struct file_operations rose_neigh_fops;
+extern const struct file_operations rose_nodes_fops;
+extern const struct file_operations rose_routes_fops;
 
-extern int  rose_add_loopback_neigh(void);
-extern int  rose_add_loopback_node(rose_address *);
+extern void rose_add_loopback_neigh(void);
+extern int __must_check rose_add_loopback_node(rose_address *);
 extern void rose_del_loopback_node(rose_address *);
 extern void rose_rt_device_down(struct net_device *);
 extern void rose_link_device_down(struct net_device *);
 extern struct net_device *rose_dev_first(void);
 extern struct net_device *rose_dev_get(rose_address *);
 extern struct rose_route *rose_route_free_lci(unsigned int, struct rose_neigh *);
-extern struct rose_neigh *rose_get_neigh(rose_address *, unsigned char *, unsigned char *);
+extern struct rose_neigh *rose_get_neigh(rose_address *, unsigned char *, unsigned char *, int);
 extern int  rose_rt_ioctl(unsigned int, void __user *);
 extern void rose_link_failed(ax25_cb *, int);
 extern int  rose_route_frame(struct sk_buff *, ax25_cb *);
@@ -214,7 +220,7 @@ extern void rose_requeue_frames(struct sock *);
 extern int  rose_validate_nr(struct sock *, unsigned short);
 extern void rose_write_internal(struct sock *, int);
 extern int  rose_decode(struct sk_buff *, int *, int *, int *, int *, int *);
-extern int  rose_parse_facilities(unsigned char *, struct rose_facilities_struct *);
+extern int  rose_parse_facilities(unsigned char *, unsigned int, struct rose_facilities_struct *);
 extern void rose_disconnect(struct sock *, int, int, int);
 
 /* rose_timer.c */

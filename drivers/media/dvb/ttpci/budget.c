@@ -31,7 +31,7 @@
  * Or, point your browser to http://www.gnu.org/copyleft/gpl.html
  *
  *
- * the project's page is at http://www.linuxtv.org/dvb/
+ * the project's page is at http://www.linuxtv.org/ 
  */
 
 #include "budget.h"
@@ -40,6 +40,22 @@
 #include "ves1820.h"
 #include "l64781.h"
 #include "tda8083.h"
+#include "s5h1420.h"
+#include "tda10086.h"
+#include "tda826x.h"
+#include "lnbp21.h"
+#include "bsru6.h"
+#include "bsbe1.h"
+#include "tdhd1.h"
+#include "stv6110x.h"
+#include "stv090x.h"
+#include "isl6423.h"
+
+static int diseqc_method;
+module_param(diseqc_method, int, 0444);
+MODULE_PARM_DESC(diseqc_method, "Select DiSEqC method for subsystem id 13c2:1003, 0: default, 1: more reliable (for newer revisions only)");
+
+DVB_DEFINE_MOD_OPT_ADAPTER_NR(adapter_nr);
 
 static void Set22K (struct budget *budget, int state)
 {
@@ -98,7 +114,8 @@ static int SendDiSEqCMsg (struct budget *budget, int len, u8 *msg, unsigned long
 			DiseqcSendByte(budget, 0xff);
 		else {
 			saa7146_setgpio(dev, 3, SAA7146_GPIO_OUTHI);
-			udelay(12500);
+			mdelay(12);
+			udelay(500);
 			saa7146_setgpio(dev, 3, SAA7146_GPIO_OUTLO);
 		}
 		msleep(20);
@@ -111,6 +128,7 @@ static int SendDiSEqCMsg (struct budget *budget, int len, u8 *msg, unsigned long
  *   Routines for the Fujitsu Siemens Activy budget card
  *   22 kHz tone and DiSEqC are handled by the frontend.
  *   Voltage must be set here.
+ *   GPIO 1: LNBP EN, GPIO 2: LNBP VSEL
  */
 static int SetVoltage_Activy (struct budget *budget, fe_sec_voltage_t voltage)
 {
@@ -120,10 +138,15 @@ static int SetVoltage_Activy (struct budget *budget, fe_sec_voltage_t voltage)
 
 	switch (voltage) {
 		case SEC_VOLTAGE_13:
+			saa7146_setgpio(dev, 1, SAA7146_GPIO_OUTHI);
 			saa7146_setgpio(dev, 2, SAA7146_GPIO_OUTLO);
 			break;
 		case SEC_VOLTAGE_18:
+			saa7146_setgpio(dev, 1, SAA7146_GPIO_OUTHI);
 			saa7146_setgpio(dev, 2, SAA7146_GPIO_OUTHI);
+			break;
+		case SEC_VOLTAGE_OFF:
+			saa7146_setgpio(dev, 1, SAA7146_GPIO_OUTLO);
 			break;
 		default:
 			return -EINVAL;
@@ -177,19 +200,25 @@ static int budget_diseqc_send_burst(struct dvb_frontend* fe, fe_sec_mini_cmd_t m
 	return 0;
 }
 
-static int alps_bsrv2_pll_set(struct dvb_frontend* fe, struct dvb_frontend_parameters* params)
+static int alps_bsrv2_tuner_set_params(struct dvb_frontend *fe)
 {
+	struct dtv_frontend_properties *c = &fe->dtv_property_cache;
 	struct budget* budget = (struct budget*) fe->dvb->priv;
 	u8 pwr = 0;
 	u8 buf[4];
 	struct i2c_msg msg = { .addr = 0x61, .flags = 0, .buf = buf, .len = sizeof(buf) };
-	u32 div = (params->frequency + 479500) / 125;
+	u32 div = (c->frequency + 479500) / 125;
 
-	if (params->frequency > 2000000) pwr = 3;
-	else if (params->frequency > 1800000) pwr = 2;
-	else if (params->frequency > 1600000) pwr = 1;
-	else if (params->frequency > 1200000) pwr = 0;
-	else if (params->frequency >= 1100000) pwr = 1;
+	if (c->frequency > 2000000)
+		pwr = 3;
+	else if (c->frequency > 1800000)
+		pwr = 2;
+	else if (c->frequency > 1600000)
+		pwr = 1;
+	else if (c->frequency > 1200000)
+		pwr = 0;
+	else if (c->frequency >= 1100000)
+		pwr = 1;
 	else pwr = 2;
 
 	buf[0] = (div >> 8) & 0x7f;
@@ -197,9 +226,11 @@ static int alps_bsrv2_pll_set(struct dvb_frontend* fe, struct dvb_frontend_param
 	buf[2] = ((div & 0x18000) >> 10) | 0x95;
 	buf[3] = (pwr << 6) | 0x30;
 
-        // NOTE: since we're using a prescaler of 2, we set the
+	// NOTE: since we're using a prescaler of 2, we set the
 	// divisor frequency to 62.5kHz and divide by 125 above
 
+	if (fe->ops.i2c_gate_ctrl)
+		fe->ops.i2c_gate_ctrl(fe, 1);
 	if (i2c_transfer (&budget->i2c_adap, &msg, 1) != 1) return -EIO;
 	return 0;
 }
@@ -209,122 +240,25 @@ static struct ves1x93_config alps_bsrv2_config =
 	.demod_address = 0x08,
 	.xin = 90100000UL,
 	.invert_pwm = 0,
-	.pll_set = alps_bsrv2_pll_set,
 };
 
-static u8 alps_bsru6_inittab[] = {
-	0x01, 0x15,
-	0x02, 0x00,
-	0x03, 0x00,
-        0x04, 0x7d,   /* F22FR = 0x7d, F22 = f_VCO / 128 / 0x7d = 22 kHz */
-	0x05, 0x35,   /* I2CT = 0, SCLT = 1, SDAT = 1 */
-	0x06, 0x40,   /* DAC not used, set to high impendance mode */
-	0x07, 0x00,   /* DAC LSB */
-	0x08, 0x40,   /* DiSEqC off, LNB power on OP2/LOCK pin on */
-	0x09, 0x00,   /* FIFO */
-	0x0c, 0x51,   /* OP1 ctl = Normal, OP1 val = 1 (LNB Power ON) */
-	0x0d, 0x82,   /* DC offset compensation = ON, beta_agc1 = 2 */
-	0x0e, 0x23,   /* alpha_tmg = 2, beta_tmg = 3 */
-	0x10, 0x3f,   // AGC2  0x3d
-	0x11, 0x84,
-	0x12, 0xb5,   // Lock detect: -64  Carrier freq detect:on
-	0x15, 0xc9,   // lock detector threshold
-	0x16, 0x00,
-	0x17, 0x00,
-	0x18, 0x00,
-	0x19, 0x00,
-	0x1a, 0x00,
-	0x1f, 0x50,
-	0x20, 0x00,
-	0x21, 0x00,
-	0x22, 0x00,
-	0x23, 0x00,
-	0x28, 0x00,  // out imp: normal  out type: parallel FEC mode:0
-	0x29, 0x1e,  // 1/2 threshold
-	0x2a, 0x14,  // 2/3 threshold
-	0x2b, 0x0f,  // 3/4 threshold
-	0x2c, 0x09,  // 5/6 threshold
-	0x2d, 0x05,  // 7/8 threshold
-	0x2e, 0x01,
-	0x31, 0x1f,  // test all FECs
-	0x32, 0x19,  // viterbi and synchro search
-	0x33, 0xfc,  // rs control
-	0x34, 0x93,  // error control
-	0x0f, 0x52,
-	0xff, 0xff
-};
-
-static int alps_bsru6_set_symbol_rate(struct dvb_frontend* fe, u32 srate, u32 ratio)
+static int alps_tdbe2_tuner_set_params(struct dvb_frontend *fe)
 {
-	u8 aclk = 0;
-	u8 bclk = 0;
-
-	if (srate < 1500000) { aclk = 0xb7; bclk = 0x47; }
-	else if (srate < 3000000) { aclk = 0xb7; bclk = 0x4b; }
-	else if (srate < 7000000) { aclk = 0xb7; bclk = 0x4f; }
-	else if (srate < 14000000) { aclk = 0xb7; bclk = 0x53; }
-	else if (srate < 30000000) { aclk = 0xb6; bclk = 0x53; }
-	else if (srate < 45000000) { aclk = 0xb4; bclk = 0x51; }
-
-	stv0299_writereg (fe, 0x13, aclk);
-	stv0299_writereg (fe, 0x14, bclk);
-	stv0299_writereg (fe, 0x1f, (ratio >> 16) & 0xff);
-	stv0299_writereg (fe, 0x20, (ratio >>  8) & 0xff);
-	stv0299_writereg (fe, 0x21, (ratio      ) & 0xf0);
-
-	return 0;
-}
-
-static int alps_bsru6_pll_set(struct dvb_frontend* fe, struct dvb_frontend_parameters* params)
-{
-	struct budget* budget = (struct budget*) fe->dvb->priv;
-	u8 data[4];
-	u32 div;
-	struct i2c_msg msg = { .addr = 0x61, .flags = 0, .buf = data, .len = sizeof(data) };
-
-	if ((params->frequency < 950000) || (params->frequency > 2150000)) return -EINVAL;
-
-	div = (params->frequency + (125 - 1)) / 125; // round correctly
-	data[0] = (div >> 8) & 0x7f;
-	data[1] = div & 0xff;
-	data[2] = 0x80 | ((div & 0x18000) >> 10) | 4;
-	data[3] = 0xC4;
-
-	if (params->frequency > 1530000) data[3] = 0xc0;
-
-	if (i2c_transfer (&budget->i2c_adap, &msg, 1) != 1) return -EIO;
-	return 0;
-}
-
-static struct stv0299_config alps_bsru6_config = {
-
-	.demod_address = 0x68,
-	.inittab = alps_bsru6_inittab,
-	.mclk = 88000000UL,
-	.invert = 1,
-	.enhanced_tuning = 0,
-	.skip_reinit = 0,
-	.lock_output = STV0229_LOCKOUTPUT_1,
-	.volt13_op0_op1 = STV0299_VOLT13_OP1,
-	.min_delay_ms = 100,
-	.set_symbol_rate = alps_bsru6_set_symbol_rate,
-	.pll_set = alps_bsru6_pll_set,
-};
-
-static int alps_tdbe2_pll_set(struct dvb_frontend* fe, struct dvb_frontend_parameters* params)
-{
+	struct dtv_frontend_properties *c = &fe->dtv_property_cache;
 	struct budget* budget = (struct budget*) fe->dvb->priv;
 	u32 div;
 	u8 data[4];
 	struct i2c_msg msg = { .addr = 0x62, .flags = 0, .buf = data, .len = sizeof(data) };
 
-	div = (params->frequency + 35937500 + 31250) / 62500;
+	div = (c->frequency + 35937500 + 31250) / 62500;
 
 	data[0] = (div >> 8) & 0x7f;
 	data[1] = div & 0xff;
 	data[2] = 0x85 | ((div >> 10) & 0x60);
-	data[3] = (params->frequency < 174000000 ? 0x88 : params->frequency < 470000000 ? 0x84 : 0x81);
+	data[3] = (c->frequency < 174000000 ? 0x88 : c->frequency < 470000000 ? 0x84 : 0x81);
 
+	if (fe->ops.i2c_gate_ctrl)
+		fe->ops.i2c_gate_ctrl(fe, 1);
 	if (i2c_transfer (&budget->i2c_adap, &msg, 1) != 1) return -EIO;
 	return 0;
 }
@@ -334,66 +268,170 @@ static struct ves1820_config alps_tdbe2_config = {
 	.xin = 57840000UL,
 	.invert = 1,
 	.selagc = VES1820_SELAGC_SIGNAMPERR,
-	.pll_set = alps_tdbe2_pll_set,
 };
 
-static int grundig_29504_401_pll_set(struct dvb_frontend* fe, struct dvb_frontend_parameters* params)
+static int grundig_29504_401_tuner_set_params(struct dvb_frontend *fe)
 {
-	struct budget* budget = (struct budget*) fe->dvb->priv;
+	struct dtv_frontend_properties *c = &fe->dtv_property_cache;
+	struct budget *budget = fe->dvb->priv;
+	u8 *tuner_addr = fe->tuner_priv;
 	u32 div;
 	u8 cfg, cpump, band_select;
 	u8 data[4];
-	struct i2c_msg msg = { .addr = 0x61, .flags = 0, .buf = data, .len = sizeof(data) };
+	struct i2c_msg msg = { .flags = 0, .buf = data, .len = sizeof(data) };
 
-	div = (36125000 + params->frequency) / 166666;
+	if (tuner_addr)
+		msg.addr = *tuner_addr;
+	else
+		msg.addr = 0x61;
+
+	div = (36125000 + c->frequency) / 166666;
 
 	cfg = 0x88;
 
-	if (params->frequency < 175000000) cpump = 2;
-	else if (params->frequency < 390000000) cpump = 1;
-	else if (params->frequency < 470000000) cpump = 2;
-	else if (params->frequency < 750000000) cpump = 1;
-	else cpump = 3;
+	if (c->frequency < 175000000)
+		cpump = 2;
+	else if (c->frequency < 390000000)
+		cpump = 1;
+	else if (c->frequency < 470000000)
+		cpump = 2;
+	else if (c->frequency < 750000000)
+		cpump = 1;
+	else
+		cpump = 3;
 
-	if (params->frequency < 175000000) band_select = 0x0e;
-	else if (params->frequency < 470000000) band_select = 0x05;
-	else band_select = 0x03;
+	if (c->frequency < 175000000)
+		band_select = 0x0e;
+	else if (c->frequency < 470000000)
+		band_select = 0x05;
+	else
+		band_select = 0x03;
 
 	data[0] = (div >> 8) & 0x7f;
 	data[1] = div & 0xff;
 	data[2] = ((div >> 10) & 0x60) | cfg;
 	data[3] = (cpump << 6) | band_select;
 
+	if (fe->ops.i2c_gate_ctrl)
+		fe->ops.i2c_gate_ctrl(fe, 1);
 	if (i2c_transfer (&budget->i2c_adap, &msg, 1) != 1) return -EIO;
 	return 0;
 }
 
 static struct l64781_config grundig_29504_401_config = {
 	.demod_address = 0x55,
-	.pll_set = grundig_29504_401_pll_set,
 };
 
-static int grundig_29504_451_pll_set(struct dvb_frontend* fe, struct dvb_frontend_parameters* params)
+static struct l64781_config grundig_29504_401_config_activy = {
+	.demod_address = 0x54,
+};
+
+static u8 tuner_address_grundig_29504_401_activy = 0x60;
+
+static int grundig_29504_451_tuner_set_params(struct dvb_frontend *fe)
 {
+	struct dtv_frontend_properties *c = &fe->dtv_property_cache;
 	struct budget* budget = (struct budget*) fe->dvb->priv;
 	u32 div;
 	u8 data[4];
 	struct i2c_msg msg = { .addr = 0x61, .flags = 0, .buf = data, .len = sizeof(data) };
 
-	div = params->frequency / 125;
+	div = c->frequency / 125;
 	data[0] = (div >> 8) & 0x7f;
 	data[1] = div & 0xff;
 	data[2] = 0x8e;
 	data[3] = 0x00;
 
+	if (fe->ops.i2c_gate_ctrl)
+		fe->ops.i2c_gate_ctrl(fe, 1);
 	if (i2c_transfer (&budget->i2c_adap, &msg, 1) != 1) return -EIO;
 	return 0;
 }
 
 static struct tda8083_config grundig_29504_451_config = {
 	.demod_address = 0x68,
-	.pll_set = grundig_29504_451_pll_set,
 };
+
+static int s5h1420_tuner_set_params(struct dvb_frontend *fe)
+{
+	struct dtv_frontend_properties *c = &fe->dtv_property_cache;
+	struct budget* budget = (struct budget*) fe->dvb->priv;
+	u32 div;
+	u8 data[4];
+	struct i2c_msg msg = { .addr = 0x61, .flags = 0, .buf = data, .len = sizeof(data) };
+
+	div = c->frequency / 1000;
+	data[0] = (div >> 8) & 0x7f;
+	data[1] = div & 0xff;
+	data[2] = 0xc2;
+
+	if (div < 1450)
+		data[3] = 0x00;
+	else if (div < 1850)
+		data[3] = 0x40;
+	else if (div < 2000)
+		data[3] = 0x80;
+	else
+		data[3] = 0xc0;
+
+	if (fe->ops.i2c_gate_ctrl)
+		fe->ops.i2c_gate_ctrl(fe, 1);
+	if (i2c_transfer (&budget->i2c_adap, &msg, 1) != 1) return -EIO;
+
+	return 0;
+}
+
+static struct s5h1420_config s5h1420_config = {
+	.demod_address = 0x53,
+	.invert = 1,
+	.cdclk_polarity = 1,
+};
+
+static struct tda10086_config tda10086_config = {
+	.demod_address = 0x0e,
+	.invert = 0,
+	.diseqc_tone = 1,
+	.xtal_freq = TDA10086_XTAL_16M,
+};
+
+static struct stv0299_config alps_bsru6_config_activy = {
+	.demod_address = 0x68,
+	.inittab = alps_bsru6_inittab,
+	.mclk = 88000000UL,
+	.invert = 1,
+	.op0_off = 1,
+	.min_delay_ms = 100,
+	.set_symbol_rate = alps_bsru6_set_symbol_rate,
+};
+
+static struct stv0299_config alps_bsbe1_config_activy = {
+	.demod_address = 0x68,
+	.inittab = alps_bsbe1_inittab,
+	.mclk = 88000000UL,
+	.invert = 1,
+	.op0_off = 1,
+	.min_delay_ms = 100,
+	.set_symbol_rate = alps_bsbe1_set_symbol_rate,
+};
+
+static int alps_tdhd1_204_request_firmware(struct dvb_frontend *fe, const struct firmware **fw, char *name)
+{
+	struct budget *budget = (struct budget *)fe->dvb->priv;
+
+	return request_firmware(fw, name, &budget->dev->pci->dev);
+}
+
+
+static int i2c_readreg(struct i2c_adapter *i2c, u8 adr, u8 reg)
+{
+	u8 val;
+	struct i2c_msg msg[] = {
+		{ .addr = adr, .flags = 0, .buf = &reg, .len = 1 },
+		{ .addr = adr, .flags = I2C_M_RD, .buf = &val, .len = 1 }
+	};
+
+	return (i2c_transfer(i2c, msg, 2) != 2) ? -EIO : val;
+}
 
 static u8 read_pwm(struct budget* budget)
 {
@@ -402,79 +440,264 @@ static u8 read_pwm(struct budget* budget)
 	struct i2c_msg msg[] = { { .addr = 0x50,.flags = 0,.buf = &b,.len = 1 },
 				 { .addr = 0x50,.flags = I2C_M_RD,.buf = &pwm,.len = 1} };
 
-        if ((i2c_transfer(&budget->i2c_adap, msg, 2) != 2) || (pwm == 0xff))
+	if ((i2c_transfer(&budget->i2c_adap, msg, 2) != 2) || (pwm == 0xff))
 		pwm = 0x48;
 
 	return pwm;
 }
 
+static struct stv090x_config tt1600_stv090x_config = {
+	.device			= STV0903,
+	.demod_mode		= STV090x_SINGLE,
+	.clk_mode		= STV090x_CLK_EXT,
+
+	.xtal			= 13500000,
+	.address		= 0x68,
+
+	.ts1_mode		= STV090x_TSMODE_DVBCI,
+	.ts2_mode		= STV090x_TSMODE_SERIAL_CONTINUOUS,
+
+	.repeater_level		= STV090x_RPTLEVEL_16,
+
+	.tuner_init		= NULL,
+	.tuner_sleep		= NULL,
+	.tuner_set_mode		= NULL,
+	.tuner_set_frequency	= NULL,
+	.tuner_get_frequency	= NULL,
+	.tuner_set_bandwidth	= NULL,
+	.tuner_get_bandwidth	= NULL,
+	.tuner_set_bbgain	= NULL,
+	.tuner_get_bbgain	= NULL,
+	.tuner_set_refclk	= NULL,
+	.tuner_get_status	= NULL,
+};
+
+static struct stv6110x_config tt1600_stv6110x_config = {
+	.addr			= 0x60,
+	.refclk			= 27000000,
+	.clk_div		= 2,
+};
+
+static struct isl6423_config tt1600_isl6423_config = {
+	.current_max		= SEC_CURRENT_515m,
+	.curlim			= SEC_CURRENT_LIM_ON,
+	.mod_extern		= 1,
+	.addr			= 0x08,
+};
+
 static void frontend_init(struct budget *budget)
 {
+	(void)alps_bsbe1_config; /* avoid warning */
+
 	switch(budget->dev->pci->subsystem_device) {
 	case 0x1003: // Hauppauge/TT Nova budget (stv0299/ALPS BSRU6(tsa5059) OR ves1893/ALPS BSRV2(sp5659))
 	case 0x1013:
 		// try the ALPS BSRV2 first of all
-		budget->dvb_frontend = ves1x93_attach(&alps_bsrv2_config, &budget->i2c_adap);
+		budget->dvb_frontend = dvb_attach(ves1x93_attach, &alps_bsrv2_config, &budget->i2c_adap);
 		if (budget->dvb_frontend) {
-			budget->dvb_frontend->ops->diseqc_send_master_cmd = budget_diseqc_send_master_cmd;
-		        budget->dvb_frontend->ops->diseqc_send_burst = budget_diseqc_send_burst;
-			budget->dvb_frontend->ops->set_tone = budget_set_tone;
+			budget->dvb_frontend->ops.tuner_ops.set_params = alps_bsrv2_tuner_set_params;
+			budget->dvb_frontend->ops.diseqc_send_master_cmd = budget_diseqc_send_master_cmd;
+			budget->dvb_frontend->ops.diseqc_send_burst = budget_diseqc_send_burst;
+			budget->dvb_frontend->ops.set_tone = budget_set_tone;
 			break;
 		}
 
 		// try the ALPS BSRU6 now
-		budget->dvb_frontend = stv0299_attach(&alps_bsru6_config, &budget->i2c_adap);
+		budget->dvb_frontend = dvb_attach(stv0299_attach, &alps_bsru6_config, &budget->i2c_adap);
 		if (budget->dvb_frontend) {
-			budget->dvb_frontend->ops->diseqc_send_master_cmd = budget_diseqc_send_master_cmd;
-			budget->dvb_frontend->ops->diseqc_send_burst = budget_diseqc_send_burst;
-			budget->dvb_frontend->ops->set_tone = budget_set_tone;
+			budget->dvb_frontend->ops.tuner_ops.set_params = alps_bsru6_tuner_set_params;
+			budget->dvb_frontend->tuner_priv = &budget->i2c_adap;
+			if (budget->dev->pci->subsystem_device == 0x1003 && diseqc_method == 0) {
+				budget->dvb_frontend->ops.diseqc_send_master_cmd = budget_diseqc_send_master_cmd;
+				budget->dvb_frontend->ops.diseqc_send_burst = budget_diseqc_send_burst;
+				budget->dvb_frontend->ops.set_tone = budget_set_tone;
+			}
 			break;
 		}
 		break;
 
 	case 0x1004: // Hauppauge/TT DVB-C budget (ves1820/ALPS TDBE2(sp5659))
 
-		budget->dvb_frontend = ves1820_attach(&alps_tdbe2_config, &budget->i2c_adap, read_pwm(budget));
-		if (budget->dvb_frontend) break;
-		break;
-
-	case 0x1005: // Hauppauge/TT Nova-T budget (L64781/Grundig 29504-401(tsa5060))
-
-		budget->dvb_frontend = l64781_attach(&grundig_29504_401_config, &budget->i2c_adap);
-		if (budget->dvb_frontend) break;
-		break;
-
-	case 0x4f60: // Fujitsu Siemens Activy Budget-S PCI rev AL (stv0299/ALPS BSRU6(tsa5059))
-		budget->dvb_frontend = stv0299_attach(&alps_bsru6_config, &budget->i2c_adap);
+		budget->dvb_frontend = dvb_attach(ves1820_attach, &alps_tdbe2_config, &budget->i2c_adap, read_pwm(budget));
 		if (budget->dvb_frontend) {
-			budget->dvb_frontend->ops->set_voltage = siemens_budget_set_voltage;
+			budget->dvb_frontend->ops.tuner_ops.set_params = alps_tdbe2_tuner_set_params;
 			break;
 		}
 		break;
 
-	case 0x4f61: // Fujitsu Siemens Activy Budget-S PCI rev GR (tda8083/Grundig 29504-451(tsa5522))
-		budget->dvb_frontend = tda8083_attach(&grundig_29504_451_config, &budget->i2c_adap);
+	case 0x1005: // Hauppauge/TT Nova-T budget (L64781/Grundig 29504-401(tsa5060))
+
+		budget->dvb_frontend = dvb_attach(l64781_attach, &grundig_29504_401_config, &budget->i2c_adap);
 		if (budget->dvb_frontend) {
-			budget->dvb_frontend->ops->set_voltage = siemens_budget_set_voltage;
+			budget->dvb_frontend->ops.tuner_ops.set_params = grundig_29504_401_tuner_set_params;
+			budget->dvb_frontend->tuner_priv = NULL;
 			break;
+		}
+		break;
+
+	case 0x4f60: /* Fujitsu Siemens Activy Budget-S PCI rev AL (stv0299/tsa5059) */
+	{
+		int subtype = i2c_readreg(&budget->i2c_adap, 0x50, 0x67);
+
+		if (subtype < 0)
+			break;
+		/* fixme: find a better way to identify the card */
+		if (subtype < 0x36) {
+			/* assume ALPS BSRU6 */
+			budget->dvb_frontend = dvb_attach(stv0299_attach, &alps_bsru6_config_activy, &budget->i2c_adap);
+			if (budget->dvb_frontend) {
+				printk(KERN_INFO "budget: tuner ALPS BSRU6 detected\n");
+				budget->dvb_frontend->ops.tuner_ops.set_params = alps_bsru6_tuner_set_params;
+				budget->dvb_frontend->tuner_priv = &budget->i2c_adap;
+				budget->dvb_frontend->ops.set_voltage = siemens_budget_set_voltage;
+				budget->dvb_frontend->ops.dishnetwork_send_legacy_command = NULL;
+				break;
+			}
+		} else {
+			/* assume ALPS BSBE1 */
+			/* reset tuner */
+			saa7146_setgpio(budget->dev, 3, SAA7146_GPIO_OUTLO);
+			msleep(50);
+			saa7146_setgpio(budget->dev, 3, SAA7146_GPIO_OUTHI);
+			msleep(250);
+			budget->dvb_frontend = dvb_attach(stv0299_attach, &alps_bsbe1_config_activy, &budget->i2c_adap);
+			if (budget->dvb_frontend) {
+				printk(KERN_INFO "budget: tuner ALPS BSBE1 detected\n");
+				budget->dvb_frontend->ops.tuner_ops.set_params = alps_bsbe1_tuner_set_params;
+				budget->dvb_frontend->tuner_priv = &budget->i2c_adap;
+				budget->dvb_frontend->ops.set_voltage = siemens_budget_set_voltage;
+				budget->dvb_frontend->ops.dishnetwork_send_legacy_command = NULL;
+				break;
+			}
+		}
+		break;
+	}
+
+	case 0x4f61: // Fujitsu Siemens Activy Budget-S PCI rev GR (tda8083/Grundig 29504-451(tsa5522))
+		budget->dvb_frontend = dvb_attach(tda8083_attach, &grundig_29504_451_config, &budget->i2c_adap);
+		if (budget->dvb_frontend) {
+			budget->dvb_frontend->ops.tuner_ops.set_params = grundig_29504_451_tuner_set_params;
+			budget->dvb_frontend->ops.set_voltage = siemens_budget_set_voltage;
+			budget->dvb_frontend->ops.dishnetwork_send_legacy_command = NULL;
+		}
+		break;
+
+	case 0x5f60: /* Fujitsu Siemens Activy Budget-T PCI rev AL (tda10046/ALPS TDHD1-204A) */
+		budget->dvb_frontend = dvb_attach(tda10046_attach, &alps_tdhd1_204a_config, &budget->i2c_adap);
+		if (budget->dvb_frontend) {
+			budget->dvb_frontend->ops.tuner_ops.set_params = alps_tdhd1_204a_tuner_set_params;
+			budget->dvb_frontend->tuner_priv = &budget->i2c_adap;
+		}
+		break;
+
+	case 0x5f61: /* Fujitsu Siemens Activy Budget-T PCI rev GR (L64781/Grundig 29504-401(tsa5060)) */
+		budget->dvb_frontend = dvb_attach(l64781_attach, &grundig_29504_401_config_activy, &budget->i2c_adap);
+		if (budget->dvb_frontend) {
+			budget->dvb_frontend->tuner_priv = &tuner_address_grundig_29504_401_activy;
+			budget->dvb_frontend->ops.tuner_ops.set_params = grundig_29504_401_tuner_set_params;
+		}
+		break;
+
+	case 0x1016: // Hauppauge/TT Nova-S SE (samsung s5h1420/????(tda8260))
+		budget->dvb_frontend = dvb_attach(s5h1420_attach, &s5h1420_config, &budget->i2c_adap);
+		if (budget->dvb_frontend) {
+			budget->dvb_frontend->ops.tuner_ops.set_params = s5h1420_tuner_set_params;
+			if (dvb_attach(lnbp21_attach, budget->dvb_frontend, &budget->i2c_adap, 0, 0) == NULL) {
+				printk("%s: No LNBP21 found!\n", __func__);
+				goto error_out;
+			}
+			break;
+		}
+
+	case 0x1018: // TT Budget-S-1401 (philips tda10086/philips tda8262)
+		// gpio2 is connected to CLB - reset it + leave it high
+		saa7146_setgpio(budget->dev, 2, SAA7146_GPIO_OUTLO);
+		msleep(1);
+		saa7146_setgpio(budget->dev, 2, SAA7146_GPIO_OUTHI);
+		msleep(1);
+
+		budget->dvb_frontend = dvb_attach(tda10086_attach, &tda10086_config, &budget->i2c_adap);
+		if (budget->dvb_frontend) {
+			if (dvb_attach(tda826x_attach, budget->dvb_frontend, 0x60, &budget->i2c_adap, 0) == NULL)
+				printk("%s: No tda826x found!\n", __func__);
+			if (dvb_attach(lnbp21_attach, budget->dvb_frontend, &budget->i2c_adap, 0, 0) == NULL) {
+				printk("%s: No LNBP21 found!\n", __func__);
+				goto error_out;
+			}
+			break;
+		}
+
+	case 0x101c: { /* TT S2-1600 */
+			struct stv6110x_devctl *ctl;
+			saa7146_setgpio(budget->dev, 2, SAA7146_GPIO_OUTLO);
+			msleep(50);
+			saa7146_setgpio(budget->dev, 2, SAA7146_GPIO_OUTHI);
+			msleep(250);
+
+			budget->dvb_frontend = dvb_attach(stv090x_attach,
+							  &tt1600_stv090x_config,
+							  &budget->i2c_adap,
+							  STV090x_DEMODULATOR_0);
+
+			if (budget->dvb_frontend) {
+
+				ctl = dvb_attach(stv6110x_attach,
+						 budget->dvb_frontend,
+						 &tt1600_stv6110x_config,
+						 &budget->i2c_adap);
+
+				if (ctl) {
+					tt1600_stv090x_config.tuner_init	  = ctl->tuner_init;
+					tt1600_stv090x_config.tuner_sleep	  = ctl->tuner_sleep;
+					tt1600_stv090x_config.tuner_set_mode	  = ctl->tuner_set_mode;
+					tt1600_stv090x_config.tuner_set_frequency = ctl->tuner_set_frequency;
+					tt1600_stv090x_config.tuner_get_frequency = ctl->tuner_get_frequency;
+					tt1600_stv090x_config.tuner_set_bandwidth = ctl->tuner_set_bandwidth;
+					tt1600_stv090x_config.tuner_get_bandwidth = ctl->tuner_get_bandwidth;
+					tt1600_stv090x_config.tuner_set_bbgain	  = ctl->tuner_set_bbgain;
+					tt1600_stv090x_config.tuner_get_bbgain	  = ctl->tuner_get_bbgain;
+					tt1600_stv090x_config.tuner_set_refclk	  = ctl->tuner_set_refclk;
+					tt1600_stv090x_config.tuner_get_status	  = ctl->tuner_get_status;
+
+					/* call the init function once to initialize
+					   tuner's clock output divider and demod's
+					   master clock */
+					if (budget->dvb_frontend->ops.init)
+						budget->dvb_frontend->ops.init(budget->dvb_frontend);
+
+					if (dvb_attach(isl6423_attach,
+						       budget->dvb_frontend,
+						       &budget->i2c_adap,
+						       &tt1600_isl6423_config) == NULL) {
+						printk(KERN_ERR "%s: No Intersil ISL6423 found!\n", __func__);
+						goto error_out;
+					}
+				} else {
+					printk(KERN_ERR "%s: No STV6110(A) Silicon Tuner found!\n", __func__);
+					goto error_out;
+				}
+			}
 		}
 		break;
 	}
 
 	if (budget->dvb_frontend == NULL) {
-		printk("budget: A frontend driver was not found for device %04x/%04x subsystem %04x/%04x\n",
+		printk("budget: A frontend driver was not found for device [%04x:%04x] subsystem [%04x:%04x]\n",
 		       budget->dev->pci->vendor,
 		       budget->dev->pci->device,
 		       budget->dev->pci->subsystem_vendor,
 		       budget->dev->pci->subsystem_device);
 	} else {
-		if (dvb_register_frontend(budget->dvb_adapter, budget->dvb_frontend)) {
-			printk("budget: Frontend registration failed!\n");
-			if (budget->dvb_frontend->ops->release)
-				budget->dvb_frontend->ops->release(budget->dvb_frontend);
-			budget->dvb_frontend = NULL;
-		}
+		if (dvb_register_frontend(&budget->dvb_adapter, budget->dvb_frontend))
+			goto error_out;
 	}
+	return;
+
+error_out:
+	printk("budget: Frontend registration failed!\n");
+	dvb_frontend_detach(budget->dvb_frontend);
+	budget->dvb_frontend = NULL;
+	return;
 }
 
 static int budget_attach (struct saa7146_dev* dev, struct saa7146_pci_extension_data *info)
@@ -491,14 +714,17 @@ static int budget_attach (struct saa7146_dev* dev, struct saa7146_pci_extension_
 
 	dev->ext_priv = budget;
 
-	if ((err = ttpci_budget_init (budget, dev, info, THIS_MODULE))) {
+	err = ttpci_budget_init(budget, dev, info, THIS_MODULE, adapter_nr);
+	if (err) {
 		printk("==> failed\n");
 		kfree (budget);
 		return err;
 	}
 
-	budget->dvb_adapter->priv = budget;
+	budget->dvb_adapter.priv = budget;
 	frontend_init(budget);
+
+	ttpci_budget_init_hooks(budget);
 
 	return 0;
 }
@@ -508,7 +734,10 @@ static int budget_detach (struct saa7146_dev* dev)
 	struct budget *budget = (struct budget*) dev->ext_priv;
 	int err;
 
-	if (budget->dvb_frontend) dvb_unregister_frontend(budget->dvb_frontend);
+	if (budget->dvb_frontend) {
+		dvb_unregister_frontend(budget->dvb_frontend);
+		dvb_frontend_detach(budget->dvb_frontend);
+	}
 
 	err = ttpci_budget_deinit (budget);
 
@@ -524,16 +753,25 @@ MAKE_BUDGET_INFO(ttbs,	"TT-Budget/WinTV-NOVA-S  PCI",	BUDGET_TT);
 MAKE_BUDGET_INFO(ttbc,	"TT-Budget/WinTV-NOVA-C  PCI",	BUDGET_TT);
 MAKE_BUDGET_INFO(ttbt,	"TT-Budget/WinTV-NOVA-T  PCI",	BUDGET_TT);
 MAKE_BUDGET_INFO(satel,	"SATELCO Multimedia PCI",	BUDGET_TT_HW_DISEQC);
+MAKE_BUDGET_INFO(ttbs1401, "TT-Budget-S-1401 PCI", BUDGET_TT);
+MAKE_BUDGET_INFO(tt1600, "TT-Budget S2-1600 PCI", BUDGET_TT);
 MAKE_BUDGET_INFO(fsacs0, "Fujitsu Siemens Activy Budget-S PCI (rev GR/grundig frontend)", BUDGET_FS_ACTIVY);
 MAKE_BUDGET_INFO(fsacs1, "Fujitsu Siemens Activy Budget-S PCI (rev AL/alps frontend)", BUDGET_FS_ACTIVY);
+MAKE_BUDGET_INFO(fsact,	 "Fujitsu Siemens Activy Budget-T PCI (rev GR/Grundig frontend)", BUDGET_FS_ACTIVY);
+MAKE_BUDGET_INFO(fsact1, "Fujitsu Siemens Activy Budget-T PCI (rev AL/ALPS TDHD1-204A)", BUDGET_FS_ACTIVY);
 
 static struct pci_device_id pci_tbl[] = {
 	MAKE_EXTENSION_PCI(ttbs,  0x13c2, 0x1003),
 	MAKE_EXTENSION_PCI(ttbc,  0x13c2, 0x1004),
 	MAKE_EXTENSION_PCI(ttbt,  0x13c2, 0x1005),
 	MAKE_EXTENSION_PCI(satel, 0x13c2, 0x1013),
+	MAKE_EXTENSION_PCI(ttbs,  0x13c2, 0x1016),
+	MAKE_EXTENSION_PCI(ttbs1401, 0x13c2, 0x1018),
+	MAKE_EXTENSION_PCI(tt1600, 0x13c2, 0x101c),
 	MAKE_EXTENSION_PCI(fsacs1,0x1131, 0x4f60),
 	MAKE_EXTENSION_PCI(fsacs0,0x1131, 0x4f61),
+	MAKE_EXTENSION_PCI(fsact1, 0x1131, 0x5f60),
+	MAKE_EXTENSION_PCI(fsact, 0x1131, 0x5f61),
 	{
 		.vendor    = 0,
 	}
@@ -542,8 +780,8 @@ static struct pci_device_id pci_tbl[] = {
 MODULE_DEVICE_TABLE(pci, pci_tbl);
 
 static struct saa7146_extension budget_extension = {
-	.name		= "budget dvb\0",
-	.flags		= 0,
+	.name		= "budget dvb",
+	.flags		= SAA7146_USE_I2C_IRQ,
 
 	.module		= THIS_MODULE,
 	.pci_tbl	= pci_tbl,

@@ -10,10 +10,11 @@
  * This file handles the architecture-dependent parts of initialization
  */
 
-#include <linux/config.h>
 #include <linux/seq_file.h>
 #include <linux/proc_fs.h>
 #include <linux/delay.h>
+#include <linux/param.h>
+#include <arch/system.h>
 
 #ifdef CONFIG_PROC_FS
 #define HAS_FPU		0x0001
@@ -57,8 +58,8 @@ int show_cpuinfo(struct seq_file *m, void *v)
 
 	revision = rdvr();
 
-	if (revision >= sizeof cpu_info/sizeof *cpu_info)
-		info = &cpu_info[sizeof cpu_info/sizeof *cpu_info - 1];
+	if (revision >= ARRAY_SIZE(cpu_info))
+		info = &cpu_info[ARRAY_SIZE(cpu_info) - 1];
 	else
 		info = &cpu_info[revision];
 

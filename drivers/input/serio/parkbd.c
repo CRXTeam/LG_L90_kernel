@@ -46,6 +46,7 @@
 
 #include <linux/module.h>
 #include <linux/parport.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/serio.h>
 
@@ -102,7 +103,7 @@ static int parkbd_write(struct serio *port, unsigned char c)
 	return 0;
 }
 
-static void parkbd_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static void parkbd_interrupt(void *dev_id)
 {
 
 	if (parkbd_writing) {
@@ -134,7 +135,7 @@ static void parkbd_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		parkbd_buffer |= (parkbd_readlines() >> 1) << parkbd_counter++;
 
 		if (parkbd_counter == parkbd_mode + 10)
-			serio_interrupt(parkbd_port, (parkbd_buffer >> (2 - parkbd_mode)) & 0xff, 0, regs);
+			serio_interrupt(parkbd_port, (parkbd_buffer >> (2 - parkbd_mode)) & 0xff, 0);
 	}
 
 	parkbd_last = jiffies;
@@ -171,9 +172,8 @@ static struct serio * __init parkbd_allocate_serio(void)
 {
 	struct serio *serio;
 
-	serio = kmalloc(sizeof(struct serio), GFP_KERNEL);
+	serio = kzalloc(sizeof(struct serio), GFP_KERNEL);
 	if (serio) {
-		memset(serio, 0, sizeof(struct serio));
 		serio->id.type = parkbd_mode;
 		serio->write = parkbd_write,
 		strlcpy(serio->name, "PARKBD AT/XT keyboard adapter", sizeof(serio->name));

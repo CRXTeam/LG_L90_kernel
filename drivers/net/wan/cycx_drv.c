@@ -48,15 +48,16 @@
 * Aug  8, 1998	acme		Initial version.
 */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/init.h>		/* __init */
 #include <linux/module.h>
 #include <linux/kernel.h>	/* printk(), and other useful stuff */
 #include <linux/stddef.h>	/* offsetof(), etc. */
 #include <linux/errno.h>	/* return codes */
-#include <linux/sched.h>	/* for jiffies, HZ, etc. */
 #include <linux/cycx_drv.h>	/* API definitions */
 #include <linux/cycx_cfm.h>	/* CYCX firmware module definitions */
-#include <linux/delay.h>	/* udelay */
+#include <linux/delay.h>	/* udelay, msleep_interruptible */
 #include <asm/io.h>		/* read[wl], write[wl], ioremap, iounmap */
 
 #define	MOD_VERSION	0
@@ -74,8 +75,7 @@ static int reset_cyc2x(void __iomem *addr);
 static int detect_cyc2x(void __iomem *addr);
 
 /* Miscellaneous functions */
-static void delay_cycx(int sec);
-static int get_option_index(long *optlist, long optval);
+static int get_option_index(const long *optlist, long optval);
 static u16 checksum(u8 *buf, u32 len);
 
 #define wait_cyc(addr) cycx_exec(addr + CMD_OFFSET)
@@ -83,23 +83,22 @@ static u16 checksum(u8 *buf, u32 len);
 /* Global Data */
 
 /* private data */
-static char modname[] = "cycx_drv";
-static char fullname[] = "Cyclom 2X Support Module";
-static char copyright[] = "(c) 1998-2003 Arnaldo Carvalho de Melo "
-			  "<acme@conectiva.com.br>";
+static const char fullname[] = "Cyclom 2X Support Module";
+static const char copyright[] =
+	"(c) 1998-2003 Arnaldo Carvalho de Melo <acme@conectiva.com.br>";
 
 /* Hardware configuration options.
  * These are arrays of configuration options used by verification routines.
  * The first element of each array is its size (i.e. number of options).
  */
-static long cyc2x_dpmbase_options[] = {
+static const long cyc2x_dpmbase_options[] = {
 	20,
 	0xA0000, 0xA4000, 0xA8000, 0xAC000, 0xB0000, 0xB4000, 0xB8000,
 	0xBC000, 0xC0000, 0xC4000, 0xC8000, 0xCC000, 0xD0000, 0xD4000,
 	0xD8000, 0xDC000, 0xE0000, 0xE4000, 0xE8000, 0xEC000
 };
 
-static long cycx_2x_irq_options[]  = { 7, 3, 5, 9, 10, 11, 12, 15 };
+static const long cycx_2x_irq_options[]  = { 7, 3, 5, 9, 10, 11, 12, 15 };
 
 /* Kernel Loadable Module Entry Points */
 /* Module 'insert' entry point.
@@ -110,17 +109,17 @@ static long cycx_2x_irq_options[]  = { 7, 3, 5, 9, 10, 11, 12, 15 };
  *		< 0	error.
  * Context:	process */
 
-int __init cycx_drv_init(void)
+static int __init cycx_drv_init(void)
 {
-	printk(KERN_INFO "%s v%u.%u %s\n", fullname, MOD_VERSION, MOD_RELEASE,
-			 copyright);
+	pr_info("%s v%u.%u %s\n",
+		fullname, MOD_VERSION, MOD_RELEASE, copyright);
 
 	return 0;
 }
 
 /* Module 'remove' entry point.
  * o release all remaining system resources */
-void cycx_drv_cleanup(void)
+static void cycx_drv_cleanup(void)
 {
 }
 
@@ -141,18 +140,16 @@ int cycx_setup(struct cycx_hw *hw, void *cfm, u32 len, unsigned long dpmbase)
 
 	/* Verify IRQ configuration options */
 	if (!get_option_index(cycx_2x_irq_options, hw->irq)) {
-		printk(KERN_ERR "%s: IRQ %d is invalid!\n", modname, hw->irq);
+		pr_err("IRQ %d is invalid!\n", hw->irq);
 		return -EINVAL;
 	}
 
 	/* Setup adapter dual-port memory window and test memory */
 	if (!dpmbase) {
-		printk(KERN_ERR "%s: you must specify the dpm address!\n",
-				modname);
+		pr_err("you must specify the dpm address!\n");
  		return -EINVAL;
 	} else if (!get_option_index(cyc2x_dpmbase_options, dpmbase)) {
-		printk(KERN_ERR "%s: memory address 0x%lX is invalid!\n",
-				modname, dpmbase);
+		pr_err("memory address 0x%lX is invalid!\n", dpmbase);
 		return -EINVAL;
 	}
 
@@ -160,13 +157,12 @@ int cycx_setup(struct cycx_hw *hw, void *cfm, u32 len, unsigned long dpmbase)
 	hw->dpmsize = CYCX_WINDOWSIZE;
 
 	if (!detect_cyc2x(hw->dpmbase)) {
-		printk(KERN_ERR "%s: adapter Cyclom 2X not found at "
-				"address 0x%lX!\n", modname, dpmbase);
+		pr_err("adapter Cyclom 2X not found at address 0x%lX!\n",
+		       dpmbase);
 		return -EINVAL;
 	}
 
-	printk(KERN_INFO "%s: found Cyclom 2X card at address 0x%lX.\n",
-			 modname, dpmbase);
+	pr_info("found Cyclom 2X card at address 0x%lX\n", dpmbase);
 
 	/* Load firmware. If loader fails then shut down adapter */
 	err = load_cyc2x(hw, cfm, len);
@@ -185,8 +181,7 @@ int cycx_down(struct cycx_hw *hw)
 }
 
 /* Enable interrupt generation.  */
-EXPORT_SYMBOL(cycx_inten);
-void cycx_inten(struct cycx_hw *hw)
+static void cycx_inten(struct cycx_hw *hw)
 {
 	writeb(0, hw->dpmbase);
 }
@@ -259,7 +254,7 @@ static int memory_exists(void __iomem *addr)
 			if (readw(addr + 0x10) == TEST_PATTERN)
 				return 1;
 
-		delay_cycx(1);
+		msleep_interruptible(1 * 1000);
 	}
 
 	return 0;
@@ -316,7 +311,7 @@ static void cycx_reset_boot(void __iomem *addr, u8 *code, u32 len)
 
 	/* 80186 was in hold, go */
 	writeb(0, addr + START_CPU);
-	delay_cycx(1);
+	msleep_interruptible(1 * 1000);
 }
 
 /* Load data.bin file through boot (reset) interface. */
@@ -325,7 +320,7 @@ static int cycx_data_boot(void __iomem *addr, u8 *code, u32 len)
 	void __iomem *pt_boot_cmd = addr + CMD_OFFSET;
 	u32 i;
 
-	/* boot buffer lenght */
+	/* boot buffer length */
 	writew(CFM_LOAD_BUFSZ, pt_boot_cmd + sizeof(u16));
 	writew(GEN_DEFPAR, pt_boot_cmd);
 
@@ -342,7 +337,7 @@ static int cycx_data_boot(void __iomem *addr, u8 *code, u32 len)
 	for (i = 0 ; i < len ; i += CFM_LOAD_BUFSZ)
 		if (buffer_load(addr, code + i,
 				min_t(u32, CFM_LOAD_BUFSZ, (len - i))) < 0) {
-			printk(KERN_ERR "%s: Error !!\n", modname);
+			pr_err("Error !!\n");
 			return -1;
 		}
 
@@ -356,7 +351,7 @@ static int cycx_code_boot(void __iomem *addr, u8 *code, u32 len)
 	void __iomem *pt_boot_cmd = addr + CMD_OFFSET;
 	u32 i;
 
-	/* boot buffer lenght */
+	/* boot buffer length */
 	writew(CFM_LOAD_BUFSZ, pt_boot_cmd + sizeof(u16));
 	writew(GEN_DEFPAR, pt_boot_cmd);
 
@@ -373,7 +368,7 @@ static int cycx_code_boot(void __iomem *addr, u8 *code, u32 len)
 	for (i = 0 ; i < len ; i += CFM_LOAD_BUFSZ)
 		if (buffer_load(addr, code + i,
 				min_t(u32, CFM_LOAD_BUFSZ, (len - i)))) {
-			printk(KERN_ERR "%s: Error !!\n", modname);
+			pr_err("Error !!\n");
 			return -1;
 		}
 
@@ -394,23 +389,20 @@ static int load_cyc2x(struct cycx_hw *hw, struct cycx_firmware *cfm, u32 len)
 	u16 cksum;
 
 	/* Announce */
-	printk(KERN_INFO "%s: firmware signature=\"%s\"\n", modname,
-							    cfm->signature);
+	pr_info("firmware signature=\"%s\"\n", cfm->signature);
 
 	/* Verify firmware signature */
 	if (strcmp(cfm->signature, CFM_SIGNATURE)) {
-		printk(KERN_ERR "%s:load_cyc2x: not Cyclom-2X firmware!\n",
-				modname);
+		pr_err("load_cyc2x: not Cyclom-2X firmware!\n");
 		return -EINVAL;
 	}
 
-	printk(KERN_INFO "%s: firmware version=%u\n", modname, cfm->version);
+	pr_info("firmware version=%u\n", cfm->version);
 
 	/* Verify firmware module format version */
 	if (cfm->version != CFM_VERSION) {
-		printk(KERN_ERR "%s:%s: firmware format %u rejected! "
-				"Expecting %u.\n",
-				modname, __FUNCTION__, cfm->version, CFM_VERSION);
+		pr_err("%s: firmware format %u rejected! Expecting %u.\n",
+		       __func__, cfm->version, CFM_VERSION);
 		return -EINVAL;
 	}
 
@@ -422,23 +414,22 @@ static int load_cyc2x(struct cycx_hw *hw, struct cycx_firmware *cfm, u32 len)
 	if (((len - sizeof(struct cycx_firmware) - 1) != cfm->info.codesize) ||
 */
 	if (cksum != cfm->checksum) {
-		printk(KERN_ERR "%s:%s: firmware corrupted!\n",
-				modname, __FUNCTION__);
-		printk(KERN_ERR " cdsize = 0x%x (expected 0x%lx)\n",
-				len - (int)sizeof(struct cycx_firmware) - 1,
-				cfm->info.codesize);
-		printk(KERN_ERR " chksum = 0x%x (expected 0x%x)\n",
-				cksum, cfm->checksum);
+		pr_err("%s: firmware corrupted!\n", __func__);
+		pr_err(" cdsize = 0x%x (expected 0x%lx)\n",
+		       len - (int)sizeof(struct cycx_firmware) - 1,
+		       cfm->info.codesize);
+		pr_err(" chksum = 0x%x (expected 0x%x)\n",
+		       cksum, cfm->checksum);
 		return -EINVAL;
 	}
 
 	/* If everything is ok, set reset, data and code pointers */
 	img_hdr = (struct cycx_fw_header *)&cfm->image;
 #ifdef FIRMWARE_DEBUG
-	printk(KERN_INFO "%s:%s: image sizes\n", __FUNCTION__, modname);
-	printk(KERN_INFO " reset=%lu\n", img_hdr->reset_size);
-	printk(KERN_INFO "  data=%lu\n", img_hdr->data_size);
-	printk(KERN_INFO "  code=%lu\n", img_hdr->code_size);
+	pr_info("%s: image sizes\n", __func__);
+	pr_info(" reset=%lu\n", img_hdr->reset_size);
+	pr_info("  data=%lu\n", img_hdr->data_size);
+	pr_info("  code=%lu\n", img_hdr->code_size);
 #endif
 	reset_image = ((u8 *)img_hdr) + sizeof(struct cycx_fw_header);
 	data_image = reset_image + img_hdr->reset_size;
@@ -446,15 +437,14 @@ static int load_cyc2x(struct cycx_hw *hw, struct cycx_firmware *cfm, u32 len)
 
 	/*---- Start load ----*/
 	/* Announce */
-	printk(KERN_INFO "%s: loading firmware %s (ID=%u)...\n", modname,
-			 cfm->descr[0] ? cfm->descr : "unknown firmware",
-			 cfm->info.codeid);
+	pr_info("loading firmware %s (ID=%u)...\n",
+		cfm->descr[0] ? cfm->descr : "unknown firmware",
+		cfm->info.codeid);
 
 	for (i = 0 ; i < 5 ; i++) {
 		/* Reset Cyclom hardware */
 		if (!reset_cyc2x(hw->dpmbase)) {
-			printk(KERN_ERR "%s: dpm problem or board not found\n",
-					modname);
+			pr_err("dpm problem or board not found\n");
 			return -EINVAL;
 		}
 
@@ -462,28 +452,28 @@ static int load_cyc2x(struct cycx_hw *hw, struct cycx_firmware *cfm, u32 len)
 		cycx_reset_boot(hw->dpmbase, reset_image, img_hdr->reset_size);
 		/* reset is waiting for boot */
 		writew(GEN_POWER_ON, pt_cycld);
-		delay_cycx(1);
+		msleep_interruptible(1 * 1000);
 
 		for (j = 0 ; j < 3 ; j++)
 			if (!readw(pt_cycld))
 				goto reset_loaded;
 			else
-				delay_cycx(1);
+				msleep_interruptible(1 * 1000);
 	}
 
-	printk(KERN_ERR "%s: reset not started.\n", modname);
+	pr_err("reset not started\n");
 	return -EINVAL;
 
 reset_loaded:
 	/* Load data.bin */
 	if (cycx_data_boot(hw->dpmbase, data_image, img_hdr->data_size)) {
-		printk(KERN_ERR "%s: cannot load data file.\n", modname);
+		pr_err("cannot load data file\n");
 		return -EINVAL;
 	}
 
 	/* Load code.bin */
 	if (cycx_code_boot(hw->dpmbase, code_image, img_hdr->code_size)) {
-		printk(KERN_ERR "%s: cannot load code file.\n", modname);
+		pr_err("cannot load code file\n");
 		return -EINVAL;
 	}
 
@@ -495,8 +485,8 @@ reset_loaded:
 
 	/* Arthur Ganzert's tip: wait a while after the firmware loading...
 	   seg abr 26 17:17:12 EST 1999 - acme */
-	delay_cycx(7);
-	printk(KERN_INFO "%s: firmware loaded!\n", modname);
+	msleep_interruptible(7 * 1000);
+	pr_info("firmware loaded!\n");
 
 	/* enable interrupts */
 	cycx_inten(hw);
@@ -532,7 +522,7 @@ static int detect_cyc2x(void __iomem *addr)
 /* Miscellaneous */
 /* Get option's index into the options list.
  *	Return option's index (1 .. N) or zero if option is invalid. */
-static int get_option_index(long *optlist, long optval)
+static int get_option_index(const long *optlist, long optval)
 {
 	int i = 1;
 
@@ -547,18 +537,11 @@ static int get_option_index(long *optlist, long optval)
 static int reset_cyc2x(void __iomem *addr)
 {
 	writeb(0, addr + RST_ENABLE);
-	delay_cycx(2);
+	msleep_interruptible(2 * 1000);
 	writeb(0, addr + RST_DISABLE);
-	delay_cycx(2);
+	msleep_interruptible(2 * 1000);
 
 	return memory_exists(addr);
-}
-
-/* Delay */
-static void delay_cycx(int sec)
-{
-	set_current_state(TASK_INTERRUPTIBLE);
-	schedule_timeout(sec * HZ);
 }
 
 /* Calculate 16-bit CRC using CCITT polynomial. */

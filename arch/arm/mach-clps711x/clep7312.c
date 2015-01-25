@@ -26,23 +26,21 @@
 #include "common.h"
 
 static void __init
-fixup_clep7312(struct machine_desc *desc, struct tag *tags,
-	    char **cmdline, struct meminfo *mi)
+fixup_clep7312(struct tag *tags, char **cmdline, struct meminfo *mi)
 {
 	mi->nr_banks=1;
 	mi->bank[0].start = 0xc0000000;
 	mi->bank[0].size = 0x01000000;
-	mi->bank[0].node = 0;
 }
 
 
 MACHINE_START(CLEP7212, "Cirrus Logic 7212/7312")
-	MAINTAINER("Nobody")
-        BOOT_MEM(0xc0000000, 0x80000000, 0xff000000)
-	BOOT_PARAMS(0xc0000100)
-	FIXUP(fixup_clep7312)
-	MAPIO(clps711x_map_io)
-	INITIRQ(clps711x_init_irq)
+	/* Maintainer: Nobody */
+	.atag_offset	= 0x0100,
+	.fixup		= fixup_clep7312,
+	.map_io		= clps711x_map_io,
+	.init_irq	= clps711x_init_irq,
 	.timer		= &clps711x_timer,
+	.restart	= clps711x_restart,
 MACHINE_END
 

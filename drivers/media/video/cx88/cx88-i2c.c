@@ -1,12 +1,15 @@
+
 /*
-    $Id: cx88-i2c.c,v 1.20 2005/02/15 15:59:35 kraxel Exp $
 
     cx88-i2c.c  --  all the i2c code is here
 
     Copyright (C) 1996,97,98 Ralph  Metzler (rjkm@thp.uni-koeln.de)
-                           & Marcus Metzler (mocm@thp.uni-koeln.de)
+			   & Marcus Metzler (mocm@thp.uni-koeln.de)
     (c) 2002 Yurij Sysoev <yurij@naturesoft.net>
     (c) 1999-2003 Gerd Knorr <kraxel@bytesex.org>
+
+    (c) 2005 Mauro Carvalho Chehab <mchehab@infradead.org>
+	- Multituner support and i2c address binding
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -25,27 +28,32 @@
 */
 
 #include <linux/module.h>
-#include <linux/moduleparam.h>
 #include <linux/init.h>
 
 #include <asm/io.h>
 
 #include "cx88.h"
+#include <media/v4l2-common.h>
 
-static unsigned int i2c_debug = 0;
+static unsigned int i2c_debug;
 module_param(i2c_debug, int, 0644);
 MODULE_PARM_DESC(i2c_debug,"enable debug messages [i2c]");
 
-static unsigned int i2c_scan = 0;
+static unsigned int i2c_scan;
 module_param(i2c_scan, int, 0444);
 MODULE_PARM_DESC(i2c_scan,"scan i2c bus at insmod time");
+
+static unsigned int i2c_udelay = 5;
+module_param(i2c_udelay, int, 0644);
+MODULE_PARM_DESC(i2c_udelay,"i2c delay at insmod time, in usecs "
+		"(should be 5 or higher). Lower value means higher bus speed.");
 
 #define dprintk(level,fmt, arg...)	if (i2c_debug >= level) \
 	printk(KERN_DEBUG "%s: " fmt, core->name , ## arg)
 
 /* ----------------------------------------------------------------------- */
 
-void cx8800_bit_setscl(void *data, int state)
+static void cx8800_bit_setscl(void *data, int state)
 {
 	struct cx88_core *core = data;
 
@@ -57,7 +65,7 @@ void cx8800_bit_setscl(void *data, int state)
 	cx_read(MO_I2C);
 }
 
-void cx8800_bit_setsda(void *data, int state)
+static void cx8800_bit_setsda(void *data, int state)
 {
 	struct cx88_core *core = data;
 
@@ -89,74 +97,32 @@ static int cx8800_bit_getsda(void *data)
 
 /* ----------------------------------------------------------------------- */
 
-static int attach_inform(struct i2c_client *client)
-{
-	struct cx88_core *core = i2c_get_adapdata(client->adapter);
-
-	dprintk(1, "i2c attach [addr=0x%x,client=%s]\n",
-		client->addr, i2c_clientname(client));
-	if (!client->driver->command)
-		return 0;
-
-	if (core->tuner_type != UNSET)
-		client->driver->command(client, TUNER_SET_TYPE, &core->tuner_type);
-	if (core->tda9887_conf)
-		client->driver->command(client, TDA9887_SET_CONFIG, &core->tda9887_conf);
-	return 0;
-}
-
-static int detach_inform(struct i2c_client *client)
-{
-	struct cx88_core *core = i2c_get_adapdata(client->adapter);
-
-	dprintk(1, "i2c detach [client=%s]\n", i2c_clientname(client));
-	return 0;
-}
-
-void cx88_call_i2c_clients(struct cx88_core *core, unsigned int cmd, void *arg)
-{
-	if (0 != core->i2c_rc)
-		return;
-	i2c_clients_command(&core->i2c_adap, cmd, arg);
-}
-
-static struct i2c_algo_bit_data cx8800_i2c_algo_template = {
+static const struct i2c_algo_bit_data cx8800_i2c_algo_template = {
 	.setsda  = cx8800_bit_setsda,
 	.setscl  = cx8800_bit_setscl,
 	.getsda  = cx8800_bit_getsda,
 	.getscl  = cx8800_bit_getscl,
 	.udelay  = 16,
-	.mdelay  = 10,
 	.timeout = 200,
 };
 
 /* ----------------------------------------------------------------------- */
 
-static struct i2c_adapter cx8800_i2c_adap_template = {
-	I2C_DEVNAME("cx2388x"),
-	.owner             = THIS_MODULE,
-	.id                = I2C_HW_B_CX2388x,
-	.client_register   = attach_inform,
-	.client_unregister = detach_inform,
-};
-
-static struct i2c_client cx8800_i2c_client_template = {
-        I2C_DEVNAME("cx88xx internal"),
-};
-
-static char *i2c_devs[128] = {
+static const char * const i2c_devs[128] = {
+	[ 0x1c >> 1 ] = "lgdt330x",
 	[ 0x86 >> 1 ] = "tda9887/cx22702",
 	[ 0xa0 >> 1 ] = "eeprom",
 	[ 0xc0 >> 1 ] = "tuner (analog)",
 	[ 0xc2 >> 1 ] = "tuner (analog/dvb)",
+	[ 0xc8 >> 1 ] = "xc5000",
 };
 
-static void do_i2c_scan(char *name, struct i2c_client *c)
+static void do_i2c_scan(const char *name, struct i2c_client *c)
 {
 	unsigned char buf;
 	int i,rc;
 
-	for (i = 0; i < 128; i++) {
+	for (i = 0; i < ARRAY_SIZE(i2c_devs); i++) {
 		c->addr = i;
 		rc = i2c_master_recv(c,&buf,0);
 		if (rc < 0)
@@ -166,48 +132,53 @@ static void do_i2c_scan(char *name, struct i2c_client *c)
 	}
 }
 
-/* init + register i2c algo-bit adapter */
+/* init + register i2c adapter */
 int cx88_i2c_init(struct cx88_core *core, struct pci_dev *pci)
 {
-	memcpy(&core->i2c_adap, &cx8800_i2c_adap_template,
-	       sizeof(core->i2c_adap));
+	/* Prevents usage of invalid delay values */
+	if (i2c_udelay<5)
+		i2c_udelay=5;
+
 	memcpy(&core->i2c_algo, &cx8800_i2c_algo_template,
 	       sizeof(core->i2c_algo));
-	memcpy(&core->i2c_client, &cx8800_i2c_client_template,
-	       sizeof(core->i2c_client));
 
-	if (core->tuner_type != TUNER_ABSENT)
-		core->i2c_adap.class |= I2C_CLASS_TV_ANALOG;
-	if (cx88_boards[core->board].dvb)
-		core->i2c_adap.class |= I2C_CLASS_TV_DIGITAL;
 
 	core->i2c_adap.dev.parent = &pci->dev;
 	strlcpy(core->i2c_adap.name,core->name,sizeof(core->i2c_adap.name));
-        core->i2c_algo.data = core;
-        i2c_set_adapdata(&core->i2c_adap,core);
-        core->i2c_adap.algo_data = &core->i2c_algo;
-        core->i2c_client.adapter = &core->i2c_adap;
+	core->i2c_adap.owner = THIS_MODULE;
+	core->i2c_algo.udelay = i2c_udelay;
+	core->i2c_algo.data = core;
+	i2c_set_adapdata(&core->i2c_adap, &core->v4l2_dev);
+	core->i2c_adap.algo_data = &core->i2c_algo;
+	core->i2c_client.adapter = &core->i2c_adap;
+	strlcpy(core->i2c_client.name, "cx88xx internal", I2C_NAME_SIZE);
 
 	cx8800_bit_setscl(core,1);
 	cx8800_bit_setsda(core,1);
 
 	core->i2c_rc = i2c_bit_add_bus(&core->i2c_adap);
 	if (0 == core->i2c_rc) {
+		static u8 tuner_data[] =
+			{ 0x0b, 0xdc, 0x86, 0x52 };
+		static struct i2c_msg tuner_msg =
+			{ .flags = 0, .addr = 0xc2 >> 1, .buf = tuner_data, .len = 4 };
+
 		dprintk(1, "i2c register ok\n");
+		switch( core->boardnr ) {
+			case CX88_BOARD_HAUPPAUGE_HVR1300:
+			case CX88_BOARD_HAUPPAUGE_HVR3000:
+			case CX88_BOARD_HAUPPAUGE_HVR4000:
+				printk("%s: i2c init: enabling analog demod on HVR1300/3000/4000 tuner\n",
+					core->name);
+				i2c_transfer(core->i2c_client.adapter, &tuner_msg, 1);
+				break;
+			default:
+				break;
+		}
 		if (i2c_scan)
 			do_i2c_scan(core->name,&core->i2c_client);
 	} else
 		printk("%s: i2c register FAILED\n", core->name);
+
 	return core->i2c_rc;
 }
-
-/* ----------------------------------------------------------------------- */
-
-EXPORT_SYMBOL(cx88_call_i2c_clients);
-EXPORT_SYMBOL(cx88_i2c_init);
-
-/*
- * Local variables:
- * c-basic-offset: 8
- * End:
- */

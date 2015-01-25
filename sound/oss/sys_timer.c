@@ -1,5 +1,5 @@
 /*
- * sound/sys_timer.c
+ * sound/oss/sys_timer.c
  *
  * The default timer for the Level 2 sequencer interface
  * Uses the (1/HZ sec) timer of kernel.
@@ -28,8 +28,7 @@ static unsigned long prev_event_time;
 
 static void     poll_def_tmr(unsigned long dummy);
 static DEFINE_SPINLOCK(lock);
-
-static struct timer_list def_tmr = TIMER_INITIALIZER(poll_def_tmr, 0, 0);
+static DEFINE_TIMER(def_tmr, poll_def_tmr, 0, 0);
 
 static unsigned long
 tmr2ticks(int tmr_value)
@@ -101,9 +100,6 @@ def_tmr_open(int dev, int mode)
 	curr_tempo = 60;
 	curr_timebase = 100;
 	opened = 1;
-
-	;
-
 	{
 		def_tmr.expires = (1) + jiffies;
 		add_timer(&def_tmr);

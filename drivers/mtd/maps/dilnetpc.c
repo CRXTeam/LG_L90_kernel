@@ -14,8 +14,6 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA
  *
- * $Id: dilnetpc.c,v 1.17 2004/11/28 09:40:39 dwmw2 Exp $
- *
  * The DIL/Net PC is a tiny embedded PC board made by SSV Embedded Systems
  * featuring the AMD Elan SC410 processor. There are two variants of this
  * board: DNP/1486 and ADNP/1486. The DNP version has 2 megs of flash
@@ -25,16 +23,18 @@
  * and http://www.ssv-embedded.de/ssv/pc104/p170.htm
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
-#include <asm/io.h>
+#include <linux/string.h>
+
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
 #include <linux/mtd/partitions.h>
 #include <linux/mtd/concat.h>
+
+#include <asm/io.h>
 
 /*
 ** The DIL/NetPC keeps its BIOS in two distinct flash blocks.
@@ -215,8 +215,8 @@ static void dnp_set_vpp(struct map_info *not_used, int on)
 	{
 		if(--vpp_counter == 0)
 			setcsc(CSC_RBWR, getcsc(CSC_RBWR) | 0x4);
-		else if(vpp_counter < 0)
-			BUG();
+		else
+			BUG_ON(vpp_counter < 0);
 	}
 	spin_unlock_irq(&dnpc_spin);
 }
@@ -237,8 +237,8 @@ static void adnp_set_vpp(struct map_info *not_used, int on)
 	{
 		if(--vpp_counter == 0)
 			setcsc(CSC_RBWR, getcsc(CSC_RBWR) | 0x8);
-		else if(vpp_counter < 0)
-			BUG();
+		else
+			BUG_ON(vpp_counter < 0);
 	}
 	spin_unlock_irq(&dnpc_spin);
 }
@@ -269,13 +269,13 @@ static struct map_info dnpc_map = {
 
 static struct mtd_partition partition_info[]=
 {
-	{ 
-		.name =		"ADNP boot", 
-		.offset =	0, 
+	{
+		.name =		"ADNP boot",
+		.offset =	0,
 		.size =		0xf0000,
 	},
-	{ 
-		.name =		"ADNP system BIOS", 
+	{
+		.name =		"ADNP system BIOS",
 		.offset =	MTDPART_OFS_NXTBLK,
 		.size =		0x10000,
 #ifdef DNPC_BIOS_BLOCKS_WRITEPROTECTED
@@ -288,7 +288,7 @@ static struct mtd_partition partition_info[]=
 		.size =		0x2f0000,
 	},
 	{
-		.name =		"ADNP system BIOS entry", 
+		.name =		"ADNP system BIOS entry",
 		.offset =	MTDPART_OFS_NXTBLK,
 		.size =		MTDPART_SIZ_FULL,
 #ifdef DNPC_BIOS_BLOCKS_WRITEPROTECTED
@@ -297,7 +297,7 @@ static struct mtd_partition partition_info[]=
 	},
 };
 
-#define NUM_PARTITIONS (sizeof(partition_info)/sizeof(partition_info[0]))
+#define NUM_PARTITIONS ARRAY_SIZE(partition_info)
 
 static struct mtd_info *mymtd;
 static struct mtd_info *lowlvl_parts[NUM_PARTITIONS];
@@ -322,9 +322,9 @@ static struct mtd_info *merged_mtd;
 
 static struct mtd_partition higlvl_partition_info[]=
 {
-	{ 
-		.name =		"ADNP boot block", 
-		.offset =	0, 
+	{
+		.name =		"ADNP boot block",
+		.offset =	0,
 		.size =		CONFIG_MTD_DILNETPC_BOOTSIZE,
 	},
 	{
@@ -332,8 +332,8 @@ static struct mtd_partition higlvl_partition_info[]=
 		.offset =	MTDPART_OFS_NXTBLK,
 		.size =		ADNP_WINDOW_SIZE-CONFIG_MTD_DILNETPC_BOOTSIZE-0x20000,
 	},
-	{ 
-		.name =		"ADNP system BIOS + BIOS Entry", 
+	{
+		.name =		"ADNP system BIOS + BIOS Entry",
 		.offset =	MTDPART_OFS_NXTBLK,
 		.size =		MTDPART_SIZ_FULL,
 #ifdef DNPC_BIOS_BLOCKS_WRITEPROTECTED
@@ -342,7 +342,7 @@ static struct mtd_partition higlvl_partition_info[]=
 	},
 };
 
-#define NUM_HIGHLVL_PARTITIONS (sizeof(higlvl_partition_info)/sizeof(partition_info[0]))
+#define NUM_HIGHLVL_PARTITIONS ARRAY_SIZE(higlvl_partition_info)
 
 
 static int dnp_adnp_probe(void)
@@ -368,7 +368,7 @@ static int __init init_dnpc(void)
 
 	/*
 	** determine hardware (DNP/ADNP/invalid)
-	*/	
+	*/
 	if((is_dnp = dnp_adnp_probe()) < 0)
 		return -ENXIO;
 
@@ -394,14 +394,14 @@ static int __init init_dnpc(void)
 		++dnpc_map.name;
 		for(i = 0; i < NUM_PARTITIONS; i++)
 			++partition_info[i].name;
-		higlvl_partition_info[1].size = DNP_WINDOW_SIZE - 
+		higlvl_partition_info[1].size = DNP_WINDOW_SIZE -
 			CONFIG_MTD_DILNETPC_BOOTSIZE - 0x20000;
 		for(i = 0; i < NUM_HIGHLVL_PARTITIONS; i++)
 			++higlvl_partition_info[i].name;
 	}
 
-	printk(KERN_NOTICE "DIL/Net %s flash: 0x%lx at 0x%lx\n", 
-		is_dnp ? "DNPC" : "ADNP", dnpc_map.size, dnpc_map.phys);
+	printk(KERN_NOTICE "DIL/Net %s flash: 0x%lx at 0x%llx\n",
+		is_dnp ? "DNPC" : "ADNP", dnpc_map.size, (unsigned long long)dnpc_map.phys);
 
 	dnpc_map.virt = ioremap_nocache(dnpc_map.phys, dnpc_map.size);
 
@@ -433,7 +433,7 @@ static int __init init_dnpc(void)
 		iounmap(dnpc_map.virt);
 		return -ENXIO;
 	}
-		
+
 	mymtd->owner = THIS_MODULE;
 
 	/*
@@ -450,7 +450,7 @@ static int __init init_dnpc(void)
 	partition_info[2].mtdp = &lowlvl_parts[1];
 	partition_info[3].mtdp = &lowlvl_parts[3];
 
-	add_mtd_partitions(mymtd, partition_info, NUM_PARTITIONS);
+	mtd_device_register(mymtd, partition_info, NUM_PARTITIONS);
 
 	/*
 	** now create a virtual MTD device by concatenating the for partitions
@@ -463,7 +463,8 @@ static int __init init_dnpc(void)
 		** we do not supply mtd pointers in higlvl_partition_info, so
 		** add_mtd_partitions() will register the devices.
 		*/
-		add_mtd_partitions(merged_mtd, higlvl_partition_info, NUM_HIGHLVL_PARTITIONS);
+		mtd_device_register(merged_mtd, higlvl_partition_info,
+				    NUM_HIGHLVL_PARTITIONS);
 	}
 
 	return 0;
@@ -472,12 +473,12 @@ static int __init init_dnpc(void)
 static void __exit cleanup_dnpc(void)
 {
 	if(merged_mtd) {
-		del_mtd_partitions(merged_mtd);
+		mtd_device_unregister(merged_mtd);
 		mtd_concat_destroy(merged_mtd);
 	}
 
 	if (mymtd) {
-		del_mtd_partitions(mymtd);
+		mtd_device_unregister(mymtd);
 		map_destroy(mymtd);
 	}
 	if (dnpc_map.virt) {

@@ -1,4 +1,4 @@
-/* $Id: parport_share.c,v 1.15 1998/01/11 12:06:17 philip Exp $
+/*
  * Parallel-port resource manager code.
  * 
  * Authors: David Campbell <campbell@tirian.che.curtin.edu.au>
@@ -17,7 +17,6 @@
 
 #undef PARPORT_DEBUG_SHARING		/* undef for production */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/threads.h>
@@ -32,6 +31,7 @@
 #include <linux/kmod.h>
 
 #include <linux/spinlock.h>
+#include <linux/mutex.h>
 #include <asm/irq.h>
 
 #undef PARPORT_PARANOID
@@ -50,7 +50,7 @@ static DEFINE_SPINLOCK(full_list_lock);
 
 static LIST_HEAD(drivers);
 
-static DECLARE_MUTEX(registration_lock);
+static DEFINE_MUTEX(registration_lock);
 
 /* What you can do to a port that's gone away.. */
 static void dead_write_lines (struct parport *p, unsigned char b){}
@@ -158,11 +158,11 @@ int parport_register_driver (struct parport_driver *drv)
 	if (list_empty(&portlist))
 		get_lowlevel_driver ();
 
-	down(&registration_lock);
+	mutex_lock(&registration_lock);
 	list_for_each_entry(port, &portlist, list)
 		drv->attach(port);
 	list_add(&drv->list, &drivers);
-	up(&registration_lock);
+	mutex_unlock(&registration_lock);
 
 	return 0;
 }
@@ -188,11 +188,11 @@ void parport_unregister_driver (struct parport_driver *drv)
 {
 	struct parport *port;
 
-	down(&registration_lock);
+	mutex_lock(&registration_lock);
 	list_del_init(&drv->list);
 	list_for_each_entry(port, &portlist, list)
 		drv->detach(port);
-	up(&registration_lock);
+	mutex_unlock(&registration_lock);
 }
 
 static void free_port (struct parport *port)
@@ -202,16 +202,11 @@ static void free_port (struct parport *port)
 	list_del(&port->full_list);
 	spin_unlock(&full_list_lock);
 	for (d = 0; d < 5; d++) {
-		if (port->probe_info[d].class_name)
-			kfree (port->probe_info[d].class_name);
-		if (port->probe_info[d].mfr)
-			kfree (port->probe_info[d].mfr);
-		if (port->probe_info[d].model)
-			kfree (port->probe_info[d].model);
-		if (port->probe_info[d].cmdset)
-			kfree (port->probe_info[d].cmdset);
-		if (port->probe_info[d].description)
-			kfree (port->probe_info[d].description);
+		kfree(port->probe_info[d].class_name);
+		kfree(port->probe_info[d].mfr);
+		kfree(port->probe_info[d].model);
+		kfree(port->probe_info[d].cmdset);
+		kfree(port->probe_info[d].description);
 	}
 
 	kfree(port->name);
@@ -222,7 +217,7 @@ static void free_port (struct parport *port)
  *	parport_get_port - increment a port's reference count
  *	@port: the port
  *
- *	This ensure's that a struct parport pointer remains valid
+ *	This ensures that a struct parport pointer remains valid
  *	until the matching parport_put_port() call.
  **/
 
@@ -311,7 +306,7 @@ struct parport *parport_register_port(unsigned long base, int irq, int dma,
 	spin_lock_init(&tmp->pardevice_lock);
 	tmp->ieee1284.mode = IEEE1284_MODE_COMPAT;
 	tmp->ieee1284.phase = IEEE1284_PH_FWD_IDLE;
-	init_MUTEX_LOCKED (&tmp->ieee1284.irq); /* actually a semaphore at 0 */
+	sema_init(&tmp->ieee1284.irq, 0);
 	tmp->spintime = parport_default_spintime;
 	atomic_set (&tmp->ref_count, 1);
 	INIT_LIST_HEAD(&tmp->full_list);
@@ -370,8 +365,13 @@ void parport_announce_port (struct parport *port)
 	parport_daisy_init(port);
 #endif
 
+	if (!port->dev)
+		printk(KERN_WARNING "%s: fix this legacy "
+				"no-device port driver!\n",
+				port->name);
+
 	parport_proc_register(port);
-	down(&registration_lock);
+	mutex_lock(&registration_lock);
 	spin_lock_irq(&parportlist_lock);
 	list_add_tail(&port->list, &portlist);
 	for (i = 1; i < 3; i++) {
@@ -388,7 +388,7 @@ void parport_announce_port (struct parport *port)
 		if (slave)
 			attach_driver_chain(slave);
 	}
-	up(&registration_lock);
+	mutex_unlock(&registration_lock);
 }
 
 /**
@@ -414,7 +414,7 @@ void parport_remove_port(struct parport *port)
 {
 	int i;
 
-	down(&registration_lock);
+	mutex_lock(&registration_lock);
 
 	/* Spread the word. */
 	detach_driver_chain (port);
@@ -441,7 +441,7 @@ void parport_remove_port(struct parport *port)
 	}
 	spin_unlock(&parportlist_lock);
 
-	up(&registration_lock);
+	mutex_unlock(&registration_lock);
 
 	parport_proc_unregister(port);
 
@@ -524,7 +524,7 @@ void parport_remove_port(struct parport *port)
 struct pardevice *
 parport_register_device(struct parport *port, const char *name,
 			int (*pf)(void *), void (*kf)(void *),
-			void (*irq_func)(int, void *, struct pt_regs *), 
+			void (*irq_func)(void *), 
 			int flags, void *handle)
 {
 	struct pardevice *tmp;
@@ -614,13 +614,16 @@ parport_register_device(struct parport *port, const char *name,
 	 * pardevice fields. -arca
 	 */
 	port->ops->init_state(tmp, tmp->state);
-	parport_device_proc_register(tmp);
+	if (!test_and_set_bit(PARPORT_DEVPROC_REGISTERED, &port->devflags)) {
+		port->proc_device = tmp;
+		parport_device_proc_register(tmp);
+	}
 	return tmp;
 
  out_free_all:
-	kfree (tmp->state);
+	kfree(tmp->state);
  out_free_pardevice:
-	kfree (tmp);
+	kfree(tmp);
  out:
 	parport_put_port (port);
 	module_put(port->ops->owner);
@@ -646,9 +649,13 @@ void parport_unregister_device(struct pardevice *dev)
 	}
 #endif
 
-	parport_device_proc_unregister(dev);
-
 	port = dev->port->physport;
+
+	if (port->proc_device == dev) {
+		port->proc_device = NULL;
+		clear_bit(PARPORT_DEVPROC_REGISTERED, &port->devflags);
+		parport_device_proc_unregister(dev);
+	}
 
 	if (port->cad == dev) {
 		printk(KERN_DEBUG "%s: %s forgot to release port\n",
@@ -671,7 +678,7 @@ void parport_unregister_device(struct pardevice *dev)
 
 	/* Make sure we haven't left any pointers around in the wait
 	 * list. */
-	spin_lock (&port->waitlist_lock);
+	spin_lock_irq(&port->waitlist_lock);
 	if (dev->waitprev || dev->waitnext || port->waithead == dev) {
 		if (dev->waitprev)
 			dev->waitprev->waitnext = dev->waitnext;
@@ -682,7 +689,7 @@ void parport_unregister_device(struct pardevice *dev)
 		else
 			port->waittail = dev->waitprev;
 	}
-	spin_unlock (&port->waitlist_lock);
+	spin_unlock_irq(&port->waitlist_lock);
 
 	kfree(dev->state);
 	kfree(dev);
@@ -995,6 +1002,15 @@ void parport_release(struct pardevice *dev)
 	}
 }
 
+irqreturn_t parport_irq_handler(int irq, void *dev_id)
+{
+	struct parport *port = dev_id;
+
+	parport_generic_irq(port);
+
+	return IRQ_HANDLED;
+}
+
 /* Exported symbols for modules. */
 
 EXPORT_SYMBOL(parport_claim);
@@ -1007,8 +1023,10 @@ EXPORT_SYMBOL(parport_register_driver);
 EXPORT_SYMBOL(parport_unregister_driver);
 EXPORT_SYMBOL(parport_register_device);
 EXPORT_SYMBOL(parport_unregister_device);
+EXPORT_SYMBOL(parport_get_port);
 EXPORT_SYMBOL(parport_put_port);
 EXPORT_SYMBOL(parport_find_number);
 EXPORT_SYMBOL(parport_find_base);
+EXPORT_SYMBOL(parport_irq_handler);
 
 MODULE_LICENSE("GPL");

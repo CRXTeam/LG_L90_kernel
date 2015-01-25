@@ -12,10 +12,8 @@
  * for more details.
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/delay.h>
 #include <linux/pci.h>
 #include <linux/fb.h>
@@ -26,11 +24,9 @@
 #include "rivafb.h"
 #include "../edid.h"
 
-#define RIVA_DDC 	0x50
-
 static void riva_gpio_setscl(void* data, int state)
 {
-	struct riva_i2c_chan 	*chan = (struct riva_i2c_chan *)data;
+	struct riva_i2c_chan 	*chan = data;
 	struct riva_par 	*par = chan->par;
 	u32			val;
 
@@ -48,7 +44,7 @@ static void riva_gpio_setscl(void* data, int state)
 
 static void riva_gpio_setsda(void* data, int state)
 {
-	struct riva_i2c_chan 	*chan = (struct riva_i2c_chan *)data;
+	struct riva_i2c_chan 	*chan = data;
 	struct riva_par 	*par = chan->par;
 	u32			val;
 
@@ -66,7 +62,7 @@ static void riva_gpio_setsda(void* data, int state)
 
 static int riva_gpio_getscl(void* data)
 {
-	struct riva_i2c_chan 	*chan = (struct riva_i2c_chan *)data;
+	struct riva_i2c_chan 	*chan = data;
 	struct riva_par 	*par = chan->par;
 	u32			val = 0;
 
@@ -74,14 +70,12 @@ static int riva_gpio_getscl(void* data)
 	if (VGA_RD08(par->riva.PCIO, 0x3d5) & 0x04)
 		val = 1;
 
-	val = VGA_RD08(par->riva.PCIO, 0x3d5);
-
 	return val;
 }
 
 static int riva_gpio_getsda(void* data)
 {
-	struct riva_i2c_chan 	*chan = (struct riva_i2c_chan *)data;
+	struct riva_i2c_chan 	*chan = data;
 	struct riva_par 	*par = chan->par;
 	u32			val = 0;
 
@@ -92,14 +86,15 @@ static int riva_gpio_getsda(void* data)
 	return val;
 }
 
-#define I2C_ALGO_RIVA   0x0e0000
-static int riva_setup_i2c_bus(struct riva_i2c_chan *chan, const char *name)
+static int __devinit riva_setup_i2c_bus(struct riva_i2c_chan *chan,
+					const char *name,
+					unsigned int i2c_class)
 {
 	int rc;
 
 	strcpy(chan->adapter.name, name);
 	chan->adapter.owner		= THIS_MODULE;
-	chan->adapter.id		= I2C_ALGO_RIVA;
+	chan->adapter.class		= i2c_class;
 	chan->adapter.algo_data		= &chan->algo;
 	chan->adapter.dev.parent	= &chan->par->pdev->dev;
 	chan->algo.setsda		= riva_gpio_setsda;
@@ -129,81 +124,39 @@ static int riva_setup_i2c_bus(struct riva_i2c_chan *chan, const char *name)
 	return rc;
 }
 
-void riva_create_i2c_busses(struct riva_par *par)
+void __devinit riva_create_i2c_busses(struct riva_par *par)
 {
-	par->bus = 3;
-
 	par->chan[0].par	= par;
 	par->chan[1].par	= par;
 	par->chan[2].par        = par;
 
-	par->chan[0].ddc_base = 0x3e;
-	par->chan[1].ddc_base = 0x36;
+	par->chan[0].ddc_base = 0x36;
+	par->chan[1].ddc_base = 0x3e;
 	par->chan[2].ddc_base = 0x50;
-	riva_setup_i2c_bus(&par->chan[0], "BUS1");
-	riva_setup_i2c_bus(&par->chan[1], "BUS2");
-	riva_setup_i2c_bus(&par->chan[2], "BUS3");
+	riva_setup_i2c_bus(&par->chan[0], "BUS1", I2C_CLASS_HWMON);
+	riva_setup_i2c_bus(&par->chan[1], "BUS2", 0);
+	riva_setup_i2c_bus(&par->chan[2], "BUS3", 0);
 }
 
 void riva_delete_i2c_busses(struct riva_par *par)
 {
-	if (par->chan[0].par)
-		i2c_bit_del_bus(&par->chan[0].adapter);
-	par->chan[0].par = NULL;
-
-	if (par->chan[1].par)
-		i2c_bit_del_bus(&par->chan[1].adapter);
-	par->chan[1].par = NULL;
-
-	if (par->chan[2].par)
-		i2c_bit_del_bus(&par->chan[2].adapter);
-	par->chan[2].par = NULL;
-}
-
-static u8 *riva_do_probe_i2c_edid(struct riva_i2c_chan *chan)
-{
-	u8 start = 0x0;
-	struct i2c_msg msgs[] = {
-		{
-			.addr	= RIVA_DDC,
-			.len	= 1,
-			.buf	= &start,
-		}, {
-			.addr	= RIVA_DDC,
-			.flags	= I2C_M_RD,
-			.len	= EDID_LENGTH,
-		},
-	};
-	u8 *buf;
-
-	if (!chan->par)
-		return NULL;
-
-	buf = kmalloc(EDID_LENGTH, GFP_KERNEL);
-	if (!buf) {
-		dev_warn(&chan->par->pdev->dev, "Out of memory!\n");
-		return NULL;
-	}
-	msgs[1].buf = buf;
-
-	if (i2c_transfer(&chan->adapter, msgs, 2) == 2)
-		return buf;
-	dev_dbg(&chan->par->pdev->dev, "Unable to read EDID block.\n");
-	kfree(buf);
-	return NULL;
-}
-
-int riva_probe_i2c_connector(struct riva_par *par, int conn, u8 **out_edid)
-{
-	u8 *edid = NULL;
 	int i;
 
 	for (i = 0; i < 3; i++) {
-		/* Do the real work */
-		edid = riva_do_probe_i2c_edid(&par->chan[conn-1]);
-		if (edid)
-			break;
+		if (!par->chan[i].par)
+			continue;
+		i2c_del_adapter(&par->chan[i].adapter);
+		par->chan[i].par = NULL;
 	}
+}
+
+int __devinit riva_probe_i2c_connector(struct riva_par *par, int conn, u8 **out_edid)
+{
+	u8 *edid = NULL;
+
+	if (par->chan[conn].par)
+		edid = fb_ddc_read(&par->chan[conn].adapter);
+
 	if (out_edid)
 		*out_edid = edid;
 	if (!edid)

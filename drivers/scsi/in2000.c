@@ -107,7 +107,7 @@
  * this thing into as good a shape as possible, and I'm positive
  * there are lots of lurking bugs and "Stupid Places".
  *
- * Updated for Linux 2.5 by Alan Cox <alan@redhat.com>
+ * Updated for Linux 2.5 by Alan Cox <alan@lxorguk.ukuu.org.uk>
  *	- Using new_eh handler
  *	- Hopefully got all the locking right again
  *	See "FIXME" notes for items that could do with more work
@@ -123,7 +123,6 @@
 #include <linux/stat.h>
 
 #include <asm/io.h>
-#include <asm/system.h>
 
 #include "scsi.h"
 #include <scsi/scsi_host.h>
@@ -334,7 +333,7 @@ static uchar calc_sync_xfer(unsigned int period, unsigned int offset)
 
 static void in2000_execute(struct Scsi_Host *instance);
 
-static int in2000_queuecommand(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *))
+static int in2000_queuecommand_lck(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *))
 {
 	struct Scsi_Host *instance;
 	struct IN2000_hostdata *hostdata;
@@ -343,7 +342,7 @@ static int in2000_queuecommand(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *))
 	instance = cmd->device->host;
 	hostdata = (struct IN2000_hostdata *) instance->hostdata;
 
-	DB(DB_QUEUE_COMMAND, printk("Q-%d-%02x-%ld(", cmd->device->id, cmd->cmnd[0], cmd->pid))
+	DB(DB_QUEUE_COMMAND, scmd_printk(KERN_DEBUG, cmd, "Q-%02x(", cmd->cmnd[0]))
 
 /* Set up a few fields in the Scsi_Cmnd structure for our own use:
  *  - host_scribble is the pointer to the next cmd in the input queue
@@ -369,16 +368,16 @@ static int in2000_queuecommand(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *))
  *  - SCp.phase records this command's SRCID_ER bit setting
  */
 
-	if (cmd->use_sg) {
-		cmd->SCp.buffer = (struct scatterlist *) cmd->buffer;
-		cmd->SCp.buffers_residual = cmd->use_sg - 1;
-		cmd->SCp.ptr = (char *) page_address(cmd->SCp.buffer->page) + cmd->SCp.buffer->offset;
+	if (scsi_bufflen(cmd)) {
+		cmd->SCp.buffer = scsi_sglist(cmd);
+		cmd->SCp.buffers_residual = scsi_sg_count(cmd) - 1;
+		cmd->SCp.ptr = sg_virt(cmd->SCp.buffer);
 		cmd->SCp.this_residual = cmd->SCp.buffer->length;
 	} else {
 		cmd->SCp.buffer = NULL;
 		cmd->SCp.buffers_residual = 0;
-		cmd->SCp.ptr = (char *) cmd->request_buffer;
-		cmd->SCp.this_residual = cmd->request_bufflen;
+		cmd->SCp.ptr = NULL;
+		cmd->SCp.this_residual = 0;
 	}
 	cmd->SCp.have_data_in = 0;
 
@@ -427,9 +426,11 @@ static int in2000_queuecommand(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *))
 
 	in2000_execute(cmd->device->host);
 
-	DB(DB_QUEUE_COMMAND, printk(")Q-%ld ", cmd->pid))
+	DB(DB_QUEUE_COMMAND, printk(")Q "))
 	    return 0;
 }
+
+static DEF_SCSI_QCMD(in2000_queuecommand)
 
 
 
@@ -703,7 +704,7 @@ static void in2000_execute(struct Scsi_Host *instance)
 	 * to search the input_Q again...
 	 */
 
-	DB(DB_EXECUTE, printk("%s%ld)EX-2 ", (cmd->SCp.phase) ? "d:" : "", cmd->pid))
+	DB(DB_EXECUTE, printk("%s)EX-2 ", (cmd->SCp.phase) ? "d:" : ""))
 
 }
 
@@ -764,7 +765,7 @@ static void transfer_bytes(Scsi_Cmnd * cmd, int data_in_dir)
 		++cmd->SCp.buffer;
 		--cmd->SCp.buffers_residual;
 		cmd->SCp.this_residual = cmd->SCp.buffer->length;
-		cmd->SCp.ptr = page_address(cmd->SCp.buffer->page) + cmd->SCp.buffer->offset;
+		cmd->SCp.ptr = sg_virt(cmd->SCp.buffer);
 	}
 
 /* Set up hardware registers */
@@ -829,7 +830,7 @@ static void transfer_bytes(Scsi_Cmnd * cmd, int data_in_dir)
  * but it _does_ need to be able to compile and run in an SMP kernel.)
  */
 
-static irqreturn_t in2000_intr(int irqnum, void *dev_id, struct pt_regs *ptregs)
+static irqreturn_t in2000_intr(int irqnum, void *dev_id)
 {
 	struct Scsi_Host *instance = dev_id;
 	struct IN2000_hostdata *hostdata;
@@ -1147,7 +1148,7 @@ static irqreturn_t in2000_intr(int irqnum, void *dev_id, struct pt_regs *ptregs)
 	case CSR_XFER_DONE | PHS_COMMAND:
 	case CSR_UNEXP | PHS_COMMAND:
 	case CSR_SRV_REQ | PHS_COMMAND:
-		DB(DB_INTR, printk("CMND-%02x,%ld", cmd->cmnd[0], cmd->pid))
+		DB(DB_INTR, printk("CMND-%02x", cmd->cmnd[0]))
 		    transfer_pio(cmd->cmnd, cmd->cmd_len, DATA_OUT_DIR, hostdata);
 		hostdata->state = S_CONNECTED;
 		break;
@@ -1189,7 +1190,7 @@ static irqreturn_t in2000_intr(int irqnum, void *dev_id, struct pt_regs *ptregs)
 		switch (msg) {
 
 		case COMMAND_COMPLETE:
-			DB(DB_INTR, printk("CCMP-%ld", cmd->pid))
+			DB(DB_INTR, printk("CCMP"))
 			    write_3393_cmd(hostdata, WD_CMD_NEGATE_ACK);
 			hostdata->state = S_PRE_CMP_DISC;
 			break;
@@ -1327,7 +1328,7 @@ static irqreturn_t in2000_intr(int irqnum, void *dev_id, struct pt_regs *ptregs)
 
 		write_3393(hostdata, WD_SOURCE_ID, SRCID_ER);
 		if (phs == 0x60) {
-			DB(DB_INTR, printk("SX-DONE-%ld", cmd->pid))
+			DB(DB_INTR, printk("SX-DONE"))
 			    cmd->SCp.Message = COMMAND_COMPLETE;
 			lun = read_3393(hostdata, WD_TARGET_LUN);
 			DB(DB_INTR, printk(":%d.%d", cmd->SCp.Status, lun))
@@ -1348,7 +1349,7 @@ static irqreturn_t in2000_intr(int irqnum, void *dev_id, struct pt_regs *ptregs)
 
 			in2000_execute(instance);
 		} else {
-			printk("%02x:%02x:%02x-%ld: Unknown SEL_XFER_DONE phase!!---", asr, sr, phs, cmd->pid);
+			printk("%02x:%02x:%02x: Unknown SEL_XFER_DONE phase!!---", asr, sr, phs);
 		}
 		break;
 
@@ -1415,7 +1416,7 @@ static irqreturn_t in2000_intr(int irqnum, void *dev_id, struct pt_regs *ptregs)
 			spin_unlock_irqrestore(instance->host_lock, flags);
 			return IRQ_HANDLED;
 		}
-		DB(DB_INTR, printk("UNEXP_DISC-%ld", cmd->pid))
+		DB(DB_INTR, printk("UNEXP_DISC"))
 		    hostdata->connected = NULL;
 		hostdata->busy[cmd->device->id] &= ~(1 << cmd->device->lun);
 		hostdata->state = S_UNCONNECTED;
@@ -1440,7 +1441,7 @@ static irqreturn_t in2000_intr(int irqnum, void *dev_id, struct pt_regs *ptregs)
  */
 
 		write_3393(hostdata, WD_SOURCE_ID, SRCID_ER);
-		DB(DB_INTR, printk("DISC-%ld", cmd->pid))
+		DB(DB_INTR, printk("DISC"))
 		    if (cmd == NULL) {
 			printk(" - Already disconnected! ");
 			hostdata->state = S_UNCONNECTED;
@@ -1573,7 +1574,6 @@ static irqreturn_t in2000_intr(int irqnum, void *dev_id, struct pt_regs *ptregs)
 		} else
 			hostdata->state = S_CONNECTED;
 
-		DB(DB_INTR, printk("-%ld", cmd->pid))
 		    break;
 
 	default:
@@ -1644,14 +1644,16 @@ static int in2000_bus_reset(Scsi_Cmnd * cmd)
 	struct Scsi_Host *instance;
 	struct IN2000_hostdata *hostdata;
 	int x;
+	unsigned long flags;
 
 	instance = cmd->device->host;
 	hostdata = (struct IN2000_hostdata *) instance->hostdata;
 
 	printk(KERN_WARNING "scsi%d: Reset. ", instance->host_no);
 
-	/* do scsi-reset here */
+	spin_lock_irqsave(instance->host_lock, flags);
 
+	/* do scsi-reset here */
 	reset_hardware(instance, RESET_CARD_AND_BUS);
 	for (x = 0; x < 8; x++) {
 		hostdata->busy[x] = 0;
@@ -1668,21 +1670,12 @@ static int in2000_bus_reset(Scsi_Cmnd * cmd)
 	hostdata->outgoing_len = 0;
 
 	cmd->result = DID_RESET << 16;
+
+	spin_unlock_irqrestore(instance->host_lock, flags);
 	return SUCCESS;
 }
 
-static int in2000_host_reset(Scsi_Cmnd * cmd)
-{
-	return FAILED;
-}
-
-static int in2000_device_reset(Scsi_Cmnd * cmd)
-{
-	return FAILED;
-}
-
-
-static int in2000_abort(Scsi_Cmnd * cmd)
+static int __in2000_abort(Scsi_Cmnd * cmd)
 {
 	struct Scsi_Host *instance;
 	struct IN2000_hostdata *hostdata;
@@ -1709,7 +1702,7 @@ static int in2000_abort(Scsi_Cmnd * cmd)
 				prev->host_scribble = cmd->host_scribble;
 			cmd->host_scribble = NULL;
 			cmd->result = DID_ABORT << 16;
-			printk(KERN_WARNING "scsi%d: Abort - removing command %ld from input_Q. ", instance->host_no, cmd->pid);
+			printk(KERN_WARNING "scsi%d: Abort - removing command from input_Q. ", instance->host_no);
 			cmd->scsi_done(cmd);
 			return SUCCESS;
 		}
@@ -1730,7 +1723,7 @@ static int in2000_abort(Scsi_Cmnd * cmd)
 
 	if (hostdata->connected == cmd) {
 
-		printk(KERN_WARNING "scsi%d: Aborting connected command %ld - ", instance->host_no, cmd->pid);
+		printk(KERN_WARNING "scsi%d: Aborting connected command - ", instance->host_no);
 
 		printk("sending wd33c93 ABORT command - ");
 		write_3393(hostdata, WD_CONTROL, CTRL_IDI | CTRL_EDI | CTRL_POLLED);
@@ -1803,10 +1796,20 @@ static int in2000_abort(Scsi_Cmnd * cmd)
 	return SUCCESS;
 }
 
+static int in2000_abort(Scsi_Cmnd * cmd)
+{
+	int rc;
+
+	spin_lock_irq(cmd->device->host->host_lock);
+	rc = __in2000_abort(cmd);
+	spin_unlock_irq(cmd->device->host->host_lock);
+
+	return rc;
+}
 
 
 #define MAX_IN2000_HOSTS 3
-#define MAX_SETUP_ARGS (sizeof(setup_args) / sizeof(char *))
+#define MAX_SETUP_ARGS ARRAY_SIZE(setup_args)
 #define SETUP_BUFFER_SIZE 200
 static char setup_buffer[SETUP_BUFFER_SIZE];
 static char setup_used[MAX_SETUP_ARGS];
@@ -1895,8 +1898,23 @@ static int int_tab[] in2000__INITDATA = {
 	10
 };
 
+static int probe_bios(u32 addr, u32 *s1, uchar *switches)
+{
+	void __iomem *p = ioremap(addr, 0x34);
+	if (!p)
+		return 0;
+	*s1 = readl(p + 0x10);
+	if (*s1 == 0x41564f4e || readl(p + 0x30) == 0x61776c41) {
+		/* Read the switch image that's mapped into EPROM space */
+		*switches = ~readb(p + 0x20);
+		iounmap(p);
+		return 1;
+	}
+	iounmap(p);
+	return 0;
+}
 
-static int __init in2000_detect(Scsi_Host_Template * tpnt)
+static int __init in2000_detect(struct scsi_host_template * tpnt)
 {
 	struct Scsi_Host *instance;
 	struct IN2000_hostdata *hostdata;
@@ -1927,6 +1945,7 @@ static int __init in2000_detect(Scsi_Host_Template * tpnt)
 
 	detect_count = 0;
 	for (bios = 0; bios_tab[bios]; bios++) {
+		u32 s1 = 0;
 		if (check_setup_args("ioport", &val, buf)) {
 			base = val;
 			switches = ~inb(base + IO_SWITCHES) & 0xff;
@@ -1938,12 +1957,8 @@ static int __init in2000_detect(Scsi_Host_Template * tpnt)
  * for the obvious ID strings. We look for the 2 most common ones and
  * hope that they cover all the cases...
  */
-		else if (isa_readl(bios_tab[bios] + 0x10) == 0x41564f4e || isa_readl(bios_tab[bios] + 0x30) == 0x61776c41) {
+		else if (probe_bios(bios_tab[bios], &s1, &switches)) {
 			printk("Found IN2000 BIOS at 0x%x ", (unsigned int) bios_tab[bios]);
-
-/* Read the switch image that's mapped into EPROM space */
-
-			switches = ~((isa_readb(bios_tab[bios] + 0x20) & 0xff));
 
 /* Find out where the IO space is */
 
@@ -2000,7 +2015,7 @@ static int __init in2000_detect(Scsi_Host_Template * tpnt)
 		write1_io(0, IO_FIFO_READ);	/* start fifo out in read mode */
 		write1_io(0, IO_INTR_MASK);	/* allow all ints */
 		x = int_tab[(switches & (SW_INT0 | SW_INT1)) >> SW_INT_SHIFT];
-		if (request_irq(x, in2000_intr, SA_INTERRUPT, "in2000", instance)) {
+		if (request_irq(x, in2000_intr, IRQF_DISABLED, "in2000", instance)) {
 			printk("in2000_detect: Unable to allocate IRQ.\n");
 			detect_count--;
 			continue;
@@ -2034,7 +2049,7 @@ static int __init in2000_detect(Scsi_Host_Template * tpnt)
 
 /* Older BIOS's had a 'sync on/off' switch - use its setting */
 
-		if (isa_readl(bios_tab[bios] + 0x10) == 0x41564f4e && (switches & SW_SYNC_DOS5))
+		if (s1 == 0x41564f4e && (switches & SW_SYNC_DOS5))
 			hostdata->sync_off = 0x00;	/* sync defaults to on */
 		else
 			hostdata->sync_off = 0xff;	/* sync defaults to off */
@@ -2211,7 +2226,7 @@ static int in2000_proc_info(struct Scsi_Host *instance, char *buf, char **start,
 	bp = buf;
 	*bp = '\0';
 	if (hd->proc & PR_VERSION) {
-		sprintf(tbuf, "\nVersion %s - %s. Compiled %s %s", IN2000_VERSION, IN2000_DATE, __DATE__, __TIME__);
+		sprintf(tbuf, "\nVersion %s - %s.", IN2000_VERSION, IN2000_DATE);
 		strcat(bp, tbuf);
 	}
 	if (hd->proc & PR_INFO) {
@@ -2253,7 +2268,7 @@ static int in2000_proc_info(struct Scsi_Host *instance, char *buf, char **start,
 		strcat(bp, "\nconnected:     ");
 		if (hd->connected) {
 			cmd = (Scsi_Cmnd *) hd->connected;
-			sprintf(tbuf, " %ld-%d:%d(%02x)", cmd->pid, cmd->device->id, cmd->device->lun, cmd->cmnd[0]);
+			sprintf(tbuf, " %d:%d(%02x)", cmd->device->id, cmd->device->lun, cmd->cmnd[0]);
 			strcat(bp, tbuf);
 		}
 	}
@@ -2261,7 +2276,7 @@ static int in2000_proc_info(struct Scsi_Host *instance, char *buf, char **start,
 		strcat(bp, "\ninput_Q:       ");
 		cmd = (Scsi_Cmnd *) hd->input_Q;
 		while (cmd) {
-			sprintf(tbuf, " %ld-%d:%d(%02x)", cmd->pid, cmd->device->id, cmd->device->lun, cmd->cmnd[0]);
+			sprintf(tbuf, " %d:%d(%02x)", cmd->device->id, cmd->device->lun, cmd->cmnd[0]);
 			strcat(bp, tbuf);
 			cmd = (Scsi_Cmnd *) cmd->host_scribble;
 		}
@@ -2270,7 +2285,7 @@ static int in2000_proc_info(struct Scsi_Host *instance, char *buf, char **start,
 		strcat(bp, "\ndisconnected_Q:");
 		cmd = (Scsi_Cmnd *) hd->disconnected_Q;
 		while (cmd) {
-			sprintf(tbuf, " %ld-%d:%d(%02x)", cmd->pid, cmd->device->id, cmd->device->lun, cmd->cmnd[0]);
+			sprintf(tbuf, " %d:%d(%02x)", cmd->device->id, cmd->device->lun, cmd->cmnd[0]);
 			strcat(bp, tbuf);
 			cmd = (Scsi_Cmnd *) cmd->host_scribble;
 		}
@@ -2302,7 +2317,7 @@ static int in2000_proc_info(struct Scsi_Host *instance, char *buf, char **start,
 MODULE_LICENSE("GPL");
 
 
-static Scsi_Host_Template driver_template = {
+static struct scsi_host_template driver_template = {
 	.proc_name       		= "in2000",
 	.proc_info       		= in2000_proc_info,
 	.name            		= "Always IN2000",
@@ -2311,8 +2326,6 @@ static Scsi_Host_Template driver_template = {
 	.queuecommand    		= in2000_queuecommand,
 	.eh_abort_handler		= in2000_abort,
 	.eh_bus_reset_handler		= in2000_bus_reset,
-	.eh_device_reset_handler	= in2000_device_reset,
-	.eh_host_reset_handler	= in2000_host_reset, 
 	.bios_param      		= in2000_biosparam, 
 	.can_queue       		= IN2000_CAN_Q,
 	.this_id         		= IN2000_HOST_ID,

@@ -4,7 +4,6 @@
 /*
  * MIPS floating point support
  * Copyright (C) 1994-2000 Algorithmics Ltd.
- * http://www.algor.co.uk
  *
  * ########################################################################
  *
@@ -29,11 +28,11 @@
 
 ieee754sp ieee754sp_fint(int x)
 {
-	COMPXSP;
+	unsigned xm;
+	int xe;
+	int xs;
 
 	CLEARCX;
-
-	xc = ( 0 ? xc : xc );
 
 	if (x == 0)
 		return ieee754sp_zero(0);

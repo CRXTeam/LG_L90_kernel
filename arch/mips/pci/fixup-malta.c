@@ -36,7 +36,7 @@ static char irq_tab[][5] __initdata = {
 	{0,	PCID,	PCIA,	PCIB,	PCIC }	/* 21: PCI Slot 4 */
 };
 
-int __init pcibios_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+int __init pcibios_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 	int virq;
 	virq = irq_tab[slot][pin];
@@ -56,7 +56,7 @@ static void __init malta_piix_func0_fixup(struct pci_dev *pdev)
 		0,  0, 	0,  3,
 		4,  5,  6,  7,
 		0,  9, 10, 11,
-		12, 0, 14, 15 
+		12, 0, 14, 15
 	};
 	int i;
 

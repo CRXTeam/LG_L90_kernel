@@ -1,11 +1,8 @@
 #ifndef _LINUX_SECCOMP_H
 #define _LINUX_SECCOMP_H
 
-#include <linux/config.h>
 
 #ifdef CONFIG_SECCOMP
-
-#define NR_SECCOMP_MODES 1
 
 #include <linux/thread_info.h>
 #include <asm/seccomp.h>
@@ -19,15 +16,36 @@ static inline void secure_computing(int this_syscall)
 		__secure_computing(this_syscall);
 }
 
+extern long prctl_get_seccomp(void);
+extern long prctl_set_seccomp(unsigned long);
+
+static inline int seccomp_mode(seccomp_t *s)
+{
+	return s->mode;
+}
+
 #else /* CONFIG_SECCOMP */
 
-#if (__GNUC__ > 2)
-  typedef struct { } seccomp_t;
-#else
-  typedef struct { int gcc_is_buggy; } seccomp_t;
-#endif
+#include <linux/errno.h>
+
+typedef struct { } seccomp_t;
 
 #define secure_computing(x) do { } while (0)
+
+static inline long prctl_get_seccomp(void)
+{
+	return -EINVAL;
+}
+
+static inline long prctl_set_seccomp(unsigned long arg2)
+{
+	return -EINVAL;
+}
+
+static inline int seccomp_mode(seccomp_t *s)
+{
+	return 0;
+}
 
 #endif /* CONFIG_SECCOMP */
 

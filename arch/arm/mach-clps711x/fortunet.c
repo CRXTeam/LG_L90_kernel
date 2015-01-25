@@ -19,17 +19,17 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/init.h>
 #include <linux/initrd.h>
 
-#include <asm/hardware.h>
-#include <asm/irq.h>
+#include <mach/hardware.h>
 #include <asm/setup.h>
 #include <asm/mach-types.h>
 
 #include <asm/mach/arch.h>
+
+#include <asm/memory.h>
 
 #include "common.h"
 
@@ -39,7 +39,6 @@ struct meminfo memmap = {
 		{
 			.start	= 0xC0000000,
 			.size	= 0x01000000,
-			.node	= 0
 		},
 	},
 };
@@ -58,8 +57,7 @@ typedef struct tag_IMAGE_PARAMS
 #define IMAGE_PARAMS_PHYS	0xC01F0000
 
 static void __init
-fortunet_fixup(struct machine_desc *desc, struct tag *tags,
-		 char **cmdline, struct meminfo *mi)
+fortunet_fixup(struct tag *tags, char **cmdline, struct meminfo *mi)
 {
 	IMAGE_PARAMS *ip = phys_to_virt(IMAGE_PARAMS_PHYS);
 	*cmdline = phys_to_virt(ip->command_line);
@@ -75,11 +73,10 @@ fortunet_fixup(struct machine_desc *desc, struct tag *tags,
 }
 
 MACHINE_START(FORTUNET, "ARM-FortuNet")
-	MAINTAINER("FortuNet Inc.")
-        BOOT_MEM(0xc0000000, 0x80000000, 0xf0000000)
-	BOOT_PARAMS(0x00000000)
-	FIXUP(fortunet_fixup)
-	MAPIO(clps711x_map_io)
-	INITIRQ(clps711x_init_irq)
+	/* Maintainer: FortuNet Inc. */
+	.fixup		= fortunet_fixup,
+	.map_io		= clps711x_map_io,
+	.init_irq	= clps711x_init_irq,
 	.timer		= &clps711x_timer,
+	.restart	= clps711x_restart,
 MACHINE_END

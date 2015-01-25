@@ -18,30 +18,55 @@
 
 #include <linux/init.h>
 #include <linux/interrupt.h>
-#include <linux/device.h>
+#include <linux/irq.h>
+#include <linux/platform_device.h>
 #include <linux/fb.h>
 
 #include <asm/setup.h>
 #include <asm/memory.h>
 #include <asm/mach-types.h>
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/irq.h>
 
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
 
-#include <asm/arch/pxa-regs.h>
-#include <asm/arch/idp.h>
-#include <asm/arch/pxafb.h>
-#include <asm/arch/bitfield.h>
-#include <asm/arch/mmc.h>
+#include <mach/pxa25x.h>
+#include <mach/idp.h>
+#include <mach/pxafb.h>
+#include <mach/bitfield.h>
+#include <mach/mmc.h>
 
 #include "generic.h"
+#include "devices.h"
 
 /* TODO:
  * - add pxa2xx_audio_ops_t device structure
  * - Ethernet interrupt
  */
+
+static unsigned long idp_pin_config[] __initdata = {
+	/* LCD */
+	GPIOxx_LCD_DSTN_16BPP,
+
+	/* BTUART */
+	GPIO42_BTUART_RXD,
+	GPIO43_BTUART_TXD,
+	GPIO44_BTUART_CTS,
+	GPIO45_BTUART_RTS,
+
+	/* STUART */
+	GPIO46_STUART_RXD,
+	GPIO47_STUART_TXD,
+
+	/* MMC */
+	GPIO6_MMC_CLK,
+	GPIO8_MMC_CS0,
+
+	/* Ethernet */
+	GPIO33_nCS_5,	/* Ethernet CS */
+	GPIO4_GPIO,	/* Ethernet IRQ */
+};
 
 static struct resource smc91x_resources[] = {
 	[0] = {
@@ -50,9 +75,9 @@ static struct resource smc91x_resources[] = {
 		.flags	= IORESOURCE_MEM,
 	},
 	[1] = {
-		.start	= IRQ_GPIO(4),
-		.end	= IRQ_GPIO(4),
-		.flags	= IORESOURCE_IRQ,
+		.start	= PXA_GPIO_TO_IRQ(4),
+		.end	= PXA_GPIO_TO_IRQ(4),
+		.flags	= IORESOURCE_IRQ | IORESOURCE_IRQ_HIGHEDGE,
 	}
 };
 
@@ -81,7 +106,7 @@ static void idp_vlcd(int on)
 	}
 }
 
-static void idp_lcd_power(int on)
+static void idp_lcd_power(int on, struct fb_var_screeninfo *var)
 {
 	if (on) {
 		IDP_CPLD_LCD |= (1<<0);
@@ -98,7 +123,7 @@ static void idp_lcd_power(int on)
 	idp_vlcd(on);
 }
 
-static struct pxafb_mach_info sharp_lm8v31 __initdata = {
+static struct pxafb_mode_info sharp_lm8v31_mode = {
 	.pixclock	= 270000,
 	.xres		= 640,
 	.yres		= 480,
@@ -111,80 +136,69 @@ static struct pxafb_mach_info sharp_lm8v31 __initdata = {
 	.lower_margin	= 0,
 	.sync		= FB_SYNC_HOR_HIGH_ACT | FB_SYNC_VERT_HIGH_ACT,
 	.cmap_greyscale	= 0,
+};
+
+static struct pxafb_mach_info sharp_lm8v31 = {
+	.modes          = &sharp_lm8v31_mode,
+	.num_modes      = 1,
 	.cmap_inverse	= 0,
 	.cmap_static	= 0,
-	.lccr0		= LCCR0_SDS,
-	.lccr3		= LCCR3_PCP | LCCR3_Acb(255),
+	.lcd_conn	= LCD_COLOR_DSTN_16BPP | LCD_PCLK_EDGE_FALL |
+			  LCD_AC_BIAS_FREQ(255),
 	.pxafb_backlight_power = &idp_backlight_power,
 	.pxafb_lcd_power = &idp_lcd_power
 };
 
-static int idp_mci_init(struct device *dev, irqreturn_t (*idp_detect_int)(int, void *, struct pt_regs *), void *data)
-{
-	/* setup GPIO for PXA25x MMC controller	*/
-	pxa_gpio_mode(GPIO6_MMCCLK_MD);
-	pxa_gpio_mode(GPIO8_MMCCS0_MD);
-
-	return 0;
-}
-
 static struct pxamci_platform_data idp_mci_platform_data = {
-	.ocr_mask	= MMC_VDD_32_33|MMC_VDD_33_34,
-	.init 		= idp_mci_init,
+	.ocr_mask		= MMC_VDD_32_33|MMC_VDD_33_34,
+	.gpio_card_detect	= -1,
+	.gpio_card_ro		= -1,
+	.gpio_power		= -1,
 };
 
 static void __init idp_init(void)
 {
 	printk("idp_init()\n");
 
+	pxa2xx_mfp_config(ARRAY_AND_SIZE(idp_pin_config));
+	pxa_set_ffuart_info(NULL);
+	pxa_set_btuart_info(NULL);
+	pxa_set_stuart_info(NULL);
+
 	platform_device_register(&smc91x_device);
 	//platform_device_register(&mst_audio_device);
-	set_pxa_fb_info(&sharp_lm8v31);
+	pxa_set_fb_info(NULL, &sharp_lm8v31);
 	pxa_set_mci_info(&idp_mci_platform_data);
 }
 
-static void __init idp_init_irq(void)
-{
-
-	pxa_init_irq();
-
-	set_irq_type(TOUCH_PANEL_IRQ, TOUCH_PANEL_IRQ_EDGE);
-}
-
 static struct map_desc idp_io_desc[] __initdata = {
- /* virtual     physical    length      type */
-
-  { IDP_COREVOLT_VIRT,
-    IDP_COREVOLT_PHYS,
-    IDP_COREVOLT_SIZE,
-    MT_DEVICE },
-  { IDP_CPLD_VIRT,
-    IDP_CPLD_PHYS,
-    IDP_CPLD_SIZE,
-    MT_DEVICE }
+  	{
+		.virtual	=  IDP_COREVOLT_VIRT,
+		.pfn		= __phys_to_pfn(IDP_COREVOLT_PHYS),
+		.length		= IDP_COREVOLT_SIZE,
+		.type		= MT_DEVICE
+	}, {
+		.virtual	=  IDP_CPLD_VIRT,
+		.pfn		= __phys_to_pfn(IDP_CPLD_PHYS),
+		.length		= IDP_CPLD_SIZE,
+		.type		= MT_DEVICE
+	}
 };
 
 static void __init idp_map_io(void)
 {
-	pxa_map_io();
+	pxa25x_map_io();
 	iotable_init(idp_io_desc, ARRAY_SIZE(idp_io_desc));
-
-	// serial ports 2 & 3
-	pxa_gpio_mode(GPIO42_BTRXD_MD);
-	pxa_gpio_mode(GPIO43_BTTXD_MD);
-	pxa_gpio_mode(GPIO44_BTCTS_MD);
-	pxa_gpio_mode(GPIO45_BTRTS_MD);
-	pxa_gpio_mode(GPIO46_STRXD_MD);
-	pxa_gpio_mode(GPIO47_STTXD_MD);
-
 }
 
 
 MACHINE_START(PXA_IDP, "Vibren PXA255 IDP")
-	MAINTAINER("Vibren Technologies")
-	BOOT_MEM(0xa0000000, 0x40000000, io_p2v(0x40000000))
-	MAPIO(idp_map_io)
-	INITIRQ(idp_init_irq)
+	/* Maintainer: Vibren Technologies */
+	.map_io		= idp_map_io,
+	.nr_irqs	= PXA_NR_IRQS,
+	.init_irq	= pxa25x_init_irq,
+	.handle_irq	= pxa25x_handle_irq,
 	.timer		= &pxa_timer,
-	INIT_MACHINE(idp_init)
+	.init_machine	= idp_init,
+	.restart	= pxa_restart,
 MACHINE_END

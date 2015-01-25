@@ -35,7 +35,6 @@
 #include <linux/bitops.h>
 
 #include <asm/ptrace.h>
-#include <asm/system.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
 #include <asm/mmu_context.h>
@@ -65,11 +64,17 @@ nautilus_init_irq(void)
 }
 
 static int __init
-nautilus_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+nautilus_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 	/* Preserve the IRQ set up by the console.  */
 
 	u8 irq;
+	/* UP1500: AGP INTA is actually routed to IRQ 5, not IRQ 10 as
+	   console reports. Check the device id of AGP bridge to distinguish
+	   UP1500 from UP1000/1100. Note: 'pin' is 2 due to bridge swizzle. */
+	if (slot == 1 && pin == 2 &&
+	    dev->bus->self && dev->bus->self->device == 0x700f)
+		return 5;
 	pci_read_config_byte(dev, PCI_INTERRUPT_LINE, &irq);
 	return irq;
 }
@@ -124,8 +129,7 @@ naut_sys_machine_check(unsigned long vector, unsigned long la_ptr,
    in the system.  They are analysed separately but all starts here.  */
 
 void
-nautilus_machine_check(unsigned long vector, unsigned long la_ptr,
-		       struct pt_regs *regs)
+nautilus_machine_check(unsigned long vector, unsigned long la_ptr)
 {
 	char *mchk_class;
 
@@ -165,7 +169,7 @@ nautilus_machine_check(unsigned long vector, unsigned long la_ptr,
 	else if (vector == SCB_Q_SYSMCHK)
 		mchk_class = "Fatal";
 	else {
-		ev6_machine_check(vector, la_ptr, regs);
+		ev6_machine_check(vector, la_ptr);
 		return;
 	}
 
@@ -173,7 +177,7 @@ nautilus_machine_check(unsigned long vector, unsigned long la_ptr,
 			 "[%s System Machine Check (NMI)]\n",
 	       vector, mchk_class);
 
-	naut_sys_machine_check(vector, la_ptr, regs);
+	naut_sys_machine_check(vector, la_ptr, get_irq_regs());
 
 	/* Tell the PALcode to clear the machine check */
 	draina();
@@ -182,6 +186,7 @@ nautilus_machine_check(unsigned long vector, unsigned long la_ptr,
 }
 
 extern void free_reserved_mem(void *, void *);
+extern void pcibios_claim_one_bus(struct pci_bus *);
 
 static struct resource irongate_mem = {
 	.name	= "Irongate PCI MEM",
@@ -200,8 +205,9 @@ nautilus_init_pci(void)
 	/* Scan our single hose.  */
 	bus = pci_scan_bus(0, alpha_mv.pci_ops, hose);
 	hose->bus = bus;
+	pcibios_claim_one_bus(bus);
 
-	irongate = pci_find_slot(0, 0);
+	irongate = pci_get_bus_and_slot(0, 0);
 	bus->self = irongate;
 	bus->resource[1] = &irongate_mem;
 
@@ -238,6 +244,10 @@ nautilus_init_pci(void)
 		IRONGATE0->pci_mem = pci_mem;
 
 	pci_bus_assign_resources(bus);
+
+	/* pci_common_swizzle() relies on bus->self being NULL
+	   for the root bus, so just clear it. */
+	bus->self = NULL;
 	pci_fixup_irqs(alpha_mv.pci_swizzle, alpha_mv.pci_map_irq);
 }
 

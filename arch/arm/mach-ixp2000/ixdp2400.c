@@ -14,7 +14,6 @@
  *  Free Software Foundation;  either version 2 of the  License, or (at your
  *  option) any later version.
  */
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/mm.h>
@@ -24,15 +23,13 @@
 #include <linux/bitops.h>
 #include <linux/pci.h>
 #include <linux/ioport.h>
-#include <linux/slab.h>
 #include <linux/delay.h>
+#include <linux/io.h>
 
-#include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/pgtable.h>
 #include <asm/page.h>
-#include <asm/system.h>
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/mach-types.h>
 
 #include <asm/mach/pci.h>
@@ -68,6 +65,7 @@ void __init ixdp2400_pci_preinit(void)
 {
 	ixp2000_reg_write(IXP2000_PCI_ADDR_EXT, 0x00100000);
 	ixp2000_pci_preinit();
+	pcibios_setup("firmware");
 }
 
 int ixdp2400_pci_setup(int nr, struct pci_sys_data *sys)
@@ -79,7 +77,8 @@ int ixdp2400_pci_setup(int nr, struct pci_sys_data *sys)
 	return 1;
 }
 
-static int __init ixdp2400_pci_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+static int __init ixdp2400_pci_map_irq(const struct pci_dev *dev, u8 slot,
+	u8 pin)
 {
 	if (ixdp2x00_master_npu()) {
 
@@ -133,11 +132,13 @@ static void ixdp2400_pci_postinit(void)
 	struct pci_dev *dev;
 
 	if (ixdp2x00_master_npu()) {
-		dev = pci_find_slot(1, IXDP2400_SLAVE_ENET_DEVFN);
-		pci_remove_bus_device(dev);
+		dev = pci_get_bus_and_slot(1, IXDP2400_SLAVE_ENET_DEVFN);
+		pci_stop_and_remove_bus_device(dev);
+		pci_dev_put(dev);
 	} else {
-		dev = pci_find_slot(1, IXDP2400_MASTER_ENET_DEVFN);
-		pci_remove_bus_device(dev);
+		dev = pci_get_bus_and_slot(1, IXDP2400_MASTER_ENET_DEVFN);
+		pci_stop_and_remove_bus_device(dev);
+		pci_dev_put(dev);
 
 		ixdp2x00_slave_pci_postinit();
 	}
@@ -162,18 +163,18 @@ int __init ixdp2400_pci_init(void)
 
 subsys_initcall(ixdp2400_pci_init);
 
-void ixdp2400_init_irq(void)
+void __init ixdp2400_init_irq(void)
 {
 	ixdp2x00_init_irq(IXDP2400_CPLD_INT_STAT, IXDP2400_CPLD_INT_MASK, IXDP2400_NR_IRQS);
 }
 
 MACHINE_START(IXDP2400, "Intel IXDP2400 Development Platform")
-	MAINTAINER("MontaVista Software, Inc.")
-	BOOT_MEM(0x00000000, IXP2000_UART_PHYS_BASE, IXP2000_UART_VIRT_BASE)
-	BOOT_PARAMS(0x00000100)
-	MAPIO(ixdp2x00_map_io)
-	INITIRQ(ixdp2400_init_irq)
+	/* Maintainer: MontaVista Software, Inc. */
+	.atag_offset	= 0x100,
+	.map_io		= ixdp2x00_map_io,
+	.init_irq	= ixdp2400_init_irq,
 	.timer		= &ixdp2400_timer,
-	INIT_MACHINE(ixdp2x00_init_machine)
+	.init_machine	= ixdp2x00_init_machine,
+	.restart	= ixp2000_restart,
 MACHINE_END
 

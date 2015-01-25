@@ -69,29 +69,35 @@
  * Added support for pre -A chips, which don't have advanced features
  * and will generate CSR_RESEL rather than CSR_RESEL_AM.
  *	Richard Hirst <richard@sleepie.demon.co.uk>  August 2000
+ *
+ * Added support for Burst Mode DMA and Fast SCSI. Enabled the use of
+ * default_sx_per for asynchronous data transfers. Added adjustment
+ * of transfer periods in sx_table to the actual input-clock.
+ *  peter fuerst <post@pfrst.de>  February 2007
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 
-#include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/delay.h>
-#include <linux/version.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
 #include <linux/blkdev.h>
-#include <asm/irq.h>
 
 #include <scsi/scsi.h>
 #include <scsi/scsi_cmnd.h>
 #include <scsi/scsi_device.h>
 #include <scsi/scsi_host.h>
 
+#include <asm/irq.h>
+
 #include "wd33c93.h"
 
+#define optimum_sx_per(hostdata) (hostdata)->sx_table[1].period_ns
 
-#define WD33C93_VERSION    "1.26"
-#define WD33C93_DATE       "22/Feb/2003"
+
+#define WD33C93_VERSION    "1.26++"
+#define WD33C93_DATE       "10/Feb/2007"
 
 MODULE_AUTHOR("John Shifflett");
 MODULE_DESCRIPTION("Generic WD33C93 SCSI driver");
@@ -125,6 +131,13 @@ MODULE_LICENSE("GPL");
  *                    defines in wd33c93.h
  * -  clock:x        -x = clock input in MHz for WD33c93 chip. Normal values
  *                    would be from 8 through 20. Default is 8.
+ * -  burst:x        -x = 1 to use Burst Mode (or Demand-Mode) DMA, x = 0 to use
+ *                    Single Byte DMA, which is the default. Argument is
+ *                    optional - if not present, same as "burst:1".
+ * -  fast:x         -x = 1 to enable Fast SCSI, which is only effective with
+ *                    input-clock divisor 4 (WD33C93_FS_16_20), x = 0 to disable
+ *                    it, which is the default.  Argument is optional - if not
+ *                    present, same as "fast:1".
  * -  next           -No argument. Used to separate blocks of keywords when
  *                    there's more than one host adapter in the system.
  *
@@ -151,7 +164,7 @@ MODULE_LICENSE("GPL");
  */
 
 /* Normally, no defaults are specified */
-static char *setup_args[] = { "", "", "", "", "", "", "", "", "" };
+static char *setup_args[] = { "", "", "", "", "", "", "", "", "", "" };
 
 static char *setup_strings;
 module_param(setup_strings, charp, 0);
@@ -301,20 +314,8 @@ read_1_byte(const wd33c93_regs regs)
 	return x;
 }
 
-static struct sx_period sx_table[] = {
-	{1, 0x20},
-	{252, 0x20},
-	{376, 0x30},
-	{500, 0x40},
-	{624, 0x50},
-	{752, 0x60},
-	{876, 0x70},
-	{1000, 0x00},
-	{0, 0}
-};
-
 static int
-round_period(unsigned int period)
+round_period(unsigned int period, const struct sx_period *sx_table)
 {
 	int x;
 
@@ -327,19 +328,51 @@ round_period(unsigned int period)
 	return 7;
 }
 
+/*
+ * Calculate Synchronous Transfer Register value from SDTR code.
+ */
 static uchar
-calc_sync_xfer(unsigned int period, unsigned int offset)
+calc_sync_xfer(unsigned int period, unsigned int offset, unsigned int fast,
+               const struct sx_period *sx_table)
 {
+	/* When doing Fast SCSI synchronous data transfers, the corresponding
+	 * value in 'sx_table' is two times the actually used transfer period.
+	 */
 	uchar result;
 
+	if (offset && fast) {
+		fast = STR_FSS;
+		period *= 2;
+	} else {
+		fast = 0;
+	}
 	period *= 4;		/* convert SDTR code to ns */
-	result = sx_table[round_period(period)].reg_value;
+	result = sx_table[round_period(period,sx_table)].reg_value;
 	result |= (offset < OPTIMUM_SX_OFF) ? offset : OPTIMUM_SX_OFF;
+	result |= fast;
 	return result;
 }
 
-int
-wd33c93_queuecommand(struct scsi_cmnd *cmd,
+/*
+ * Calculate SDTR code bytes [3],[4] from period and offset.
+ */
+static inline void
+calc_sync_msg(unsigned int period, unsigned int offset, unsigned int fast,
+                uchar  msg[2])
+{
+	/* 'period' is a "normal"-mode value, like the ones in 'sx_table'. The
+	 * actually used transfer period for Fast SCSI synchronous data
+	 * transfers is half that value.
+	 */
+	period /= 4;
+	if (offset && fast)
+		period /= 2;
+	msg[0] = period;
+	msg[1] = offset;
+}
+
+static int
+wd33c93_queuecommand_lck(struct scsi_cmnd *cmd,
 		void (*done)(struct scsi_cmnd *))
 {
 	struct WD33C93_hostdata *hostdata;
@@ -348,7 +381,7 @@ wd33c93_queuecommand(struct scsi_cmnd *cmd,
 	hostdata = (struct WD33C93_hostdata *) cmd->device->host->hostdata;
 
 	DB(DB_QUEUE_COMMAND,
-	   printk("Q-%d-%02x-%ld( ", cmd->device->id, cmd->cmnd[0], cmd->pid))
+	   printk("Q-%d-%02x( ", cmd->device->id, cmd->cmnd[0]))
 
 /* Set up a few fields in the scsi_cmnd structure for our own use:
  *  - host_scribble is the pointer to the next cmd in the input queue
@@ -374,17 +407,16 @@ wd33c93_queuecommand(struct scsi_cmnd *cmd,
  *  - SCp.phase records this command's SRCID_ER bit setting
  */
 
-	if (cmd->use_sg) {
-		cmd->SCp.buffer = (struct scatterlist *) cmd->buffer;
-		cmd->SCp.buffers_residual = cmd->use_sg - 1;
-		cmd->SCp.ptr = page_address(cmd->SCp.buffer->page) +
-		    cmd->SCp.buffer->offset;
+	if (scsi_bufflen(cmd)) {
+		cmd->SCp.buffer = scsi_sglist(cmd);
+		cmd->SCp.buffers_residual = scsi_sg_count(cmd) - 1;
+		cmd->SCp.ptr = sg_virt(cmd->SCp.buffer);
 		cmd->SCp.this_residual = cmd->SCp.buffer->length;
 	} else {
 		cmd->SCp.buffer = NULL;
 		cmd->SCp.buffers_residual = 0;
-		cmd->SCp.ptr = (char *) cmd->request_buffer;
-		cmd->SCp.this_residual = cmd->request_bufflen;
+		cmd->SCp.ptr = NULL;
+		cmd->SCp.this_residual = 0;
 	}
 
 /* WD docs state that at the conclusion of a "LEVEL2" command, the
@@ -430,11 +462,13 @@ wd33c93_queuecommand(struct scsi_cmnd *cmd,
 
 	wd33c93_execute(cmd->device->host);
 
-	DB(DB_QUEUE_COMMAND, printk(")Q-%ld ", cmd->pid))
+	DB(DB_QUEUE_COMMAND, printk(")Q "))
 
 	spin_unlock_irq(&hostdata->lock);
 	return 0;
 }
+
+DEF_SCSI_QCMD(wd33c93_queuecommand)
 
 /*
  * This routine attempts to start a scsi command. If the host_card is
@@ -466,7 +500,7 @@ wd33c93_execute(struct Scsi_Host *instance)
 	 */
 
 	cmd = (struct scsi_cmnd *) hostdata->input_Q;
-	prev = 0;
+	prev = NULL;
 	while (cmd) {
 		if (!(hostdata->busy[cmd->device->id] & (1 << cmd->device->lun)))
 			break;
@@ -635,7 +669,7 @@ wd33c93_execute(struct Scsi_Host *instance)
 				write_wd33c93_count(regs,
 						    cmd->SCp.this_residual);
 				write_wd33c93(regs, WD_CONTROL,
-					      CTRL_IDI | CTRL_EDI | CTRL_DMA);
+					      CTRL_IDI | CTRL_EDI | hostdata->dma_mode);
 				hostdata->dma = D_DMA_RUNNING;
 			}
 		} else
@@ -653,7 +687,7 @@ wd33c93_execute(struct Scsi_Host *instance)
 	 */
 
 	DB(DB_EXECUTE,
-	   printk("%s%ld)EX-2 ", (cmd->SCp.phase) ? "d:" : "", cmd->pid))
+	   printk("%s)EX-2 ", (cmd->SCp.phase) ? "d:" : ""))
 }
 
 static void
@@ -712,9 +746,10 @@ transfer_bytes(const wd33c93_regs regs, struct scsi_cmnd *cmd,
 		++cmd->SCp.buffer;
 		--cmd->SCp.buffers_residual;
 		cmd->SCp.this_residual = cmd->SCp.buffer->length;
-		cmd->SCp.ptr = page_address(cmd->SCp.buffer->page) +
-		    cmd->SCp.buffer->offset;
+		cmd->SCp.ptr = sg_virt(cmd->SCp.buffer);
 	}
+	if (!cmd->SCp.this_residual) /* avoid bogus setups */
+		return;
 
 	write_wd33c93(regs, WD_SYNCHRONOUS_TRANSFER,
 		      hostdata->sync_xfer[cmd->device->id]);
@@ -747,7 +782,7 @@ transfer_bytes(const wd33c93_regs regs, struct scsi_cmnd *cmd,
 #ifdef PROC_STATISTICS
 		hostdata->dma_cnt++;
 #endif
-		write_wd33c93(regs, WD_CONTROL, CTRL_IDI | CTRL_EDI | CTRL_DMA);
+		write_wd33c93(regs, WD_CONTROL, CTRL_IDI | CTRL_EDI | hostdata->dma_mode);
 		write_wd33c93_count(regs, cmd->SCp.this_residual);
 
 		if ((hostdata->level2 >= L2_DATA) ||
@@ -865,9 +900,6 @@ wd33c93_intr(struct Scsi_Host *instance)
 			hostdata->outgoing_msg[0] |= 0x40;
 
 		if (hostdata->sync_stat[cmd->device->id] == SS_FIRST) {
-#ifdef SYNC_DEBUG
-			printk(" sending SDTR ");
-#endif
 
 			hostdata->sync_stat[cmd->device->id] = SS_WAITING;
 
@@ -881,14 +913,20 @@ wd33c93_intr(struct Scsi_Host *instance)
 			hostdata->outgoing_msg[2] = 3;
 			hostdata->outgoing_msg[3] = EXTENDED_SDTR;
 			if (hostdata->no_sync & (1 << cmd->device->id)) {
-				hostdata->outgoing_msg[4] =
-				    hostdata->default_sx_per / 4;
-				hostdata->outgoing_msg[5] = 0;
+				calc_sync_msg(hostdata->default_sx_per, 0,
+						0, hostdata->outgoing_msg + 4);
 			} else {
-				hostdata->outgoing_msg[4] = OPTIMUM_SX_PER / 4;
-				hostdata->outgoing_msg[5] = OPTIMUM_SX_OFF;
+				calc_sync_msg(optimum_sx_per(hostdata),
+						OPTIMUM_SX_OFF,
+						hostdata->fast,
+						hostdata->outgoing_msg + 4);
 			}
 			hostdata->outgoing_len = 6;
+#ifdef SYNC_DEBUG
+			ucp = hostdata->outgoing_msg + 1;
+			printk(" sending SDTR %02x03%02x%02x%02x ",
+				ucp[0], ucp[2], ucp[3], ucp[4]);
+#endif
 		} else
 			hostdata->outgoing_len = 1;
 
@@ -925,7 +963,7 @@ wd33c93_intr(struct Scsi_Host *instance)
 	case CSR_XFER_DONE | PHS_COMMAND:
 	case CSR_UNEXP | PHS_COMMAND:
 	case CSR_SRV_REQ | PHS_COMMAND:
-		DB(DB_INTR, printk("CMND-%02x,%ld", cmd->cmnd[0], cmd->pid))
+		DB(DB_INTR, printk("CMND-%02x", cmd->cmnd[0]))
 		    transfer_pio(regs, cmd->cmnd, cmd->cmd_len, DATA_OUT_DIR,
 				 hostdata);
 		hostdata->state = S_CONNECTED;
@@ -940,6 +978,7 @@ wd33c93_intr(struct Scsi_Host *instance)
 		DB(DB_INTR, printk("%02x", cmd->SCp.Status))
 		    if (hostdata->level2 >= L2_BASIC) {
 			sr = read_wd33c93(regs, WD_SCSI_STATUS);	/* clear interrupt */
+			udelay(7);
 			hostdata->state = S_RUNNING_LEVEL2;
 			write_wd33c93(regs, WD_COMMAND_PHASE, 0x50);
 			write_wd33c93_cmd(regs, WD_CMD_SEL_ATN_XFER);
@@ -956,6 +995,7 @@ wd33c93_intr(struct Scsi_Host *instance)
 
 		msg = read_1_byte(regs);
 		sr = read_wd33c93(regs, WD_SCSI_STATUS);	/* clear interrupt */
+		udelay(7);
 
 		hostdata->incoming_msg[hostdata->incoming_ptr] = msg;
 		if (hostdata->incoming_msg[0] == EXTENDED_MESSAGE)
@@ -967,7 +1007,7 @@ wd33c93_intr(struct Scsi_Host *instance)
 		switch (msg) {
 
 		case COMMAND_COMPLETE:
-			DB(DB_INTR, printk("CCMP-%ld", cmd->pid))
+			DB(DB_INTR, printk("CCMP"))
 			    write_wd33c93_cmd(regs, WD_CMD_NEGATE_ACK);
 			hostdata->state = S_PRE_CMP_DISC;
 			break;
@@ -1002,8 +1042,13 @@ wd33c93_intr(struct Scsi_Host *instance)
 #ifdef SYNC_DEBUG
 			    printk("-REJ-");
 #endif
-			if (hostdata->sync_stat[cmd->device->id] == SS_WAITING)
+			if (hostdata->sync_stat[cmd->device->id] == SS_WAITING) {
 				hostdata->sync_stat[cmd->device->id] = SS_SET;
+				/* we want default_sx_per, not DEFAULT_SX_PER */
+				hostdata->sync_xfer[cmd->device->id] =
+					calc_sync_xfer(hostdata->default_sx_per
+						/ 4, 0, 0, hostdata->sx_table);
+			}
 			write_wd33c93_cmd(regs, WD_CMD_NEGATE_ACK);
 			hostdata->state = S_CONNECTED;
 			break;
@@ -1023,7 +1068,10 @@ wd33c93_intr(struct Scsi_Host *instance)
 
 				switch (ucp[2]) {	/* what's the EXTENDED code? */
 				case EXTENDED_SDTR:
-					id = calc_sync_xfer(ucp[3], ucp[4]);
+					/* default to default async period */
+					id = calc_sync_xfer(hostdata->
+							default_sx_per / 4, 0,
+							0, hostdata->sx_table);
 					if (hostdata->sync_stat[cmd->device->id] !=
 					    SS_WAITING) {
 
@@ -1042,20 +1090,22 @@ wd33c93_intr(struct Scsi_Host *instance)
 						hostdata->outgoing_msg[1] = 3;
 						hostdata->outgoing_msg[2] =
 						    EXTENDED_SDTR;
-						hostdata->outgoing_msg[3] =
-						    hostdata->default_sx_per /
-						    4;
-						hostdata->outgoing_msg[4] = 0;
+						calc_sync_msg(hostdata->
+							default_sx_per, 0,
+							0, hostdata->outgoing_msg + 3);
 						hostdata->outgoing_len = 5;
-						hostdata->sync_xfer[cmd->device->id] =
-						    calc_sync_xfer(hostdata->
-								   default_sx_per
-								   / 4, 0);
 					} else {
-						hostdata->sync_xfer[cmd->device->id] = id;
+						if (ucp[4]) /* well, sync transfer */
+							id = calc_sync_xfer(ucp[3], ucp[4],
+									hostdata->fast,
+									hostdata->sx_table);
+						else if (ucp[3]) /* very unlikely... */
+							id = calc_sync_xfer(ucp[3], ucp[4],
+									0, hostdata->sx_table);
 					}
+					hostdata->sync_xfer[cmd->device->id] = id;
 #ifdef SYNC_DEBUG
-					printk("sync_xfer=%02x",
+					printk(" sync_xfer=%02x\n",
 					       hostdata->sync_xfer[cmd->device->id]);
 #endif
 					hostdata->sync_stat[cmd->device->id] =
@@ -1124,7 +1174,7 @@ wd33c93_intr(struct Scsi_Host *instance)
 
 		write_wd33c93(regs, WD_SOURCE_ID, SRCID_ER);
 		if (phs == 0x60) {
-			DB(DB_INTR, printk("SX-DONE-%ld", cmd->pid))
+			DB(DB_INTR, printk("SX-DONE"))
 			    cmd->SCp.Message = COMMAND_COMPLETE;
 			lun = read_wd33c93(regs, WD_TARGET_LUN);
 			DB(DB_INTR, printk(":%d.%d", cmd->SCp.Status, lun))
@@ -1150,8 +1200,8 @@ wd33c93_intr(struct Scsi_Host *instance)
 			wd33c93_execute(instance);
 		} else {
 			printk
-			    ("%02x:%02x:%02x-%ld: Unknown SEL_XFER_DONE phase!!---",
-			     asr, sr, phs, cmd->pid);
+			    ("%02x:%02x:%02x: Unknown SEL_XFER_DONE phase!!---",
+			     asr, sr, phs);
 			spin_unlock_irqrestore(&hostdata->lock, flags);
 		}
 		break;
@@ -1216,7 +1266,7 @@ wd33c93_intr(struct Scsi_Host *instance)
 			spin_unlock_irqrestore(&hostdata->lock, flags);
 			return;
 		}
-		DB(DB_INTR, printk("UNEXP_DISC-%ld", cmd->pid))
+		DB(DB_INTR, printk("UNEXP_DISC"))
 		    hostdata->connected = NULL;
 		hostdata->busy[cmd->device->id] &= ~(1 << cmd->device->lun);
 		hostdata->state = S_UNCONNECTED;
@@ -1242,7 +1292,7 @@ wd33c93_intr(struct Scsi_Host *instance)
  */
 
 		write_wd33c93(regs, WD_SOURCE_ID, SRCID_ER);
-		DB(DB_INTR, printk("DISC-%ld", cmd->pid))
+		DB(DB_INTR, printk("DISC"))
 		    if (cmd == NULL) {
 			printk(" - Already disconnected! ");
 			hostdata->state = S_UNCONNECTED;
@@ -1359,6 +1409,7 @@ wd33c93_intr(struct Scsi_Host *instance)
 			} else {
 				/* Verify this is a change to MSG_IN and read the message */
 				sr = read_wd33c93(regs, WD_SCSI_STATUS);
+				udelay(7);
 				if (sr == (CSR_ABORT | PHS_MESS_IN) ||
 				    sr == (CSR_UNEXP | PHS_MESS_IN) ||
 				    sr == (CSR_SRV_REQ | PHS_MESS_IN)) {
@@ -1375,6 +1426,7 @@ wd33c93_intr(struct Scsi_Host *instance)
 							     asr);
 					}
 					sr = read_wd33c93(regs, WD_SCSI_STATUS);
+					udelay(7);
 					if (sr != CSR_MSGIN)
 						printk
 						    ("wd33c93: Not paused with ACK on RESEL (%02x)\n",
@@ -1439,7 +1491,6 @@ wd33c93_intr(struct Scsi_Host *instance)
 		} else
 			hostdata->state = S_CONNECTED;
 
-		DB(DB_INTR, printk("-%ld", cmd->pid))
 		    spin_unlock_irqrestore(&hostdata->lock, flags);
 		break;
 
@@ -1485,7 +1536,7 @@ reset_wd33c93(struct Scsi_Host *instance)
 	write_wd33c93(regs, WD_CONTROL, CTRL_IDI | CTRL_EDI | CTRL_POLLED);
 	write_wd33c93(regs, WD_SYNCHRONOUS_TRANSFER,
 		      calc_sync_xfer(hostdata->default_sx_per / 4,
-				     DEFAULT_SX_OFF));
+				     DEFAULT_SX_OFF, 0, hostdata->sx_table));
 	write_wd33c93(regs, WD_COMMAND, WD_CMD_RESET);
 
 
@@ -1511,6 +1562,9 @@ reset_wd33c93(struct Scsi_Host *instance)
 	} else
 		hostdata->chip = C_UNKNOWN_CHIP;
 
+	if (hostdata->chip != C_WD33C93B)	/* Fast SCSI unavailable */
+		hostdata->fast = 0;
+
 	write_wd33c93(regs, WD_TIMEOUT_PERIOD, TIMEOUT_PERIOD_VALUE);
 	write_wd33c93(regs, WD_CONTROL, CTRL_IDI | CTRL_EDI | CTRL_POLLED);
 }
@@ -1532,7 +1586,8 @@ wd33c93_host_reset(struct scsi_cmnd * SCpnt)
 	for (i = 0; i < 8; i++) {
 		hostdata->busy[i] = 0;
 		hostdata->sync_xfer[i] =
-		    calc_sync_xfer(DEFAULT_SX_PER / 4, DEFAULT_SX_OFF);
+			calc_sync_xfer(DEFAULT_SX_PER / 4, DEFAULT_SX_OFF,
+					0, hostdata->sx_table);
 		hostdata->sync_stat[i] = SS_UNSET;	/* using default sync values */
 	}
 	hostdata->input_Q = NULL;
@@ -1570,7 +1625,7 @@ wd33c93_abort(struct scsi_cmnd * cmd)
  */
 
 	tmp = (struct scsi_cmnd *) hostdata->input_Q;
-	prev = 0;
+	prev = NULL;
 	while (tmp) {
 		if (tmp == cmd) {
 			if (prev)
@@ -1581,8 +1636,8 @@ wd33c93_abort(struct scsi_cmnd * cmd)
 			cmd->host_scribble = NULL;
 			cmd->result = DID_ABORT << 16;
 			printk
-			    ("scsi%d: Abort - removing command %ld from input_Q. ",
-			     instance->host_no, cmd->pid);
+			    ("scsi%d: Abort - removing command from input_Q. ",
+			     instance->host_no);
 			enable_irq(cmd->device->host->irq);
 			cmd->scsi_done(cmd);
 			return SUCCESS;
@@ -1606,8 +1661,8 @@ wd33c93_abort(struct scsi_cmnd * cmd)
 		uchar sr, asr;
 		unsigned long timeout;
 
-		printk("scsi%d: Aborting connected command %ld - ",
-		       instance->host_no, cmd->pid);
+		printk("scsi%d: Aborting connected command - ",
+		       instance->host_no);
 
 		printk("stopping DMA - ");
 		if (hostdata->dma == D_DMA_RUNNING) {
@@ -1673,8 +1728,8 @@ wd33c93_abort(struct scsi_cmnd * cmd)
 	while (tmp) {
 		if (tmp == cmd) {
 			printk
-			    ("scsi%d: Abort - command %ld found on disconnected_Q - ",
-			     instance->host_no, cmd->pid);
+			    ("scsi%d: Abort - command found on disconnected_Q - ",
+			     instance->host_no);
 			printk("Abort SNOOZE. ");
 			enable_irq(cmd->device->host->irq);
 			return FAILED;
@@ -1702,13 +1757,13 @@ wd33c93_abort(struct scsi_cmnd * cmd)
 }
 
 #define MAX_WD33C93_HOSTS 4
-#define MAX_SETUP_ARGS ((int)(sizeof(setup_args) / sizeof(char *)))
+#define MAX_SETUP_ARGS ARRAY_SIZE(setup_args)
 #define SETUP_BUFFER_SIZE 200
 static char setup_buffer[SETUP_BUFFER_SIZE];
 static char setup_used[MAX_SETUP_ARGS];
 static int done_setup = 0;
 
-int
+static int
 wd33c93_setup(char *str)
 {
 	int i;
@@ -1781,6 +1836,98 @@ check_setup_args(char *key, int *flags, int *val, char *buf)
 	return ++x;
 }
 
+/*
+ * Calculate internal data-transfer-clock cycle from input-clock
+ * frequency (/MHz) and fill 'sx_table'.
+ *
+ * The original driver used to rely on a fixed sx_table, containing periods
+ * for (only) the lower limits of the respective input-clock-frequency ranges
+ * (8-10/12-15/16-20 MHz). Although it seems, that no problems occurred with
+ * this setting so far, it might be desirable to adjust the transfer periods
+ * closer to the really attached, possibly 25% higher, input-clock, since
+ * - the wd33c93 may really use a significant shorter period, than it has
+ *   negotiated (eg. thrashing the target, which expects 4/8MHz, with 5/10MHz
+ *   instead).
+ * - the wd33c93 may ask the target for a lower transfer rate, than the target
+ *   is capable of (eg. negotiating for an assumed minimum of 252ns instead of
+ *   possible 200ns, which indeed shows up in tests as an approx. 10% lower
+ *   transfer rate).
+ */
+static inline unsigned int
+round_4(unsigned int x)
+{
+	switch (x & 3) {
+		case 1: --x;
+			break;
+		case 2: ++x;
+		case 3: ++x;
+	}
+	return x;
+}
+
+static void
+calc_sx_table(unsigned int mhz, struct sx_period sx_table[9])
+{
+	unsigned int d, i;
+	if (mhz < 11)
+		d = 2;	/* divisor for  8-10 MHz input-clock */
+	else if (mhz < 16)
+		d = 3;	/* divisor for 12-15 MHz input-clock */
+	else
+		d = 4;	/* divisor for 16-20 MHz input-clock */
+
+	d = (100000 * d) / 2 / mhz; /* 100 x DTCC / nanosec */
+
+	sx_table[0].period_ns = 1;
+	sx_table[0].reg_value = 0x20;
+	for (i = 1; i < 8; i++) {
+		sx_table[i].period_ns = round_4((i+1)*d / 100);
+		sx_table[i].reg_value = (i+1)*0x10;
+	}
+	sx_table[7].reg_value = 0;
+	sx_table[8].period_ns = 0;
+	sx_table[8].reg_value = 0;
+}
+
+/*
+ * check and, maybe, map an init- or "clock:"- argument.
+ */
+static uchar
+set_clk_freq(int freq, int *mhz)
+{
+	int x = freq;
+	if (WD33C93_FS_8_10 == freq)
+		freq = 8;
+	else if (WD33C93_FS_12_15 == freq)
+		freq = 12;
+	else if (WD33C93_FS_16_20 == freq)
+		freq = 16;
+	else if (freq > 7 && freq < 11)
+		x = WD33C93_FS_8_10;
+		else if (freq > 11 && freq < 16)
+		x = WD33C93_FS_12_15;
+		else if (freq > 15 && freq < 21)
+		x = WD33C93_FS_16_20;
+	else {
+			/* Hmm, wouldn't it be safer to assume highest freq here? */
+		x = WD33C93_FS_8_10;
+		freq = 8;
+	}
+	*mhz = freq;
+	return x;
+}
+
+/*
+ * to be used with the resync: fast: ... options
+ */
+static inline void set_resync ( struct WD33C93_hostdata *hd, int mask )
+{
+	int i;
+	for (i = 0; i < 8; i++)
+		if (mask & (1 << i))
+			hd->sync_stat[i] = SS_UNSET;
+}
+
 void
 wd33c93_init(struct Scsi_Host *instance, const wd33c93_regs regs,
 	     dma_setup_t setup, dma_stop_t stop, int clock_freq)
@@ -1797,7 +1944,8 @@ wd33c93_init(struct Scsi_Host *instance, const wd33c93_regs regs,
 	hostdata = (struct WD33C93_hostdata *) instance->hostdata;
 
 	hostdata->regs = regs;
-	hostdata->clock_freq = clock_freq;
+	hostdata->clock_freq = set_clk_freq(clock_freq, &i);
+	calc_sx_table(i, hostdata->sx_table);
 	hostdata->dma_setup = setup;
 	hostdata->dma_stop = stop;
 	hostdata->dma_bounce_buffer = NULL;
@@ -1805,7 +1953,8 @@ wd33c93_init(struct Scsi_Host *instance, const wd33c93_regs regs,
 	for (i = 0; i < 8; i++) {
 		hostdata->busy[i] = 0;
 		hostdata->sync_xfer[i] =
-		    calc_sync_xfer(DEFAULT_SX_PER / 4, DEFAULT_SX_OFF);
+			calc_sync_xfer(DEFAULT_SX_PER / 4, DEFAULT_SX_OFF,
+					0, hostdata->sx_table);
 		hostdata->sync_stat[i] = SS_UNSET;	/* using default sync values */
 #ifdef PROC_STATISTICS
 		hostdata->cmd_cnt[i] = 0;
@@ -1825,7 +1974,6 @@ wd33c93_init(struct Scsi_Host *instance, const wd33c93_regs regs,
 	hostdata->incoming_ptr = 0;
 	hostdata->outgoing_len = 0;
 	hostdata->default_sx_per = DEFAULT_SX_PER;
-	hostdata->no_sync = 0xff;	/* sync defaults to off */
 	hostdata->no_dma = 0;	/* default is DMA enabled */
 
 #ifdef PROC_INTERFACE
@@ -1838,6 +1986,11 @@ wd33c93_init(struct Scsi_Host *instance, const wd33c93_regs regs,
 #endif
 #endif
 
+	if (check_setup_args("clock", &flags, &val, buf)) {
+		hostdata->clock_freq = set_clk_freq(val, &val);
+		calc_sx_table(val, hostdata->sx_table);
+	}
+
 	if (check_setup_args("nosync", &flags, &val, buf))
 		hostdata->no_sync = val;
 
@@ -1846,7 +1999,8 @@ wd33c93_init(struct Scsi_Host *instance, const wd33c93_regs regs,
 
 	if (check_setup_args("period", &flags, &val, buf))
 		hostdata->default_sx_per =
-		    sx_table[round_period((unsigned int) val)].period_ns;
+		    hostdata->sx_table[round_period((unsigned int) val,
+		                                    hostdata->sx_table)].period_ns;
 
 	if (check_setup_args("disconnect", &flags, &val, buf)) {
 		if ((val >= DIS_NEVER) && (val <= DIS_ALWAYS))
@@ -1861,17 +2015,12 @@ wd33c93_init(struct Scsi_Host *instance, const wd33c93_regs regs,
 	if (check_setup_args("debug", &flags, &val, buf))
 		hostdata->args = val & DB_MASK;
 
-	if (check_setup_args("clock", &flags, &val, buf)) {
-		if (val > 7 && val < 11)
-			val = WD33C93_FS_8_10;
-		else if (val > 11 && val < 16)
-			val = WD33C93_FS_12_15;
-		else if (val > 15 && val < 21)
-			val = WD33C93_FS_16_20;
-		else
-			val = WD33C93_FS_8_10;
-		hostdata->clock_freq = val;
-	}
+	if (check_setup_args("burst", &flags, &val, buf))
+		hostdata->dma_mode = val ? CTRL_BURST:CTRL_DMA;
+
+	if (WD33C93_FS_16_20 == hostdata->clock_freq /* divisor 4 */
+		&& check_setup_args("fast", &flags, &val, buf))
+		hostdata->fast = !!val;
 
 	if ((i = check_setup_args("next", &flags, &val, buf))) {
 		while (i)
@@ -1902,8 +2051,7 @@ wd33c93_init(struct Scsi_Host *instance, const wd33c93_regs regs,
 	for (i = 0; i < MAX_SETUP_ARGS; i++)
 		printk("%s,", setup_args[i]);
 	printk("\n");
-	printk("           Version %s - %s, Compiled %s at %s\n",
-	       WD33C93_VERSION, WD33C93_DATE, __DATE__, __TIME__);
+	printk("           Version %s - %s\n", WD33C93_VERSION, WD33C93_DATE);
 }
 
 int
@@ -1916,53 +2064,65 @@ wd33c93_proc_info(struct Scsi_Host *instance, char *buf, char **start, off_t off
 	char tbuf[128];
 	struct WD33C93_hostdata *hd;
 	struct scsi_cmnd *cmd;
-	int x, i;
+	int x;
 	static int stop = 0;
 
 	hd = (struct WD33C93_hostdata *) instance->hostdata;
 
 /* If 'in' is TRUE we need to _read_ the proc file. We accept the following
- * keywords (same format as command-line, but only ONE per read):
+ * keywords (same format as command-line, but arguments are not optional):
  *    debug
  *    disconnect
  *    period
  *    resync
  *    proc
  *    nodma
+ *    level2
+ *    burst
+ *    fast
+ *    nosync
  */
 
 	if (in) {
 		buf[len] = '\0';
-		bp = buf;
+		for (bp = buf; *bp; ) {
+			while (',' == *bp || ' ' == *bp)
+				++bp;
 		if (!strncmp(bp, "debug:", 6)) {
-			bp += 6;
-			hd->args = simple_strtoul(bp, NULL, 0) & DB_MASK;
+				hd->args = simple_strtoul(bp+6, &bp, 0) & DB_MASK;
 		} else if (!strncmp(bp, "disconnect:", 11)) {
-			bp += 11;
-			x = simple_strtoul(bp, NULL, 0);
+				x = simple_strtoul(bp+11, &bp, 0);
 			if (x < DIS_NEVER || x > DIS_ALWAYS)
 				x = DIS_ADAPTIVE;
 			hd->disconnect = x;
 		} else if (!strncmp(bp, "period:", 7)) {
-			bp += 7;
-			x = simple_strtoul(bp, NULL, 0);
+			x = simple_strtoul(bp+7, &bp, 0);
 			hd->default_sx_per =
-			    sx_table[round_period((unsigned int) x)].period_ns;
+				hd->sx_table[round_period((unsigned int) x,
+							  hd->sx_table)].period_ns;
 		} else if (!strncmp(bp, "resync:", 7)) {
-			bp += 7;
-			x = simple_strtoul(bp, NULL, 0);
-			for (i = 0; i < 7; i++)
-				if (x & (1 << i))
-					hd->sync_stat[i] = SS_UNSET;
+				set_resync(hd, (int)simple_strtoul(bp+7, &bp, 0));
 		} else if (!strncmp(bp, "proc:", 5)) {
-			bp += 5;
-			hd->proc = simple_strtoul(bp, NULL, 0);
+				hd->proc = simple_strtoul(bp+5, &bp, 0);
 		} else if (!strncmp(bp, "nodma:", 6)) {
-			bp += 6;
-			hd->no_dma = simple_strtoul(bp, NULL, 0);
+				hd->no_dma = simple_strtoul(bp+6, &bp, 0);
 		} else if (!strncmp(bp, "level2:", 7)) {
-			bp += 7;
-			hd->level2 = simple_strtoul(bp, NULL, 0);
+				hd->level2 = simple_strtoul(bp+7, &bp, 0);
+			} else if (!strncmp(bp, "burst:", 6)) {
+				hd->dma_mode =
+					simple_strtol(bp+6, &bp, 0) ? CTRL_BURST:CTRL_DMA;
+			} else if (!strncmp(bp, "fast:", 5)) {
+				x = !!simple_strtol(bp+5, &bp, 0);
+				if (x != hd->fast)
+					set_resync(hd, 0xff);
+				hd->fast = x;
+			} else if (!strncmp(bp, "nosync:", 7)) {
+				x = simple_strtoul(bp+7, &bp, 0);
+				set_resync(hd, x ^ hd->no_sync);
+				hd->no_sync = x;
+			} else {
+				break; /* unknown keyword,syntax-error,... */
+			}
 		}
 		return len;
 	}
@@ -1971,13 +2131,14 @@ wd33c93_proc_info(struct Scsi_Host *instance, char *buf, char **start, off_t off
 	bp = buf;
 	*bp = '\0';
 	if (hd->proc & PR_VERSION) {
-		sprintf(tbuf, "\nVersion %s - %s. Compiled %s %s",
-			WD33C93_VERSION, WD33C93_DATE, __DATE__, __TIME__);
+		sprintf(tbuf, "\nVersion %s - %s.",
+			WD33C93_VERSION, WD33C93_DATE);
 		strcat(bp, tbuf);
 	}
 	if (hd->proc & PR_INFO) {
-		sprintf(tbuf, "\nclock_freq=%02x no_sync=%02x no_dma=%d",
-			hd->clock_freq, hd->no_sync, hd->no_dma);
+		sprintf(tbuf, "\nclock_freq=%02x no_sync=%02x no_dma=%d"
+			" dma_mode=%02x fast=%d",
+			hd->clock_freq, hd->no_sync, hd->no_dma, hd->dma_mode, hd->fast);
 		strcat(bp, tbuf);
 		strcat(bp, "\nsync_xfer[] =       ");
 		for (x = 0; x < 7; x++) {
@@ -2017,8 +2178,8 @@ wd33c93_proc_info(struct Scsi_Host *instance, char *buf, char **start, off_t off
 		strcat(bp, "\nconnected:     ");
 		if (hd->connected) {
 			cmd = (struct scsi_cmnd *) hd->connected;
-			sprintf(tbuf, " %ld-%d:%d(%02x)",
-				cmd->pid, cmd->device->id, cmd->device->lun, cmd->cmnd[0]);
+			sprintf(tbuf, " %d:%d(%02x)",
+				cmd->device->id, cmd->device->lun, cmd->cmnd[0]);
 			strcat(bp, tbuf);
 		}
 	}
@@ -2026,8 +2187,8 @@ wd33c93_proc_info(struct Scsi_Host *instance, char *buf, char **start, off_t off
 		strcat(bp, "\ninput_Q:       ");
 		cmd = (struct scsi_cmnd *) hd->input_Q;
 		while (cmd) {
-			sprintf(tbuf, " %ld-%d:%d(%02x)",
-				cmd->pid, cmd->device->id, cmd->device->lun, cmd->cmnd[0]);
+			sprintf(tbuf, " %d:%d(%02x)",
+				cmd->device->id, cmd->device->lun, cmd->cmnd[0]);
 			strcat(bp, tbuf);
 			cmd = (struct scsi_cmnd *) cmd->host_scribble;
 		}
@@ -2036,8 +2197,8 @@ wd33c93_proc_info(struct Scsi_Host *instance, char *buf, char **start, off_t off
 		strcat(bp, "\ndisconnected_Q:");
 		cmd = (struct scsi_cmnd *) hd->disconnected_Q;
 		while (cmd) {
-			sprintf(tbuf, " %ld-%d:%d(%02x)",
-				cmd->pid, cmd->device->id, cmd->device->lun, cmd->cmnd[0]);
+			sprintf(tbuf, " %d:%d(%02x)",
+				cmd->device->id, cmd->device->lun, cmd->cmnd[0]);
 			strcat(bp, tbuf);
 			cmd = (struct scsi_cmnd *) cmd->host_scribble;
 		}
@@ -2063,14 +2224,8 @@ wd33c93_proc_info(struct Scsi_Host *instance, char *buf, char **start, off_t off
 
 }
 
-void
-wd33c93_release(void)
-{
-}
-
 EXPORT_SYMBOL(wd33c93_host_reset);
 EXPORT_SYMBOL(wd33c93_init);
-EXPORT_SYMBOL(wd33c93_release);
 EXPORT_SYMBOL(wd33c93_abort);
 EXPORT_SYMBOL(wd33c93_queuecommand);
 EXPORT_SYMBOL(wd33c93_intr);

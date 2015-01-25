@@ -7,13 +7,11 @@
 #include <linux/elfcore.h>
 #include <linux/in6.h>
 #include <linux/interrupt.h>
-#include <linux/config.h>
 
 #include <asm/setup.h>
 #include <asm/pgalloc.h>
 #include <asm/irq.h>
 #include <asm/io.h>
-#include <asm/semaphore.h>
 #include <asm/checksum.h>
 #include <asm/current.h>
 #include <asm/gpio.h>
@@ -22,11 +20,8 @@
 //asmlinkage long long __lshrdi3 (long long, int);
 extern char h8300_debug_device[];
 
-extern void dump_thread(struct pt_regs *, struct user *);
-
 /* platform dependent support */
 
-EXPORT_SYMBOL(dump_thread);
 EXPORT_SYMBOL(strnlen);
 EXPORT_SYMBOL(strrchr);
 EXPORT_SYMBOL(strstr);
@@ -43,7 +38,7 @@ EXPORT_SYMBOL(enable_irq);
 EXPORT_SYMBOL(disable_irq);
 
 /* Networking helper routines. */
-EXPORT_SYMBOL(csum_partial_copy);
+EXPORT_SYMBOL(csum_partial_copy_nocheck);
 
 /* The following are special because they're not called
    explicitly (the C compiler generates them).  Fortunately,
@@ -56,8 +51,6 @@ EXPORT_SYMBOL(memset);
 EXPORT_SYMBOL(memcmp);
 EXPORT_SYMBOL(memscan);
 EXPORT_SYMBOL(memmove);
-
-EXPORT_SYMBOL(get_wchan);
 
 /*
  * libgcc functions - functions that are used internally by the
@@ -102,10 +95,6 @@ EXPORT_SYMBOL(__udivmoddi4);
 EXPORT_SYMBOL(__udivsi3);
 EXPORT_SYMBOL(__umoddi3);
 EXPORT_SYMBOL(__umodsi3);
-
-#ifdef MAGIC_ROM_PTR
-EXPORT_SYMBOL(is_in_rom);
-#endif
 
 EXPORT_SYMBOL(h8300_reserved_gpio);
 EXPORT_SYMBOL(h8300_free_gpio);

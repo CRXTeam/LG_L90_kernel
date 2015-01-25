@@ -1,14 +1,14 @@
 /* 
    3w-xxxx.h -- 3ware Storage Controller device driver for Linux.
    
-   Written By: Adam Radford <linuxraid@amcc.com>
+   Written By: Adam Radford <linuxraid@lsi.com>
    Modifications By: Joel Jacobson <linux@3ware.com>
    		     Arnaldo Carvalho de Melo <acme@conectiva.com.br>
                      Brad Strand <linux@3ware.com>
 
-   Copyright (C) 1999-2005 3ware Inc.
+   Copyright (C) 1999-2010 3ware Inc.
 
-   Kernel compatiblity By:	Andre Hedrick <andre@suse.com>
+   Kernel compatibility By:	Andre Hedrick <andre@suse.com>
    Non-Copyright (C) 2000	Andre Hedrick <andre@suse.com>
 
    This program is free software; you can redistribute it and/or modify
@@ -45,16 +45,15 @@
    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA 
 
    Bugs/Comments/Suggestions should be mailed to:                            
-   linuxraid@amcc.com
+   linuxraid@lsi.com
    
    For more information, goto:
-   http://www.amcc.com
+   http://www.lsi.com
 */
 
 #ifndef _3W_XXXX_H
 #define _3W_XXXX_H
 
-#include <linux/version.h>
 #include <linux/types.h>
 
 /* AEN strings */
@@ -75,7 +74,7 @@ static char *tw_aen_string[] = {
 	[0x00D] = "ERROR: Logical unit deleted: Unit #",
 	[0x00F] = "WARNING: SMART threshold exceeded: Port #",
 	[0x021] = "WARNING: ATA UDMA downgrade: Port #",
-	[0x021] = "WARNING: ATA UDMA upgrade: Port #",
+	[0x022] = "WARNING: ATA UDMA upgrade: Port #",
 	[0x023] = "WARNING: Sector repair occurred: Port #",
 	[0x024] = "ERROR: SBUF integrity check failure",
 	[0x025] = "ERROR: Lost cached write: Port #",
@@ -235,7 +234,7 @@ static unsigned char tw_sense_table[][4] =
 #define TW_IOCTL_TIMEOUT                      25 /* 25 seconds */
 #define TW_IOCTL_CHRDEV_TIMEOUT               60 /* 60 seconds */
 #define TW_IOCTL_CHRDEV_FREE                  -1
-#define TW_DMA_MASK			      DMA_32BIT_MASK
+#define TW_DMA_MASK			      DMA_BIT_MASK(32)
 #define TW_MAX_CDB_LEN			      16
 
 /* Bitmask macros to eliminate bitfields */
@@ -421,7 +420,7 @@ typedef struct TAG_TW_Device_Extension {
 	u32			max_sector_count;
 	u32			aen_count;
 	struct Scsi_Host	*host;
-	struct semaphore	ioctl_sem;
+	struct mutex		ioctl_lock;
 	unsigned short		aen_queue[TW_Q_LENGTH];
 	unsigned char		aen_head;
 	unsigned char		aen_tail;

@@ -15,6 +15,7 @@
 struct kyrofb_info {
 	void __iomem *regbase;
 
+	u32 palette[16];
 	u32 HTot;	/* Hor Total Time    */
 	u32 HFP;	/* Hor Front Porch   */
 	u32 HST;	/* Hor Sync Time     */
@@ -31,7 +32,7 @@ struct kyrofb_info {
 	u32 PIXCLK;	/* Pixel Clock       */
 	u32 HCLK;	/* Hor Clock         */
 
-	/* Usefull to hold depth here for Linux */
+	/* Useful to hold depth here for Linux */
 	u8 PIXDEPTH;
 
 #ifdef CONFIG_MTRR

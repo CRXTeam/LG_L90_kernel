@@ -7,11 +7,12 @@
  *    Author(s): Martin Schwidefsky (schwidefsky@de.ibm.com),
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/sched.h>
+#include <linux/slab.h>
 #include <linux/sysrq.h>
 
+#include <linux/consolemap.h>
 #include <linux/kbd_kern.h>
 #include <linux/kbd_diacr.h>
 #include <asm/uaccess.h>
@@ -48,50 +49,43 @@ static unsigned char ret_diacr[NR_DEAD] = {
 struct kbd_data *
 kbd_alloc(void) {
 	struct kbd_data *kbd;
-	int i, len;
+	int i;
 
-	kbd = kmalloc(sizeof(struct kbd_data), GFP_KERNEL);
+	kbd = kzalloc(sizeof(struct kbd_data), GFP_KERNEL);
 	if (!kbd)
 		goto out;
-	memset(kbd, 0, sizeof(struct kbd_data));
-	kbd->key_maps = kmalloc(sizeof(key_maps), GFP_KERNEL);
-	if (!key_maps)
+	kbd->key_maps = kzalloc(sizeof(key_maps), GFP_KERNEL);
+	if (!kbd->key_maps)
 		goto out_kbd;
-	memset(kbd->key_maps, 0, sizeof(key_maps));
 	for (i = 0; i < ARRAY_SIZE(key_maps); i++) {
 		if (key_maps[i]) {
-			kbd->key_maps[i] =
-				kmalloc(sizeof(u_short)*NR_KEYS, GFP_KERNEL);
+			kbd->key_maps[i] = kmemdup(key_maps[i],
+						   sizeof(u_short) * NR_KEYS,
+						   GFP_KERNEL);
 			if (!kbd->key_maps[i])
 				goto out_maps;
-			memcpy(kbd->key_maps[i], key_maps[i],
-			       sizeof(u_short)*NR_KEYS);
 		}
 	}
-	kbd->func_table = kmalloc(sizeof(func_table), GFP_KERNEL);
+	kbd->func_table = kzalloc(sizeof(func_table), GFP_KERNEL);
 	if (!kbd->func_table)
 		goto out_maps;
-	memset(kbd->func_table, 0, sizeof(func_table));
 	for (i = 0; i < ARRAY_SIZE(func_table); i++) {
 		if (func_table[i]) {
-			len = strlen(func_table[i]) + 1;
-			kbd->func_table[i] = kmalloc(len, GFP_KERNEL);
+			kbd->func_table[i] = kstrdup(func_table[i],
+						     GFP_KERNEL);
 			if (!kbd->func_table[i])
 				goto out_func;
-			memcpy(kbd->func_table[i], func_table[i], len);
 		}
 	}
 	kbd->fn_handler =
-		kmalloc(sizeof(fn_handler_fn *) * NR_FN_HANDLER, GFP_KERNEL);
+		kzalloc(sizeof(fn_handler_fn *) * NR_FN_HANDLER, GFP_KERNEL);
 	if (!kbd->fn_handler)
 		goto out_func;
-	memset(kbd->fn_handler, 0, sizeof(fn_handler_fn *) * NR_FN_HANDLER);
-	kbd->accent_table =
-		kmalloc(sizeof(struct kbdiacr)*MAX_DIACR, GFP_KERNEL);
+	kbd->accent_table = kmemdup(accent_table,
+				    sizeof(struct kbdiacruc) * MAX_DIACR,
+				    GFP_KERNEL);
 	if (!kbd->accent_table)
 		goto out_fn_handler;
-	memcpy(kbd->accent_table, accent_table,
-	       sizeof(struct kbdiacr)*MAX_DIACR);
 	kbd->accent_table_size = accent_table_size;
 	return kbd;
 
@@ -99,18 +93,16 @@ out_fn_handler:
 	kfree(kbd->fn_handler);
 out_func:
 	for (i = 0; i < ARRAY_SIZE(func_table); i++)
-		if (kbd->func_table[i])
-			kfree(kbd->func_table[i]);
+		kfree(kbd->func_table[i]);
 	kfree(kbd->func_table);
 out_maps:
 	for (i = 0; i < ARRAY_SIZE(key_maps); i++)
-		if (kbd->key_maps[i])
-			kfree(kbd->key_maps[i]);
+		kfree(kbd->key_maps[i]);
 	kfree(kbd->key_maps);
 out_kbd:
 	kfree(kbd);
 out:
-	return 0;
+	return NULL;
 }
 
 void
@@ -121,12 +113,10 @@ kbd_free(struct kbd_data *kbd)
 	kfree(kbd->accent_table);
 	kfree(kbd->fn_handler);
 	for (i = 0; i < ARRAY_SIZE(func_table); i++)
-		if (kbd->func_table[i])
-			kfree(kbd->func_table[i]);
+		kfree(kbd->func_table[i]);
 	kfree(kbd->func_table);
 	for (i = 0; i < ARRAY_SIZE(key_maps); i++)
-		if (kbd->key_maps[i])
-			kfree(kbd->key_maps[i]);
+		kfree(kbd->key_maps[i]);
 	kfree(kbd->key_maps);
 	kfree(kbd);
 }
@@ -157,6 +147,7 @@ kbd_ascebc(struct kbd_data *kbd, unsigned char *ascebc)
 	}
 }
 
+#if 0
 /*
  * Generate ebcdic -> ascii translation table from kbd_data.
  */
@@ -182,6 +173,7 @@ kbd_ebcasc(struct kbd_data *kbd, unsigned char *ebcasc)
 		}
 	}
 }
+#endif
 
 /*
  * We have a combining character DIACR here, followed by the character CH.
@@ -190,8 +182,8 @@ kbd_ebcasc(struct kbd_data *kbd, unsigned char *ebcasc)
  * Otherwise, conclude that DIACR was not combining after all,
  * queue it and return CH.
  */
-static unsigned char
-handle_diacr(struct kbd_data *kbd, unsigned char ch)
+static unsigned int
+handle_diacr(struct kbd_data *kbd, unsigned int ch)
 {
 	int i, d;
 
@@ -313,7 +305,7 @@ kbd_keycode(struct kbd_data *kbd, unsigned int keycode)
 		if (kbd->sysrq) {
 			if (kbd->sysrq == K(KT_LATIN, '-')) {
 				kbd->sysrq = 0;
-				handle_sysrq(value, 0, kbd->tty);
+				handle_sysrq(value);
 				return;
 			}
 			if (value == '-') {
@@ -372,7 +364,7 @@ do_kdsk_ioctl(struct kbd_data *kbd, struct kbentry __user *user_kbe,
 			/* disallocate map */
 			key_map = kbd->key_maps[tmp.kb_table];
 			if (key_map) {
-			    kbd->key_maps[tmp.kb_table] = 0;
+			    kbd->key_maps[tmp.kb_table] = NULL;
 			    kfree(key_map);
 			}
 			break;
@@ -386,7 +378,7 @@ do_kdsk_ioctl(struct kbd_data *kbd, struct kbentry __user *user_kbe,
 		if (!(key_map = kbd->key_maps[tmp.kb_table])) {
 			int j;
 
-			key_map = (ushort *) kmalloc(sizeof(plain_map),
+			key_map = kmalloc(sizeof(plain_map),
 						     GFP_KERNEL);
 			if (!key_map)
 				return -ENOMEM;
@@ -444,7 +436,11 @@ do_kdgkb_ioctl(struct kbd_data *kbd, struct kbsentry __user *u_kbs,
 			return -EPERM;
 		len = strnlen_user(u_kbs->kb_string,
 				   sizeof(u_kbs->kb_string) - 1);
-		p = kmalloc(len, GFP_KERNEL);
+		if (!len)
+			return -EFAULT;
+		if (len > sizeof(u_kbs->kb_string) - 1)
+			return -EINVAL;
+		p = kmalloc(len + 1, GFP_KERNEL);
 		if (!p)
 			return -ENOMEM;
 		if (copy_from_user(p, u_kbs->kb_string, len)) {
@@ -452,21 +448,18 @@ do_kdgkb_ioctl(struct kbd_data *kbd, struct kbsentry __user *u_kbs,
 			return -EFAULT;
 		}
 		p[len] = 0;
-		if (kbd->func_table[kb_func])
-			kfree(kbd->func_table[kb_func]);
+		kfree(kbd->func_table[kb_func]);
 		kbd->func_table[kb_func] = p;
 		break;
 	}
 	return 0;
 }
 
-int
-kbd_ioctl(struct kbd_data *kbd, struct file *file,
-	  unsigned int cmd, unsigned long arg)
+int kbd_ioctl(struct kbd_data *kbd, unsigned int cmd, unsigned long arg)
 {
-	struct kbdiacrs __user *a;
 	void __user *argp;
-	int ct, perm;
+	unsigned int ct;
+	int perm;
 
 	argp = (void __user *)arg;
 
@@ -485,17 +478,40 @@ kbd_ioctl(struct kbd_data *kbd, struct file *file,
 	case KDSKBSENT:
 		return do_kdgkb_ioctl(kbd, argp, cmd, perm);
 	case KDGKBDIACR:
-		a = argp;
+	{
+		struct kbdiacrs __user *a = argp;
+		struct kbdiacr diacr;
+		int i;
 
 		if (put_user(kbd->accent_table_size, &a->kb_cnt))
 			return -EFAULT;
+		for (i = 0; i < kbd->accent_table_size; i++) {
+			diacr.diacr = kbd->accent_table[i].diacr;
+			diacr.base = kbd->accent_table[i].base;
+			diacr.result = kbd->accent_table[i].result;
+			if (copy_to_user(a->kbdiacr + i, &diacr, sizeof(struct kbdiacr)))
+			return -EFAULT;
+		}
+		return 0;
+	}
+	case KDGKBDIACRUC:
+	{
+		struct kbdiacrsuc __user *a = argp;
+
 		ct = kbd->accent_table_size;
-		if (copy_to_user(a->kbdiacr, kbd->accent_table,
-				 ct * sizeof(struct kbdiacr)))
+		if (put_user(ct, &a->kb_cnt))
+			return -EFAULT;
+		if (copy_to_user(a->kbdiacruc, kbd->accent_table,
+				 ct * sizeof(struct kbdiacruc)))
 			return -EFAULT;
 		return 0;
+	}
 	case KDSKBDIACR:
-		a = argp;
+	{
+		struct kbdiacrs __user *a = argp;
+		struct kbdiacr diacr;
+		int i;
+
 		if (!perm)
 			return -EPERM;
 		if (get_user(ct, &a->kb_cnt))
@@ -503,10 +519,31 @@ kbd_ioctl(struct kbd_data *kbd, struct file *file,
 		if (ct >= MAX_DIACR)
 			return -EINVAL;
 		kbd->accent_table_size = ct;
-		if (copy_from_user(kbd->accent_table, a->kbdiacr,
-				   ct * sizeof(struct kbdiacr)))
+		for (i = 0; i < ct; i++) {
+			if (copy_from_user(&diacr, a->kbdiacr + i, sizeof(struct kbdiacr)))
+				return -EFAULT;
+			kbd->accent_table[i].diacr = diacr.diacr;
+			kbd->accent_table[i].base = diacr.base;
+			kbd->accent_table[i].result = diacr.result;
+		}
+		return 0;
+	}
+	case KDSKBDIACRUC:
+	{
+		struct kbdiacrsuc __user *a = argp;
+
+		if (!perm)
+			return -EPERM;
+		if (get_user(ct, &a->kb_cnt))
+			return -EFAULT;
+		if (ct >= MAX_DIACR)
+			return -EINVAL;
+		kbd->accent_table_size = ct;
+		if (copy_from_user(kbd->accent_table, a->kbdiacruc,
+				   ct * sizeof(struct kbdiacruc)))
 			return -EFAULT;
 		return 0;
+	}
 	default:
 		return -ENOIOCTLCMD;
 	}

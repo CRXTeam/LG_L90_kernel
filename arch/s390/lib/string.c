@@ -44,7 +44,11 @@ static inline char *__strnend(const char *s, size_t n)
  */
 size_t strlen(const char *s)
 {
+#if __GNUC__ < 4
 	return __strend(s) - s;
+#else
+	return __builtin_strlen(s);
+#endif
 }
 EXPORT_SYMBOL(strlen);
 
@@ -70,6 +74,7 @@ EXPORT_SYMBOL(strnlen);
  */
 char *strcpy(char *dest, const char *src)
 {
+#if __GNUC__ < 4
 	register int r0 asm("0") = 0;
 	char *ret = dest;
 
@@ -78,6 +83,9 @@ char *strcpy(char *dest, const char *src)
 		      : "+&a" (dest), "+&a" (src) : "d" (r0)
 		      : "cc", "memory" );
 	return ret;
+#else
+	return __builtin_strcpy(dest, src);
+#endif
 }
 EXPORT_SYMBOL(strcpy);
 
@@ -233,7 +241,7 @@ char * strrchr(const char * s, int c)
 		       if (s[len] == (char) c)
 			       return (char *) s + len;
 	       } while (--len > 0);
-       return 0;
+       return NULL;
 }
 EXPORT_SYMBOL(strrchr);
 
@@ -267,7 +275,7 @@ char * strstr(const char * s1,const char * s2)
 			return (char *) s1;
 		s1++;
 	}
-	return 0;
+	return NULL;
 }
 EXPORT_SYMBOL(strstr);
 

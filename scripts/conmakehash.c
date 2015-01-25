@@ -24,16 +24,16 @@
 
 typedef unsigned short unicode;
 
-void usage(char *argv0)
+static void usage(char *argv0)
 {
   fprintf(stderr, "Usage: \n"
          "        %s chartable [hashsize] [hashstep] [maxhashlevel]\n", argv0);
   exit(EX_USAGE);
 }
 
-int getunicode(char **p0)
+static int getunicode(char **p0)
 {
-  unsigned char *p = *p0;
+  char *p = *p0;
 
   while (*p == ' ' || *p == '\t')
     p++;
@@ -49,7 +49,7 @@ unicode unitable[MAX_FONTLEN][255];
 				/* Massive overkill, but who cares? */
 int unicount[MAX_FONTLEN];
 
-void addpair(int fp, int un)
+static void addpair(int fp, int un)
 {
   int i;
 

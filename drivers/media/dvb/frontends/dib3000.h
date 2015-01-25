@@ -17,7 +17,7 @@
  *  Amaury Demol (ademol@dibcom.fr) from DiBcom for providing specs and driver
  *  sources, on which this driver (and the dvb-dibusb) are based.
  *
- * see Documentation/dvb/README.dibusb for more information
+ * see Documentation/dvb/README.dvb-usb for more information
  *
  */
 
@@ -30,11 +30,6 @@ struct dib3000_config
 {
 	/* the demodulator's i2c address */
 	u8 demod_address;
-
-	/* PLL maintenance and the i2c address of the PLL */
-	u8 (*pll_addr)(struct dvb_frontend *fe);
-	int (*pll_init)(struct dvb_frontend *fe, u8 pll_buf[5]);
-	int (*pll_set)(struct dvb_frontend *fe, struct dvb_frontend_parameters* params, u8 pll_buf[5]);
 };
 
 struct dib_fe_xfer_ops
@@ -46,9 +41,16 @@ struct dib_fe_xfer_ops
 	int (*tuner_pass_ctrl)(struct dvb_frontend *fe, int onoff, u8 pll_ctrl);
 };
 
+#if defined(CONFIG_DVB_DIB3000MB) || (defined(CONFIG_DVB_DIB3000MB_MODULE) && defined(MODULE))
 extern struct dvb_frontend* dib3000mb_attach(const struct dib3000_config* config,
 					     struct i2c_adapter* i2c, struct dib_fe_xfer_ops *xfer_ops);
+#else
+static inline struct dvb_frontend* dib3000mb_attach(const struct dib3000_config* config,
+					     struct i2c_adapter* i2c, struct dib_fe_xfer_ops *xfer_ops)
+{
+	printk(KERN_WARNING "%s: driver disabled by Kconfig\n", __func__);
+	return NULL;
+}
+#endif // CONFIG_DVB_DIB3000MB
 
-extern struct dvb_frontend* dib3000mc_attach(const struct dib3000_config* config,
-					     struct i2c_adapter* i2c, struct dib_fe_xfer_ops *xfer_ops);
 #endif // DIB3000_H

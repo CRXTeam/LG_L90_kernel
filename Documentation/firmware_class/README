@@ -1,7 +1,7 @@
 
  request_firmware() hotplug interface:
  ------------------------------------
-	Copyright (C) 2003 Manuel Estrada Sainz <ranty@debian.org>
+	Copyright (C) 2003 Manuel Estrada Sainz
 
  Why:
  ---
@@ -77,7 +77,8 @@
    seconds for the whole load operation.
 
  - request_firmware_nowait() is also provided for convenience in
-   non-user contexts.
+   user contexts to request firmware asynchronously, but can't be called
+   in atomic contexts.
 
 
  about in-kernel persistence:
@@ -104,21 +105,4 @@
    And the same device can be needed to access the filesystem or not depending
    on the setup, so I think that the choice on what firmware to make
    persistent should be left to userspace.
-
- - Why register_firmware()+__init can be useful:
- 	- For boot devices needing firmware.
-	- To make the transition easier:
-		The firmware can be declared __init and register_firmware()
-		called on module_init. Then the firmware is warranted to be
-		there even if "firmware hotplug userspace" is not there yet or
-		it doesn't yet provide the needed firmware.
-		Once the firmware is widely available in userspace, it can be
-		removed from the kernel. Or made optional (CONFIG_.*_FIRMWARE).
-
-	In either case, if firmware hotplug support is there, it can move the
-	firmware out of kernel memory into the real filesystem for later
-	usage.
-
-	Note: If persistence is implemented on top of initramfs,
-	register_firmware() may not be appropriate.
 

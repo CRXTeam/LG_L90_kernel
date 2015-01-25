@@ -15,8 +15,7 @@
 #include <linux/cpufreq.h>
 #include <linux/init.h>
 
-#define dprintk(msg...) cpufreq_debug_printk(CPUFREQ_DEBUG_GOVERNOR, "performance", msg)
-
+#define LOAD 100
 
 static int cpufreq_governor_performance(struct cpufreq_policy *policy,
 					unsigned int event)
@@ -24,21 +23,26 @@ static int cpufreq_governor_performance(struct cpufreq_policy *policy,
 	switch (event) {
 	case CPUFREQ_GOV_START:
 	case CPUFREQ_GOV_LIMITS:
-		dprintk("setting to %u kHz because of event %u\n", policy->max, event);
-		__cpufreq_driver_target(policy, policy->max, CPUFREQ_RELATION_H);
+		pr_debug("setting to %u kHz because of event %u\n",
+						policy->max, event);
+		__cpufreq_driver_target(policy, policy->max,
+						CPUFREQ_RELATION_H);
+		cpufreq_notify_utilization(policy, LOAD);
 		break;
 	default:
 		break;
 	}
 	return 0;
 }
-                                                            
+
+#ifdef CONFIG_CPU_FREQ_GOV_PERFORMANCE_MODULE
+static
+#endif
 struct cpufreq_governor cpufreq_gov_performance = {
 	.name		= "performance",
 	.governor	= cpufreq_governor_performance,
 	.owner		= THIS_MODULE,
 };
-EXPORT_SYMBOL(cpufreq_gov_performance);
 
 
 static int __init cpufreq_gov_performance_init(void)

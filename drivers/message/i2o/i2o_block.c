@@ -51,7 +51,9 @@
  */
 
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/i2o.h>
+#include <linux/mutex.h>
 
 #include <linux/mempool.h>
 
@@ -59,12 +61,15 @@
 #include <linux/blkdev.h>
 #include <linux/hdreg.h>
 
+#include <scsi/scsi.h>
+
 #include "i2o_block.h"
 
 #define OSM_NAME	"block-osm"
-#define OSM_VERSION	"$Rev$"
+#define OSM_VERSION	"1.325"
 #define OSM_DESCRIPTION	"I2O Block Device OSM"
 
+static DEFINE_MUTEX(i2o_block_mutex);
 static struct i2o_driver i2o_block_driver;
 
 /* global Block OSM request mempool */
@@ -104,7 +109,8 @@ static int i2o_block_remove(struct device *dev)
 	struct i2o_device *i2o_dev = to_i2o_device(dev);
 	struct i2o_block_device *i2o_blk_dev = dev_get_drvdata(dev);
 
-	osm_info("Device removed %s\n", i2o_blk_dev->gd->disk_name);
+	osm_info("device removed (TID: %03x): %s\n", i2o_dev->lct_data.tid,
+		 i2o_blk_dev->gd->disk_name);
 
 	i2o_event_register(i2o_dev, &i2o_block_driver, 0, 0);
 
@@ -129,20 +135,20 @@ static int i2o_block_remove(struct device *dev)
  */
 static int i2o_block_device_flush(struct i2o_device *dev)
 {
-	struct i2o_message __iomem *msg;
-	u32 m;
+	struct i2o_message *msg;
 
-	m = i2o_msg_get_wait(dev->iop, &msg, I2O_TIMEOUT_MESSAGE_GET);
-	if (m == I2O_QUEUE_EMPTY)
-		return -ETIMEDOUT;
+	msg = i2o_msg_get_wait(dev->iop, I2O_TIMEOUT_MESSAGE_GET);
+	if (IS_ERR(msg))
+		return PTR_ERR(msg);
 
-	writel(FIVE_WORD_MSG_SIZE | SGL_OFFSET_0, &msg->u.head[0]);
-	writel(I2O_CMD_BLOCK_CFLUSH << 24 | HOST_TID << 12 | dev->lct_data.tid,
-	       &msg->u.head[1]);
-	writel(60 << 16, &msg->body[0]);
+	msg->u.head[0] = cpu_to_le32(FIVE_WORD_MSG_SIZE | SGL_OFFSET_0);
+	msg->u.head[1] =
+	    cpu_to_le32(I2O_CMD_BLOCK_CFLUSH << 24 | HOST_TID << 12 | dev->
+			lct_data.tid);
+	msg->body[0] = cpu_to_le32(60 << 16);
 	osm_debug("Flushing...\n");
 
-	return i2o_msg_post_wait(dev->iop, m, 60);
+	return i2o_msg_post_wait(dev->iop, msg, 60);
 };
 
 /**
@@ -157,21 +163,21 @@ static int i2o_block_device_flush(struct i2o_device *dev)
  */
 static int i2o_block_device_mount(struct i2o_device *dev, u32 media_id)
 {
-	struct i2o_message __iomem *msg;
-	u32 m;
+	struct i2o_message *msg;
 
-	m = i2o_msg_get_wait(dev->iop, &msg, I2O_TIMEOUT_MESSAGE_GET);
-	if (m == I2O_QUEUE_EMPTY)
-		return -ETIMEDOUT;
+	msg = i2o_msg_get_wait(dev->iop, I2O_TIMEOUT_MESSAGE_GET);
+	if (IS_ERR(msg))
+		return PTR_ERR(msg);
 
-	writel(FIVE_WORD_MSG_SIZE | SGL_OFFSET_0, &msg->u.head[0]);
-	writel(I2O_CMD_BLOCK_MMOUNT << 24 | HOST_TID << 12 | dev->lct_data.tid,
-	       &msg->u.head[1]);
-	writel(-1, &msg->body[0]);
-	writel(0, &msg->body[1]);
+	msg->u.head[0] = cpu_to_le32(FIVE_WORD_MSG_SIZE | SGL_OFFSET_0);
+	msg->u.head[1] =
+	    cpu_to_le32(I2O_CMD_BLOCK_MMOUNT << 24 | HOST_TID << 12 | dev->
+			lct_data.tid);
+	msg->body[0] = cpu_to_le32(-1);
+	msg->body[1] = cpu_to_le32(0x00000000);
 	osm_debug("Mounting...\n");
 
-	return i2o_msg_post_wait(dev->iop, m, 2);
+	return i2o_msg_post_wait(dev->iop, msg, 2);
 };
 
 /**
@@ -186,20 +192,20 @@ static int i2o_block_device_mount(struct i2o_device *dev, u32 media_id)
  */
 static int i2o_block_device_lock(struct i2o_device *dev, u32 media_id)
 {
-	struct i2o_message __iomem *msg;
-	u32 m;
+	struct i2o_message *msg;
 
-	m = i2o_msg_get_wait(dev->iop, &msg, I2O_TIMEOUT_MESSAGE_GET);
-	if (m == I2O_QUEUE_EMPTY)
-		return -ETIMEDOUT;
+	msg = i2o_msg_get_wait(dev->iop, I2O_TIMEOUT_MESSAGE_GET);
+	if (IS_ERR(msg))
+		return PTR_ERR(msg);
 
-	writel(FIVE_WORD_MSG_SIZE | SGL_OFFSET_0, &msg->u.head[0]);
-	writel(I2O_CMD_BLOCK_MLOCK << 24 | HOST_TID << 12 | dev->lct_data.tid,
-	       &msg->u.head[1]);
-	writel(-1, &msg->body[0]);
+	msg->u.head[0] = cpu_to_le32(FIVE_WORD_MSG_SIZE | SGL_OFFSET_0);
+	msg->u.head[1] =
+	    cpu_to_le32(I2O_CMD_BLOCK_MLOCK << 24 | HOST_TID << 12 | dev->
+			lct_data.tid);
+	msg->body[0] = cpu_to_le32(-1);
 	osm_debug("Locking...\n");
 
-	return i2o_msg_post_wait(dev->iop, m, 2);
+	return i2o_msg_post_wait(dev->iop, msg, 2);
 };
 
 /**
@@ -214,26 +220,26 @@ static int i2o_block_device_lock(struct i2o_device *dev, u32 media_id)
  */
 static int i2o_block_device_unlock(struct i2o_device *dev, u32 media_id)
 {
-	struct i2o_message __iomem *msg;
-	u32 m;
+	struct i2o_message *msg;
 
-	m = i2o_msg_get_wait(dev->iop, &msg, I2O_TIMEOUT_MESSAGE_GET);
-	if (m == I2O_QUEUE_EMPTY)
-		return -ETIMEDOUT;
+	msg = i2o_msg_get_wait(dev->iop, I2O_TIMEOUT_MESSAGE_GET);
+	if (IS_ERR(msg))
+		return PTR_ERR(msg);
 
-	writel(FIVE_WORD_MSG_SIZE | SGL_OFFSET_0, &msg->u.head[0]);
-	writel(I2O_CMD_BLOCK_MUNLOCK << 24 | HOST_TID << 12 | dev->lct_data.tid,
-	       &msg->u.head[1]);
-	writel(media_id, &msg->body[0]);
+	msg->u.head[0] = cpu_to_le32(FIVE_WORD_MSG_SIZE | SGL_OFFSET_0);
+	msg->u.head[1] =
+	    cpu_to_le32(I2O_CMD_BLOCK_MUNLOCK << 24 | HOST_TID << 12 | dev->
+			lct_data.tid);
+	msg->body[0] = cpu_to_le32(media_id);
 	osm_debug("Unlocking...\n");
 
-	return i2o_msg_post_wait(dev->iop, m, 2);
+	return i2o_msg_post_wait(dev->iop, msg, 2);
 };
 
 /**
  *	i2o_block_device_power - Power management for device dev
  *	@dev: I2O device which should receive the power management request
- *	@operation: Operation which should be send
+ *	@op: Operation to send
  *
  *	Send a power management request to the device dev.
  *
@@ -243,21 +249,21 @@ static int i2o_block_device_power(struct i2o_block_device *dev, u8 op)
 {
 	struct i2o_device *i2o_dev = dev->i2o_dev;
 	struct i2o_controller *c = i2o_dev->iop;
-	struct i2o_message __iomem *msg;
-	u32 m;
+	struct i2o_message *msg;
 	int rc;
 
-	m = i2o_msg_get_wait(c, &msg, I2O_TIMEOUT_MESSAGE_GET);
-	if (m == I2O_QUEUE_EMPTY)
-		return -ETIMEDOUT;
+	msg = i2o_msg_get_wait(c, I2O_TIMEOUT_MESSAGE_GET);
+	if (IS_ERR(msg))
+		return PTR_ERR(msg);
 
-	writel(FOUR_WORD_MSG_SIZE | SGL_OFFSET_0, &msg->u.head[0]);
-	writel(I2O_CMD_BLOCK_POWER << 24 | HOST_TID << 12 | i2o_dev->lct_data.
-	       tid, &msg->u.head[1]);
-	writel(op << 24, &msg->body[0]);
+	msg->u.head[0] = cpu_to_le32(FOUR_WORD_MSG_SIZE | SGL_OFFSET_0);
+	msg->u.head[1] =
+	    cpu_to_le32(I2O_CMD_BLOCK_POWER << 24 | HOST_TID << 12 | i2o_dev->
+			lct_data.tid);
+	msg->body[0] = cpu_to_le32(op << 24);
 	osm_debug("Power...\n");
 
-	rc = i2o_msg_post_wait(c, m, 60);
+	rc = i2o_msg_post_wait(c, msg, 60);
 	if (!rc)
 		dev->power = op;
 
@@ -281,6 +287,7 @@ static inline struct i2o_block_request *i2o_block_request_alloc(void)
 		return ERR_PTR(-ENOMEM);
 
 	INIT_LIST_HEAD(&ireq->queue);
+	sg_init_table(ireq->sg_table, I2O_MAX_PHYS_SEGMENTS);
 
 	return ireq;
 };
@@ -289,7 +296,7 @@ static inline struct i2o_block_request *i2o_block_request_alloc(void)
  *	i2o_block_request_free - Frees a I2O block request
  *	@ireq: I2O block request which should be freed
  *
- *	Fres the allocated memory (give it back to the request mempool).
+ *	Frees the allocated memory (give it back to the request mempool).
  */
 static inline void i2o_block_request_free(struct i2o_block_request *ireq)
 {
@@ -298,28 +305,32 @@ static inline void i2o_block_request_free(struct i2o_block_request *ireq)
 
 /**
  *	i2o_block_sglist_alloc - Allocate the SG list and map it
+ *	@c: I2O controller to which the request belongs
  *	@ireq: I2O block request
+ *	@mptr: message body pointer
  *
- *	Builds the SG list and map it into to be accessable by the controller.
+ *	Builds the SG list and map it to be accessible by the controller.
  *
- *	Returns the number of elements in the SG list or 0 on failure.
+ *	Returns 0 on failure or 1 on success.
  */
-static inline int i2o_block_sglist_alloc(struct i2o_block_request *ireq)
+static inline int i2o_block_sglist_alloc(struct i2o_controller *c,
+					 struct i2o_block_request *ireq,
+					 u32 ** mptr)
 {
-	struct device *dev = &ireq->i2o_blk_dev->i2o_dev->iop->pdev->dev;
 	int nents;
+	enum dma_data_direction direction;
 
+	ireq->dev = &c->pdev->dev;
 	nents = blk_rq_map_sg(ireq->req->q, ireq->req, ireq->sg_table);
 
 	if (rq_data_dir(ireq->req) == READ)
-		ireq->sg_dma_direction = PCI_DMA_FROMDEVICE;
+		direction = PCI_DMA_FROMDEVICE;
 	else
-		ireq->sg_dma_direction = PCI_DMA_TODEVICE;
+		direction = PCI_DMA_TODEVICE;
 
-	ireq->sg_nents = dma_map_sg(dev, ireq->sg_table, nents,
-				    ireq->sg_dma_direction);
+	ireq->sg_nents = nents;
 
-	return ireq->sg_nents;
+	return i2o_dma_map_sg(c, ireq->sg_table, nents, direction, mptr);
 };
 
 /**
@@ -330,10 +341,14 @@ static inline int i2o_block_sglist_alloc(struct i2o_block_request *ireq)
  */
 static inline void i2o_block_sglist_free(struct i2o_block_request *ireq)
 {
-	struct device *dev = &ireq->i2o_blk_dev->i2o_dev->iop->pdev->dev;
+	enum dma_data_direction direction;
 
-	dma_unmap_sg(dev, ireq->sg_table, ireq->sg_nents,
-		     ireq->sg_dma_direction);
+	if (rq_data_dir(ireq->req) == READ)
+		direction = PCI_DMA_FROMDEVICE;
+	else
+		direction = PCI_DMA_TODEVICE;
+
+	dma_unmap_sg(ireq->dev, ireq->sg_table, ireq->sg_nents, direction);
 };
 
 /**
@@ -342,7 +357,7 @@ static inline void i2o_block_sglist_free(struct i2o_block_request *ireq)
  *	@req: the request to prepare
  *
  *	Allocate the necessary i2o_block_request struct and connect it to
- *	the request. This is needed that we not loose the SG list later on.
+ *	the request. This is needed that we not lose the SG list later on.
  *
  *	Returns BLKPREP_OK on success or BLKPREP_DEFER on failure.
  */
@@ -351,17 +366,15 @@ static int i2o_block_prep_req_fn(struct request_queue *q, struct request *req)
 	struct i2o_block_device *i2o_blk_dev = q->queuedata;
 	struct i2o_block_request *ireq;
 
-	/* request is already processed by us, so return */
-	if (req->flags & REQ_SPECIAL) {
-		osm_debug("REQ_SPECIAL already set!\n");
-		req->flags |= REQ_DONTPREP;
-		return BLKPREP_OK;
+	if (unlikely(!i2o_blk_dev)) {
+		osm_err("block device already removed\n");
+		return BLKPREP_KILL;
 	}
 
 	/* connect the i2o_block_request to the request */
 	if (!req->special) {
 		ireq = i2o_block_request_alloc();
-		if (unlikely(IS_ERR(ireq))) {
+		if (IS_ERR(ireq)) {
 			osm_debug("unable to allocate i2o_block_request!\n");
 			return BLKPREP_DEFER;
 		}
@@ -369,27 +382,27 @@ static int i2o_block_prep_req_fn(struct request_queue *q, struct request *req)
 		ireq->i2o_blk_dev = i2o_blk_dev;
 		req->special = ireq;
 		ireq->req = req;
-	} else
-		ireq = req->special;
-
+	}
 	/* do not come back here */
-	req->flags |= REQ_DONTPREP | REQ_SPECIAL;
+	req->cmd_flags |= REQ_DONTPREP;
 
 	return BLKPREP_OK;
 };
 
 /**
  *	i2o_block_delayed_request_fn - delayed request queue function
- *	delayed_request: the delayed request with the queue to start
+ *	@work: the delayed request with the queue to start
  *
  *	If the request queue is stopped for a disk, and there is no open
  *	request, a new event is created, which calls this function to start
  *	the queue after I2O_BLOCK_REQUEST_TIME. Otherwise the queue will never
  *	be started again.
  */
-static void i2o_block_delayed_request_fn(void *delayed_request)
+static void i2o_block_delayed_request_fn(struct work_struct *work)
 {
-	struct i2o_block_delayed_request *dreq = delayed_request;
+	struct i2o_block_delayed_request *dreq =
+		container_of(work, struct i2o_block_delayed_request,
+			     work.work);
 	struct request_queue *q = dreq->queue;
 	unsigned long flags;
 
@@ -400,10 +413,46 @@ static void i2o_block_delayed_request_fn(void *delayed_request)
 };
 
 /**
+ *	i2o_block_end_request - Post-processing of completed commands
+ *	@req: request which should be completed
+ *	@error: 0 for success, < 0 for error
+ *	@nr_bytes: number of bytes to complete
+ *
+ *	Mark the request as complete. The lock must not be held when entering.
+ *
+ */
+static void i2o_block_end_request(struct request *req, int error,
+				  int nr_bytes)
+{
+	struct i2o_block_request *ireq = req->special;
+	struct i2o_block_device *dev = ireq->i2o_blk_dev;
+	struct request_queue *q = req->q;
+	unsigned long flags;
+
+	if (blk_end_request(req, error, nr_bytes))
+		if (error)
+			blk_end_request_all(req, -EIO);
+
+	spin_lock_irqsave(q->queue_lock, flags);
+
+	if (likely(dev)) {
+		dev->open_queue_depth--;
+		list_del(&ireq->queue);
+	}
+
+	blk_start_queue(q);
+
+	spin_unlock_irqrestore(q->queue_lock, flags);
+
+	i2o_block_sglist_free(ireq);
+	i2o_block_request_free(ireq);
+};
+
+/**
  *	i2o_block_reply - Block OSM reply handler.
  *	@c: I2O controller from which the message arrives
  *	@m: message id of reply
- *	qmsg: the actuall I2O message reply
+ *	@msg: the actual I2O message reply
  *
  *	This function gets all the message replies.
  *
@@ -411,91 +460,12 @@ static void i2o_block_delayed_request_fn(void *delayed_request)
 static int i2o_block_reply(struct i2o_controller *c, u32 m,
 			   struct i2o_message *msg)
 {
-	struct i2o_block_request *ireq;
 	struct request *req;
-	struct i2o_block_device *dev;
-	struct request_queue *q;
-	u8 st;
-	unsigned long flags;
-
-	/* FAILed message */
-	if (unlikely(le32_to_cpu(msg->u.head[0]) & (1 << 13))) {
-		struct i2o_message *pmsg;
-		u32 pm;
-
-		/*
-		 * FAILed message from controller
-		 * We increment the error count and abort it
-		 *
-		 * In theory this will never happen.  The I2O block class
-		 * specification states that block devices never return
-		 * FAILs but instead use the REQ status field...but
-		 * better be on the safe side since no one really follows
-		 * the spec to the book :)
-		 */
-		pm = le32_to_cpu(msg->body[3]);
-		pmsg = i2o_msg_in_to_virt(c, pm);
-
-		req = i2o_cntxt_list_get(c, le32_to_cpu(pmsg->u.s.tcntxt));
-		if (unlikely(!req)) {
-			osm_err("NULL reply received!\n");
-			return -1;
-		}
-
-		ireq = req->special;
-		dev = ireq->i2o_blk_dev;
-		q = dev->gd->queue;
-
-		req->errors++;
-
-		spin_lock_irqsave(q->queue_lock, flags);
-
-		while (end_that_request_chunk(req, !req->errors,
-					      le32_to_cpu(pmsg->body[1]))) ;
-		end_that_request_last(req);
-
-		dev->open_queue_depth--;
-		list_del(&ireq->queue);
-		blk_start_queue(q);
-
-		spin_unlock_irqrestore(q->queue_lock, flags);
-
-		/* Now flush the message by making it a NOP */
-		i2o_msg_nop(c, pm);
-
-		return -1;
-	}
+	int error = 0;
 
 	req = i2o_cntxt_list_get(c, le32_to_cpu(msg->u.s.tcntxt));
 	if (unlikely(!req)) {
 		osm_err("NULL reply received!\n");
-		return -1;
-	}
-
-	ireq = req->special;
-	dev = ireq->i2o_blk_dev;
-	q = dev->gd->queue;
-
-	if (unlikely(!dev->i2o_dev)) {
-		/*
-		 * This is HACK, but Intel Integrated RAID allows user
-		 * to delete a volume that is claimed, locked, and in use
-		 * by the OS. We have to check for a reply from a
-		 * non-existent device and flag it as an error or the system
-		 * goes kaput...
-		 */
-		req->errors++;
-		osm_warn("Data transfer to deleted device!\n");
-		spin_lock_irqsave(q->queue_lock, flags);
-		while (end_that_request_chunk
-		       (req, !req->errors, le32_to_cpu(msg->body[1]))) ;
-		end_that_request_last(req);
-
-		dev->open_queue_depth--;
-		list_del(&ireq->queue);
-		blk_start_queue(q);
-
-		spin_unlock_irqrestore(q->queue_lock, flags);
 		return -1;
 	}
 
@@ -504,29 +474,8 @@ static int i2o_block_reply(struct i2o_controller *c, u32 m,
 	 *      request in the context.
 	 */
 
-	st = le32_to_cpu(msg->body[0]) >> 24;
-
-	if (st != 0) {
-		int err;
-		char *bsa_errors[] = {
-			"Success",
-			"Media Error",
-			"Failure communicating to device",
-			"Device Failure",
-			"Device is not ready",
-			"Media not present",
-			"Media is locked by another user",
-			"Media has failed",
-			"Failure communicating to device",
-			"Device bus failure",
-			"Device is locked by another user",
-			"Device is write protected",
-			"Device has reset",
-			"Volume has changed, waiting for acknowledgement"
-		};
-
-		err = le32_to_cpu(msg->body[0]) & 0xffff;
-
+	if ((le32_to_cpu(msg->body[0]) >> 24) != 0) {
+		u32 status = le32_to_cpu(msg->body[0]);
 		/*
 		 *      Device not ready means two things. One is that the
 		 *      the thing went offline (but not a removal media)
@@ -539,40 +488,25 @@ static int i2o_block_reply(struct i2o_controller *c, u32 m,
 		 *      Don't stick a supertrak100 into cache aggressive modes
 		 */
 
-		osm_err("block-osm: /dev/%s error: %s", dev->gd->disk_name,
-			bsa_errors[le32_to_cpu(msg->body[0]) & 0xffff]);
-		if (le32_to_cpu(msg->body[0]) & 0x00ff0000)
-			printk(KERN_ERR " - DDM attempted %d retries",
-			       (le32_to_cpu(msg->body[0]) >> 16) & 0x00ff);
-		printk(KERN_ERR ".\n");
+		osm_err("TID %03x error status: 0x%02x, detailed status: "
+			"0x%04x\n", (le32_to_cpu(msg->u.head[1]) >> 12 & 0xfff),
+			status >> 24, status & 0xffff);
+
 		req->errors++;
-	} else
-		req->errors = 0;
 
-	if (!end_that_request_chunk
-	    (req, !req->errors, le32_to_cpu(msg->body[1]))) {
-		add_disk_randomness(req->rq_disk);
-		spin_lock_irqsave(q->queue_lock, flags);
+		error = -EIO;
+	}
 
-		end_that_request_last(req);
-
-		dev->open_queue_depth--;
-		list_del(&ireq->queue);
-		blk_start_queue(q);
-
-		spin_unlock_irqrestore(q->queue_lock, flags);
-
-		i2o_block_sglist_free(ireq);
-		i2o_block_request_free(ireq);
-	} else
-		osm_err("still remaining chunks\n");
+	i2o_block_end_request(req, error, le32_to_cpu(msg->body[1]));
 
 	return 1;
 };
 
-static void i2o_block_event(struct i2o_event *evt)
+static void i2o_block_event(struct work_struct *work)
 {
-	osm_info("block-osm: event received\n");
+	struct i2o_event *evt = container_of(work, struct i2o_event, work);
+	osm_debug("event received\n");
+	kfree(evt);
 };
 
 /*
@@ -630,19 +564,22 @@ static void i2o_block_biosparam(unsigned long capacity, unsigned short *cyls,
 
 /**
  *	i2o_block_open - Open the block device
+ *	@bdev: block device being opened
+ *	@mode: file open mode
  *
  *	Power up the device, mount and lock the media. This function is called,
  *	if the block device is opened for access.
  *
  *	Returns 0 on success or negative error code on failure.
  */
-static int i2o_block_open(struct inode *inode, struct file *file)
+static int i2o_block_open(struct block_device *bdev, fmode_t mode)
 {
-	struct i2o_block_device *dev = inode->i_bdev->bd_disk->private_data;
+	struct i2o_block_device *dev = bdev->bd_disk->private_data;
 
 	if (!dev->i2o_dev)
 		return -ENODEV;
 
+	mutex_lock(&i2o_block_mutex);
 	if (dev->power > 0x1f)
 		i2o_block_device_power(dev, 0x02);
 
@@ -651,27 +588,29 @@ static int i2o_block_open(struct inode *inode, struct file *file)
 	i2o_block_device_lock(dev->i2o_dev, -1);
 
 	osm_debug("Ready.\n");
+	mutex_unlock(&i2o_block_mutex);
 
 	return 0;
 };
 
 /**
  *	i2o_block_release - Release the I2O block device
+ *	@disk: gendisk device being released
+ *	@mode: file open mode
  *
  *	Unlock and unmount the media, and power down the device. Gets called if
  *	the block device is closed.
  *
  *	Returns 0 on success or negative error code on failure.
  */
-static int i2o_block_release(struct inode *inode, struct file *file)
+static int i2o_block_release(struct gendisk *disk, fmode_t mode)
 {
-	struct gendisk *disk = inode->i_bdev->bd_disk;
 	struct i2o_block_device *dev = disk->private_data;
 	u8 operation;
 
 	/*
 	 * This is to deail with the case of an application
-	 * opening a device and then the device dissapears while
+	 * opening a device and then the device disappears while
 	 * it's in use, and then the application tries to release
 	 * it.  ex: Unmounting a deleted RAID volume at reboot.
 	 * If we send messages, it will just cause FAILs since
@@ -680,6 +619,7 @@ static int i2o_block_release(struct inode *inode, struct file *file)
 	if (!dev->i2o_dev)
 		return 0;
 
+	mutex_lock(&i2o_block_mutex);
 	i2o_block_device_flush(dev->i2o_dev);
 
 	i2o_block_device_unlock(dev->i2o_dev, -1);
@@ -690,12 +630,22 @@ static int i2o_block_release(struct inode *inode, struct file *file)
 		operation = 0x24;
 
 	i2o_block_device_power(dev, operation);
+	mutex_unlock(&i2o_block_mutex);
 
+	return 0;
+}
+
+static int i2o_block_getgeo(struct block_device *bdev, struct hd_geometry *geo)
+{
+	i2o_block_biosparam(get_capacity(bdev->bd_disk),
+			    &geo->cylinders, &geo->heads, &geo->sectors);
 	return 0;
 }
 
 /**
  *	i2o_block_ioctl - Issue device specific ioctl calls.
+ *	@bdev: block device being opened
+ *	@mode: file open mode
  *	@cmd: ioctl command
  *	@arg: arg
  *
@@ -703,69 +653,71 @@ static int i2o_block_release(struct inode *inode, struct file *file)
  *
  *	Return 0 on success or negative error on failure.
  */
-static int i2o_block_ioctl(struct inode *inode, struct file *file,
+static int i2o_block_ioctl(struct block_device *bdev, fmode_t mode,
 			   unsigned int cmd, unsigned long arg)
 {
-	struct gendisk *disk = inode->i_bdev->bd_disk;
+	struct gendisk *disk = bdev->bd_disk;
 	struct i2o_block_device *dev = disk->private_data;
-	void __user *argp = (void __user *)arg;
+	int ret = -ENOTTY;
 
 	/* Anyone capable of this syscall can do *real bad* things */
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
+	mutex_lock(&i2o_block_mutex);
 	switch (cmd) {
-	case HDIO_GETGEO:
-		{
-			struct hd_geometry g;
-			i2o_block_biosparam(get_capacity(disk),
-					    &g.cylinders, &g.heads, &g.sectors);
-			g.start = get_start_sect(inode->i_bdev);
-			return copy_to_user(argp, &g, sizeof(g)) ? -EFAULT : 0;
-		}
-
 	case BLKI2OGRSTRAT:
-		return put_user(dev->rcache, (int __user *)arg);
+		ret = put_user(dev->rcache, (int __user *)arg);
+		break;
 	case BLKI2OGWSTRAT:
-		return put_user(dev->wcache, (int __user *)arg);
+		ret = put_user(dev->wcache, (int __user *)arg);
+		break;
 	case BLKI2OSRSTRAT:
+		ret = -EINVAL;
 		if (arg < 0 || arg > CACHE_SMARTFETCH)
-			return -EINVAL;
+			break;
 		dev->rcache = arg;
+		ret = 0;
 		break;
 	case BLKI2OSWSTRAT:
+		ret = -EINVAL;
 		if (arg != 0
 		    && (arg < CACHE_WRITETHROUGH || arg > CACHE_SMARTBACK))
-			return -EINVAL;
+			break;
 		dev->wcache = arg;
+		ret = 0;
 		break;
 	}
-	return -ENOTTY;
+	mutex_unlock(&i2o_block_mutex);
+
+	return ret;
 };
 
 /**
- *	i2o_block_media_changed - Have we seen a media change?
+ *	i2o_block_check_events - Have we seen a media change?
  *	@disk: gendisk which should be verified
+ *	@clearing: events being cleared
  *
  *	Verifies if the media has changed.
  *
  *	Returns 1 if the media was changed or 0 otherwise.
  */
-static int i2o_block_media_changed(struct gendisk *disk)
+static unsigned int i2o_block_check_events(struct gendisk *disk,
+					   unsigned int clearing)
 {
 	struct i2o_block_device *p = disk->private_data;
 
 	if (p->media_change_flag) {
 		p->media_change_flag = 0;
-		return 1;
+		return DISK_EVENT_MEDIA_CHANGE;
 	}
 	return 0;
 }
 
 /**
  *	i2o_block_transfer - Transfer a request to/from the I2O controller
- *	@req: the request which should be transfered
+ *	@req: the request which should be transferred
  *
  *	This function converts the request into a I2O message. The necessary
  *	DMA buffers are allocated and after everything is setup post the message
@@ -777,22 +729,29 @@ static int i2o_block_media_changed(struct gendisk *disk)
 static int i2o_block_transfer(struct request *req)
 {
 	struct i2o_block_device *dev = req->rq_disk->private_data;
-	struct i2o_controller *c = dev->i2o_dev->iop;
-	int tid = dev->i2o_dev->lct_data.tid;
-	struct i2o_message __iomem *msg;
-	void __iomem *mptr;
+	struct i2o_controller *c;
+	u32 tid;
+	struct i2o_message *msg;
+	u32 *mptr;
 	struct i2o_block_request *ireq = req->special;
-	struct scatterlist *sg;
-	int sgnum;
-	int i;
-	u32 m;
 	u32 tcntxt;
-	u32 sg_flags;
+	u32 sgl_offset = SGL_OFFSET_8;
+	u32 ctl_flags = 0x00000000;
 	int rc;
+	u32 cmd;
 
-	m = i2o_msg_get(c, &msg);
-	if (m == I2O_QUEUE_EMPTY) {
-		rc = -EBUSY;
+	if (unlikely(!dev->i2o_dev)) {
+		osm_err("transfer to removed drive\n");
+		rc = -ENODEV;
+		goto exit;
+	}
+
+	tid = dev->i2o_dev->lct_data.tid;
+	c = dev->i2o_dev->iop;
+
+	msg = i2o_msg_get(c);
+	if (IS_ERR(msg)) {
+		rc = PTR_ERR(msg);
 		goto exit;
 	}
 
@@ -802,87 +761,117 @@ static int i2o_block_transfer(struct request *req)
 		goto nop_msg;
 	}
 
-	if ((sgnum = i2o_block_sglist_alloc(ireq)) <= 0) {
+	msg->u.s.icntxt = cpu_to_le32(i2o_block_driver.context);
+	msg->u.s.tcntxt = cpu_to_le32(tcntxt);
+
+	mptr = &msg->body[0];
+
+	if (rq_data_dir(req) == READ) {
+		cmd = I2O_CMD_BLOCK_READ << 24;
+
+		switch (dev->rcache) {
+		case CACHE_PREFETCH:
+			ctl_flags = 0x201F0008;
+			break;
+
+		case CACHE_SMARTFETCH:
+			if (blk_rq_sectors(req) > 16)
+				ctl_flags = 0x201F0008;
+			else
+				ctl_flags = 0x001F0000;
+			break;
+
+		default:
+			break;
+		}
+	} else {
+		cmd = I2O_CMD_BLOCK_WRITE << 24;
+
+		switch (dev->wcache) {
+		case CACHE_WRITETHROUGH:
+			ctl_flags = 0x001F0008;
+			break;
+		case CACHE_WRITEBACK:
+			ctl_flags = 0x001F0010;
+			break;
+		case CACHE_SMARTBACK:
+			if (blk_rq_sectors(req) > 16)
+				ctl_flags = 0x001F0004;
+			else
+				ctl_flags = 0x001F0010;
+			break;
+		case CACHE_SMARTTHROUGH:
+			if (blk_rq_sectors(req) > 16)
+				ctl_flags = 0x001F0004;
+			else
+				ctl_flags = 0x001F0010;
+		default:
+			break;
+		}
+	}
+
+#ifdef CONFIG_I2O_EXT_ADAPTEC
+	if (c->adaptec) {
+		u8 cmd[10];
+		u32 scsi_flags;
+		u16 hwsec;
+
+		hwsec = queue_logical_block_size(req->q) >> KERNEL_SECTOR_SHIFT;
+		memset(cmd, 0, 10);
+
+		sgl_offset = SGL_OFFSET_12;
+
+		msg->u.head[1] =
+		    cpu_to_le32(I2O_CMD_PRIVATE << 24 | HOST_TID << 12 | tid);
+
+		*mptr++ = cpu_to_le32(I2O_VENDOR_DPT << 16 | I2O_CMD_SCSI_EXEC);
+		*mptr++ = cpu_to_le32(tid);
+
+		/*
+		 * ENABLE_DISCONNECT
+		 * SIMPLE_TAG
+		 * RETURN_SENSE_DATA_IN_REPLY_MESSAGE_FRAME
+		 */
+		if (rq_data_dir(req) == READ) {
+			cmd[0] = READ_10;
+			scsi_flags = 0x60a0000a;
+		} else {
+			cmd[0] = WRITE_10;
+			scsi_flags = 0xa0a0000a;
+		}
+
+		*mptr++ = cpu_to_le32(scsi_flags);
+
+		*((u32 *) & cmd[2]) = cpu_to_be32(blk_rq_pos(req) * hwsec);
+		*((u16 *) & cmd[7]) = cpu_to_be16(blk_rq_sectors(req) * hwsec);
+
+		memcpy(mptr, cmd, 10);
+		mptr += 4;
+		*mptr++ = cpu_to_le32(blk_rq_bytes(req));
+	} else
+#endif
+	{
+		msg->u.head[1] = cpu_to_le32(cmd | HOST_TID << 12 | tid);
+		*mptr++ = cpu_to_le32(ctl_flags);
+		*mptr++ = cpu_to_le32(blk_rq_bytes(req));
+		*mptr++ =
+		    cpu_to_le32((u32) (blk_rq_pos(req) << KERNEL_SECTOR_SHIFT));
+		*mptr++ =
+		    cpu_to_le32(blk_rq_pos(req) >> (32 - KERNEL_SECTOR_SHIFT));
+	}
+
+	if (!i2o_block_sglist_alloc(c, ireq, &mptr)) {
 		rc = -ENOMEM;
 		goto context_remove;
 	}
 
-	/* Build the message based on the request. */
-	writel(i2o_block_driver.context, &msg->u.s.icntxt);
-	writel(tcntxt, &msg->u.s.tcntxt);
-	writel(req->nr_sectors << 9, &msg->body[1]);
-
-	writel((((u64) req->sector) << 9) & 0xffffffff, &msg->body[2]);
-	writel(req->sector >> 23, &msg->body[3]);
-
-	mptr = &msg->body[4];
-
-	sg = ireq->sg_table;
-
-	if (rq_data_dir(req) == READ) {
-		writel(I2O_CMD_BLOCK_READ << 24 | HOST_TID << 12 | tid,
-		       &msg->u.head[1]);
-		sg_flags = 0x10000000;
-		switch (dev->rcache) {
-		case CACHE_NULL:
-			writel(0, &msg->body[0]);
-			break;
-		case CACHE_PREFETCH:
-			writel(0x201F0008, &msg->body[0]);
-			break;
-		case CACHE_SMARTFETCH:
-			if (req->nr_sectors > 16)
-				writel(0x201F0008, &msg->body[0]);
-			else
-				writel(0x001F0000, &msg->body[0]);
-			break;
-		}
-	} else {
-		writel(I2O_CMD_BLOCK_WRITE << 24 | HOST_TID << 12 | tid,
-		       &msg->u.head[1]);
-		sg_flags = 0x14000000;
-		switch (dev->wcache) {
-		case CACHE_NULL:
-			writel(0, &msg->body[0]);
-			break;
-		case CACHE_WRITETHROUGH:
-			writel(0x001F0008, &msg->body[0]);
-			break;
-		case CACHE_WRITEBACK:
-			writel(0x001F0010, &msg->body[0]);
-			break;
-		case CACHE_SMARTBACK:
-			if (req->nr_sectors > 16)
-				writel(0x001F0004, &msg->body[0]);
-			else
-				writel(0x001F0010, &msg->body[0]);
-			break;
-		case CACHE_SMARTTHROUGH:
-			if (req->nr_sectors > 16)
-				writel(0x001F0004, &msg->body[0]);
-			else
-				writel(0x001F0010, &msg->body[0]);
-		}
-	}
-
-	for (i = sgnum; i > 0; i--) {
-		if (i == 1)
-			sg_flags |= 0x80000000;
-		writel(sg_flags | sg_dma_len(sg), mptr);
-		writel(sg_dma_address(sg), mptr + 4);
-		mptr += 8;
-		sg++;
-	}
-
-	writel(I2O_MESSAGE_SIZE
-	       (((unsigned long)mptr -
-		 (unsigned long)&msg->u.head[0]) >> 2) | SGL_OFFSET_8,
-	       &msg->u.head[0]);
+	msg->u.head[0] =
+	    cpu_to_le32(I2O_MESSAGE_SIZE(mptr - &msg->u.head[0]) | sgl_offset);
 
 	list_add_tail(&ireq->queue, &dev->open_queue);
 	dev->open_queue_depth++;
 
-	i2o_msg_post(c, m);
+	i2o_msg_post(c, msg);
 
 	return 0;
 
@@ -890,7 +879,7 @@ static int i2o_block_transfer(struct request *req)
 	i2o_cntxt_list_remove(c, req);
 
       nop_msg:
-	i2o_msg_nop(c, m);
+	i2o_msg_nop(c, msg);
 
       exit:
 	return rc;
@@ -898,7 +887,7 @@ static int i2o_block_transfer(struct request *req)
 
 /**
  *	i2o_block_request_fn - request queue handling function
- *	q: request queue from which the request could be fetched
+ *	@q: request queue from which the request could be fetched
  *
  *	Takes the next request from the queue, transfers it and if no error
  *	occurs dequeue it from the queue. On arrival of the reply the message
@@ -908,23 +897,21 @@ static void i2o_block_request_fn(struct request_queue *q)
 {
 	struct request *req;
 
-	while (!blk_queue_plugged(q)) {
-		req = elv_next_request(q);
-		if (!req)
-			break;
-
-		if (blk_fs_request(req)) {
+	while ((req = blk_peek_request(q)) != NULL) {
+		if (req->cmd_type == REQ_TYPE_FS) {
 			struct i2o_block_delayed_request *dreq;
 			struct i2o_block_request *ireq = req->special;
 			unsigned int queue_depth;
 
 			queue_depth = ireq->i2o_blk_dev->open_queue_depth;
 
-			if (queue_depth < I2O_BLOCK_MAX_OPEN_REQUESTS)
+			if (queue_depth < I2O_BLOCK_MAX_OPEN_REQUESTS) {
 				if (!i2o_block_transfer(req)) {
-					blkdev_dequeue_request(req);
+					blk_start_request(req);
 					continue;
-				}
+				} else
+					osm_info("transfer error\n");
+			}
 
 			if (queue_depth)
 				break;
@@ -935,10 +922,9 @@ static void i2o_block_request_fn(struct request_queue *q)
 				continue;
 
 			dreq->queue = q;
-			INIT_WORK(&dreq->work, i2o_block_delayed_request_fn,
-				  dreq);
+			INIT_DELAYED_WORK(&dreq->work,
+					  i2o_block_delayed_request_fn);
 
-			osm_info("transfer error\n");
 			if (!queue_delayed_work(i2o_block_driver.event_queue,
 						&dreq->work,
 						I2O_BLOCK_RETRY_TIME))
@@ -947,18 +933,22 @@ static void i2o_block_request_fn(struct request_queue *q)
 				blk_stop_queue(q);
 				break;
 			}
-		} else
-			end_request(req, 0);
+		} else {
+			blk_start_request(req);
+			__blk_end_request_all(req, -EIO);
+		}
 	}
 };
 
 /* I2O Block device operations definition */
-static struct block_device_operations i2o_block_fops = {
+static const struct block_device_operations i2o_block_fops = {
 	.owner = THIS_MODULE,
 	.open = i2o_block_open,
 	.release = i2o_block_release,
 	.ioctl = i2o_block_ioctl,
-	.media_changed = i2o_block_media_changed
+	.compat_ioctl = i2o_block_ioctl,
+	.getgeo = i2o_block_getgeo,
+	.check_events = i2o_block_check_events,
 };
 
 /**
@@ -967,7 +957,7 @@ static struct block_device_operations i2o_block_fops = {
  *	Allocate memory for the i2o_block_device struct, gendisk and request
  *	queue and initialize them as far as no additional information is needed.
  *
- *	Returns a pointer to the allocated I2O Block device on succes or a
+ *	Returns a pointer to the allocated I2O Block device on success or a
  *	negative error code on failure.
  */
 static struct i2o_block_device *i2o_block_device_alloc(void)
@@ -977,13 +967,12 @@ static struct i2o_block_device *i2o_block_device_alloc(void)
 	struct request_queue *queue;
 	int rc;
 
-	dev = kmalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
 	if (!dev) {
 		osm_err("Insufficient memory to allocate I2O Block disk.\n");
 		rc = -ENOMEM;
 		goto exit;
 	}
-	memset(dev, 0, sizeof(*dev));
 
 	INIT_LIST_HEAD(&dev->open_queue);
 	spin_lock_init(&dev->lock);
@@ -1039,25 +1028,33 @@ static struct i2o_block_device *i2o_block_device_alloc(void)
 static int i2o_block_probe(struct device *dev)
 {
 	struct i2o_device *i2o_dev = to_i2o_device(dev);
-	struct i2o_block_device *i2o_blk_dev;
 	struct i2o_controller *c = i2o_dev->iop;
+	struct i2o_block_device *i2o_blk_dev;
 	struct gendisk *gd;
 	struct request_queue *queue;
 	static int unit = 0;
 	int rc;
 	u64 size;
 	u32 blocksize;
+	u16 body_size = 4;
 	u16 power;
-	u32 flags, status;
-	int segments;
+	unsigned short max_sectors;
+
+#ifdef CONFIG_I2O_EXT_ADAPTEC
+	if (c->adaptec)
+		body_size = 8;
+#endif
+
+	if (c->limit_sectors)
+		max_sectors = I2O_MAX_SECTORS_LIMITED;
+	else
+		max_sectors = I2O_MAX_SECTORS;
 
 	/* skip devices which are used by IOP */
 	if (i2o_dev->lct_data.user_tid != 0xfff) {
 		osm_debug("skipping used device %03x\n", i2o_dev->lct_data.tid);
 		return -ENODEV;
 	}
-
-	osm_info("New device detected (TID: %03x)\n", i2o_dev->lct_data.tid);
 
 	if (i2o_device_claim(i2o_dev)) {
 		osm_warn("Unable to claim device. Installation aborted\n");
@@ -1079,56 +1076,46 @@ static int i2o_block_probe(struct device *dev)
 	gd = i2o_blk_dev->gd;
 	gd->first_minor = unit << 4;
 	sprintf(gd->disk_name, "i2o/hd%c", 'a' + unit);
-	sprintf(gd->devfs_name, "i2o/hd%c", 'a' + unit);
 	gd->driverfs_dev = &i2o_dev->device;
 
 	/* setup request queue */
 	queue = gd->queue;
 	queue->queuedata = i2o_blk_dev;
 
-	blk_queue_max_phys_segments(queue, I2O_MAX_SEGMENTS);
-	blk_queue_max_sectors(queue, I2O_MAX_SECTORS);
+	blk_queue_max_hw_sectors(queue, max_sectors);
+	blk_queue_max_segments(queue, i2o_sg_tablesize(c, body_size));
 
-	if (c->short_req)
-		segments = 8;
-	else {
-		i2o_status_block *sb;
-
-		sb = c->status_block.virt;
-
-		segments = (sb->inbound_frame_size -
-			    sizeof(struct i2o_message) / 4 - 4) / 2;
-	}
-
-	blk_queue_max_hw_segments(queue, segments);
-
-	osm_debug("max sectors = %d\n", I2O_MAX_SECTORS);
-	osm_debug("phys segments = %d\n", I2O_MAX_SEGMENTS);
-	osm_debug("hw segments = %d\n", segments);
+	osm_debug("max sectors = %d\n", queue->max_sectors);
+	osm_debug("phys segments = %d\n", queue->max_phys_segments);
+	osm_debug("max hw segments = %d\n", queue->max_hw_segments);
 
 	/*
 	 *      Ask for the current media data. If that isn't supported
 	 *      then we ask for the device capacity data
 	 */
-	if (i2o_parm_field_get(i2o_dev, 0x0004, 1, &blocksize, 4) != 0
-	    || i2o_parm_field_get(i2o_dev, 0x0004, 0, &size, 8) != 0) {
-		i2o_parm_field_get(i2o_dev, 0x0000, 3, &blocksize, 4);
-		i2o_parm_field_get(i2o_dev, 0x0000, 4, &size, 8);
-	}
-	osm_debug("blocksize = %d\n", blocksize);
+	if (!i2o_parm_field_get(i2o_dev, 0x0004, 1, &blocksize, 4) ||
+	    !i2o_parm_field_get(i2o_dev, 0x0000, 3, &blocksize, 4)) {
+		blk_queue_logical_block_size(queue, le32_to_cpu(blocksize));
+	} else
+		osm_warn("unable to get blocksize of %s\n", gd->disk_name);
 
-	if (i2o_parm_field_get(i2o_dev, 0x0000, 2, &power, 2))
-		power = 0;
-	i2o_parm_field_get(i2o_dev, 0x0000, 5, &flags, 4);
-	i2o_parm_field_get(i2o_dev, 0x0000, 6, &status, 4);
+	if (!i2o_parm_field_get(i2o_dev, 0x0004, 0, &size, 8) ||
+	    !i2o_parm_field_get(i2o_dev, 0x0000, 4, &size, 8)) {
+		set_capacity(gd, le64_to_cpu(size) >> KERNEL_SECTOR_SHIFT);
+	} else
+		osm_warn("could not get size of %s\n", gd->disk_name);
 
-	set_capacity(gd, size >> 9);
+	if (!i2o_parm_field_get(i2o_dev, 0x0000, 2, &power, 2))
+		i2o_blk_dev->power = power;
 
 	i2o_event_register(i2o_dev, &i2o_block_driver, 0, 0xffffffff);
 
 	add_disk(gd);
 
 	unit++;
+
+	osm_info("device added (TID: %03x): %s\n", i2o_dev->lct_data.tid,
+		 i2o_blk_dev->gd->disk_name);
 
 	return 0;
 
@@ -1169,18 +1156,16 @@ static int __init i2o_block_init(void)
 	/* Allocate request mempool and slab */
 	size = sizeof(struct i2o_block_request);
 	i2o_blk_req_pool.slab = kmem_cache_create("i2o_block_req", size, 0,
-						  SLAB_HWCACHE_ALIGN, NULL,
-						  NULL);
+						  SLAB_HWCACHE_ALIGN, NULL);
 	if (!i2o_blk_req_pool.slab) {
 		osm_err("can't init request slab\n");
 		rc = -ENOMEM;
 		goto exit;
 	}
 
-	i2o_blk_req_pool.pool = mempool_create(I2O_REQ_MEMPOOL_SIZE,
-					       mempool_alloc_slab,
-					       mempool_free_slab,
-					       i2o_blk_req_pool.slab);
+	i2o_blk_req_pool.pool =
+		mempool_create_slab_pool(I2O_BLOCK_REQ_MEMPOOL_SIZE,
+					 i2o_blk_req_pool.slab);
 	if (!i2o_blk_req_pool.pool) {
 		osm_err("can't init request mempool\n");
 		rc = -ENOMEM;

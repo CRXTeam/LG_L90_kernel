@@ -7,7 +7,6 @@
  */
 
 #include <asm/uaccess.h>
-#include <asm/system.h>
 
 #include <linux/time.h>
 #include <linux/kernel.h>
@@ -15,16 +14,14 @@
 #include <linux/fcntl.h>
 #include <linux/stat.h>
 #include <linux/mm.h>
-#include <linux/slab.h>
 #include <linux/vmalloc.h>
-#include <linux/smp_lock.h>
+#include <linux/sched.h>
 
-#include <linux/ncp_fs.h>
-#include "ncplib_kernel.h"
+#include "ncp_fs.h"
 
-static int ncp_fsync(struct file *file, struct dentry *dentry, int datasync)
+static int ncp_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 {
-	return 0;
+	return filemap_write_and_wait_range(file->f_mapping, start, end);
 }
 
 /*
@@ -46,7 +43,7 @@ int ncp_make_open(struct inode *inode, int right)
 		NCP_FINFO(inode)->volNumber, 
 		NCP_FINFO(inode)->dirEntNum);
 	error = -EACCES;
-	down(&NCP_FINFO(inode)->open_sem);
+	mutex_lock(&NCP_FINFO(inode)->open_mutex);
 	if (!atomic_read(&NCP_FINFO(inode)->opened)) {
 		struct ncp_entry_info finfo;
 		int result;
@@ -93,7 +90,7 @@ int ncp_make_open(struct inode *inode, int right)
 	}
 
 out_unlock:
-	up(&NCP_FINFO(inode)->open_sem);
+	mutex_unlock(&NCP_FINFO(inode)->open_mutex);
 out:
 	return error;
 }
@@ -101,7 +98,7 @@ out:
 static ssize_t
 ncp_file_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 {
-	struct dentry *dentry = file->f_dentry;
+	struct dentry *dentry = file->f_path.dentry;
 	struct inode *inode = dentry->d_inode;
 	size_t already_read = 0;
 	off_t pos;
@@ -112,9 +109,6 @@ ncp_file_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 
 	DPRINTK("ncp_file_read: enter %s/%s\n",
 		dentry->d_parent->d_name.name, dentry->d_name.name);
-
-	if (!ncp_conn_valid(NCP_SERVER(inode)))
-		return -EIO;
 
 	pos = *ppos;
 
@@ -182,7 +176,7 @@ outrel:
 static ssize_t
 ncp_file_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
 {
-	struct dentry *dentry = file->f_dentry;
+	struct dentry *dentry = file->f_path.dentry;
 	struct inode *inode = dentry->d_inode;
 	size_t already_written = 0;
 	off_t pos;
@@ -192,18 +186,15 @@ ncp_file_write(struct file *file, const char __user *buf, size_t count, loff_t *
 
 	DPRINTK("ncp_file_write: enter %s/%s\n",
 		dentry->d_parent->d_name.name, dentry->d_name.name);
-	if (!ncp_conn_valid(NCP_SERVER(inode)))
-		return -EIO;
 	if ((ssize_t) count < 0)
 		return -EINVAL;
 	pos = *ppos;
 	if (file->f_flags & O_APPEND) {
-		pos = inode->i_size;
+		pos = i_size_read(inode);
 	}
 
 	if (pos + count > MAX_NON_LFS && !(file->f_flags&O_LARGEFILE)) {
 		if (pos >= MAX_NON_LFS) {
-			send_sig(SIGXFSZ, current, 0);
 			return -EFBIG;
 		}
 		if (count > MAX_NON_LFS - (u32)pos) {
@@ -212,7 +203,6 @@ ncp_file_write(struct file *file, const char __user *buf, size_t count, loff_t *
 	}
 	if (pos >= inode->i_sb->s_maxbytes) {
 		if (count || pos > inode->i_sb->s_maxbytes) {
-			send_sig(SIGXFSZ, current, 0);
 			return -EFBIG;
 		}
 	}
@@ -262,12 +252,15 @@ ncp_file_write(struct file *file, const char __user *buf, size_t count, loff_t *
 	}
 	vfree(bouncebuffer);
 
-	inode_update_time(inode, 1);
+	file_update_time(file);
 
 	*ppos = pos;
 
-	if (pos > inode->i_size) {
-		inode->i_size = pos;
+	if (pos > i_size_read(inode)) {
+		mutex_lock(&inode->i_mutex);
+		if (pos > i_size_read(inode))
+			i_size_write(inode, pos);
+		mutex_unlock(&inode->i_mutex);
 	}
 	DPRINTK("ncp_file_write: exit %s/%s\n",
 		dentry->d_parent->d_name.name, dentry->d_name.name);
@@ -283,18 +276,21 @@ static int ncp_release(struct inode *inode, struct file *file) {
 	return 0;
 }
 
-struct file_operations ncp_file_operations =
+const struct file_operations ncp_file_operations =
 {
-	.llseek		= remote_llseek,
+	.llseek		= generic_file_llseek,
 	.read		= ncp_file_read,
 	.write		= ncp_file_write,
-	.ioctl		= ncp_ioctl,
+	.unlocked_ioctl	= ncp_ioctl,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl	= ncp_compat_ioctl,
+#endif
 	.mmap		= ncp_mmap,
 	.release	= ncp_release,
 	.fsync		= ncp_fsync,
 };
 
-struct inode_operations ncp_file_inode_operations =
+const struct inode_operations ncp_file_inode_operations =
 {
 	.setattr	= ncp_notify_change,
 };

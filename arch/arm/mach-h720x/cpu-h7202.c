@@ -17,9 +17,9 @@
 #include <linux/interrupt.h>
 #include <linux/module.h>
 #include <asm/types.h>
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/irq.h>
-#include <asm/arch/irqs.h>
+#include <mach/irqs.h>
 #include <asm/mach/irq.h>
 #include <asm/mach/time.h>
 #include <linux/device.h>
@@ -90,7 +90,7 @@ static struct plat_serial8250_port serial_platform_data[] = {
 
 static struct platform_device serial_device = {
 	.name			= "serial8250",
-	.id			= 0,
+	.id			= PLAT8250_DEV_PLATFORM,
 	.dev			= {
 		.platform_data	= serial_platform_data,
 	},
@@ -106,29 +106,24 @@ static struct platform_device *devices[] __initdata = {
  * we have to handle all timer interrupts in one place.
  */
 static void
-h7202_timerx_demux_handler(unsigned int irq_unused, struct irqdesc *desc,
-			struct pt_regs *regs)
+h7202_timerx_demux_handler(unsigned int irq_unused, struct irq_desc *desc)
 {
 	unsigned int mask, irq;
 
 	mask = CPU_REG (TIMER_VIRT, TIMER_TOPSTAT);
 
 	if ( mask & TSTAT_T0INT ) {
-		write_seqlock(&xtime_lock);
-		timer_tick(regs);
-		write_sequnlock(&xtime_lock);
+		timer_tick();
 		if( mask == TSTAT_T0INT )
 			return;
 	}
 
 	mask >>= 1;
 	irq = IRQ_TIMER1;
-	desc = irq_desc + irq;
 	while (mask) {
 		if (mask & 1)
-			desc->handle(irq, desc, regs);
+			generic_handle_irq(irq);
 		irq++;
-		desc++;
 		mask >>= 1;
 	}
 }
@@ -137,42 +132,47 @@ h7202_timerx_demux_handler(unsigned int irq_unused, struct irqdesc *desc,
  * Timer interrupt handler
  */
 static irqreturn_t
-h7202_timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+h7202_timer_interrupt(int irq, void *dev_id)
 {
-	h7202_timerx_demux_handler(0, NULL, regs);
+	h7202_timerx_demux_handler(0, NULL);
 	return IRQ_HANDLED;
 }
 
 /*
- * mask multiplexed timer irq's
+ * mask multiplexed timer IRQs
  */
-static void inline mask_timerx_irq (u32 irq)
+static void inline __mask_timerx_irq(unsigned int irq)
 {
 	unsigned int bit;
 	bit = 2 << ((irq == IRQ_TIMER64B) ? 4 : (irq - IRQ_TIMER1));
 	CPU_REG (TIMER_VIRT, TIMER_TOPCTRL) &= ~bit;
 }
 
+static void inline mask_timerx_irq(struct irq_data *d)
+{
+	__mask_timerx_irq(d->irq);
+}
+
 /*
- * unmask multiplexed timer irq's
+ * unmask multiplexed timer IRQs
  */
-static void inline unmask_timerx_irq (u32 irq)
+static void inline unmask_timerx_irq(struct irq_data *d)
 {
 	unsigned int bit;
-	bit = 2 << ((irq == IRQ_TIMER64B) ? 4 : (irq - IRQ_TIMER1));
+	bit = 2 << ((d->irq == IRQ_TIMER64B) ? 4 : (d->irq - IRQ_TIMER1));
 	CPU_REG (TIMER_VIRT, TIMER_TOPCTRL) |= bit;
 }
 
-static struct irqchip h7202_timerx_chip = {
-	.ack = mask_timerx_irq,
-	.mask = mask_timerx_irq,
-	.unmask = unmask_timerx_irq,
+static struct irq_chip h7202_timerx_chip = {
+	.irq_ack = mask_timerx_irq,
+	.irq_mask = mask_timerx_irq,
+	.irq_unmask = unmask_timerx_irq,
 };
 
 static struct irqaction h7202_timer_irq = {
 	.name		= "h7202 Timer Tick",
-	.flags		= SA_INTERRUPT,
-	.handler	= h7202_timer_interrupt
+	.flags		= IRQF_DISABLED | IRQF_TIMER | IRQF_IRQPOLL,
+	.handler	= h7202_timer_interrupt,
 };
 
 /*
@@ -201,12 +201,12 @@ void __init h7202_init_irq (void)
 
 	for (irq = IRQ_TIMER1;
 	                  irq < IRQ_CHAINED_TIMERX(NR_TIMERX_IRQS); irq++) {
-		mask_timerx_irq(irq);
-		set_irq_chip(irq, &h7202_timerx_chip);
-		set_irq_handler(irq, do_edge_IRQ);
+		__mask_timerx_irq(irq);
+		irq_set_chip_and_handler(irq, &h7202_timerx_chip,
+					 handle_edge_irq);
 		set_irq_flags(irq, IRQF_VALID );
 	}
-	set_irq_chained_handler(IRQ_TIMERX, h7202_timerx_demux_handler);
+	irq_set_chained_handler(IRQ_TIMERX, h7202_timerx_demux_handler);
 
 	h720x_init_irq();
 }
